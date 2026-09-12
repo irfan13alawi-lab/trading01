@@ -796,7 +796,7 @@ var COINS = [
   {id:'synthetix-network-token',s:'SNX'}
 ];
 var CG = 'https://api.coingecko.com/api/v3';
-var ALT = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/altme' : 'https://api.alternative.me';
+var ALT = window.location.hostname==='43.156.52.203' ? 'https://43.156.52.203:18085/altme' : 'https://api.alternative.me';
 
 function fP(v) {
   if (v == null) return '--';
@@ -963,7 +963,7 @@ function doRefresh() {
   // FALLBACK: CoinGecko (only if Bitget fails)
   Promise.all([
     // Bitget futures: price + funding + OI + vol in 1 call
-    fetch((window.location.hostname==='43.156.52.203'?'http://43.156.52.203:18085/bitget':'https://api.bitget.com') + '/api/v2/mix/market/tickers?productType=USDT-FUTURES', {cache:'no-store'})
+    fetch((window.location.hostname==='43.156.52.203'?'https://43.156.52.203:18085/bitget':'https://api.bitget.com') + '/api/v2/mix/market/tickers?productType=USDT-FUTURES', {cache:'no-store'})
       .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}),
     // MEXC blocked by Kominfo -- skip, Bitget handles all price data
     Promise.resolve(null),
@@ -2086,7 +2086,7 @@ function fetchOI() {
 
 var BITGET_API = 'https://api.bitget.com/api/v2/mix/market';
 var BINGX_API  = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-var GATE_API   = (window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
+var GATE_API   = (window.location.hostname==='43.156.52.203' ? 'https://43.156.52.203:18085/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
 
 // Symbol maps
 var BITGET_SYMS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','DOT','AVAX',
