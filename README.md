@@ -46,8 +46,9 @@ File utama frontend hanya satu: `Nexora_V4_Clean.html`.
 proxy di VPS (contoh `/home/ubuntu/nexora-proxy/server.js`), lalu restart proses
 Node yang menjalankannya. Endpoint `/healthz` harus menampilkan `ok: true`.
 Proxy mencakup Bitget, BingX, Gate.io, Alternative.me, CoinGecko, dan CoinPaprika.
-Jika folder proxy belum memiliki dependency, salin `package.json` lalu jalankan
-`npm install` satu kali sebelum menjalankan `npm start`.
+Proxy memakai modul bawaan Node.js dengan `node-fetch` sebagai fallback TLS.
+Jalankan `npm install` satu kali di folder proxy, lalu gunakan `node server.js`
+atau `npm start`.
 
 Frontend memakai proxy untuk Bitget, BingX, Gate.io, dan Alternative.me agar
 browser tidak terkena CORS. CoinGecko hanya cadangan karena API publiknya dapat
@@ -65,7 +66,7 @@ README.md               # Dokumentasi ini
 ## Tech Stack
 
 - Pure HTML/CSS/JavaScript (no framework, no build step)
-- Node.js + Express proxy (Node 18+)
+- Node.js built-in HTTP proxy + node-fetch fallback (Node 18+)
 - Highcharts 12.1.2 (CDN)
 - Font Awesome 6.5.0 (CDN)
 
