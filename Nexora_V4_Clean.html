@@ -763,7 +763,8 @@ function toast(msg, type) {
 
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
-  coinId: 'bitcoin', iv: 1,
+  coinId: 'bitcoin', iv: 30,
+  refreshing: false,
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -795,8 +796,12 @@ var COINS = [
   {id:'tron',s:'TRX'},{id:'matic-network',s:'MATIC'},{id:'litecoin',s:'LTC'},
   {id:'synthetix-network-token',s:'SNX'}
 ];
-var CG = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/coingecko/api/v3' : 'https://api.coingecko.com/api/v3';
-var ALT = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/altme' : 'https://api.alternative.me';
+// A dashboard served on port 18084 talks to the adjacent proxy on 18085.
+// This keeps deployment portable if the VPS IP changes.
+var PROXY_BASE = window.location.port === '18084' ? 'http://' + window.location.hostname + ':18085' : '';
+var CG = PROXY_BASE ? PROXY_BASE + '/coingecko/api/v3' : 'https://api.coingecko.com/api/v3';
+var ALT = PROXY_BASE ? PROXY_BASE + '/altme' : 'https://api.alternative.me';
+var CP_API = PROXY_BASE ? PROXY_BASE + '/coinpaprika' : 'https://api.coinpaprika.com';
 
 function fP(v) {
   if (v == null) return '--';
@@ -891,6 +896,26 @@ function apf(url) {
     return r.json();
   });
 }
+var APF_CACHE = {};
+var APF_INFLIGHT = {};
+function apfCached(url, ttl) {
+  var now = Date.now();
+  var hit = APF_CACHE[url];
+  if (hit && now - hit.ts < (ttl || 300000)) return Promise.resolve(hit.data);
+  if (APF_INFLIGHT[url]) return APF_INFLIGHT[url];
+  var req = apf(url).then(function(data) {
+    APF_CACHE[url] = {ts:Date.now(), data:data};
+    return data;
+  });
+  APF_INFLIGHT[url] = req;
+  return req.then(function(data) {
+    delete APF_INFLIGHT[url];
+    return data;
+  }, function(err) {
+    delete APF_INFLIGHT[url];
+    throw err;
+  });
+}
 
 
 // ============================================================
@@ -933,6 +958,7 @@ function buildDemoPairs() {
 }
 
 function doRefresh() {
+  G.refreshing = true;
   setDot('loading'); setUpd('Loading...');
 
   // QW sandbox detection (same as before - localStorage throws in sandbox)
@@ -955,17 +981,18 @@ function doRefresh() {
     renderSigs(demoPairs);
     try { computeTop5(demoPairs); } catch(e) {}
     document.getElementById('scan-ts').textContent = 'Preview mode';
-    sLog('QW sandbox detected - showing demo data. Open in browser for live Bitget/MEXC data.');
+    sLog('QW sandbox detected - showing demo data. Open in browser for live Bitget data.');
+    G.refreshing = false;
     return;
   }
 
-  // PRIMARY: Bitget futures tickers (all pairs, 1 call) + MEXC spot (all, 1 call)
-  // FALLBACK: CoinGecko (only if Bitget fails)
+  // PRIMARY: Bitget futures tickers (all pairs, 1 call).
+  // FALLBACK: CoinGecko only if Bitget is unavailable.
   Promise.all([
     // Bitget futures: price + funding + OI + vol in 1 call
-    fetch((window.location.hostname==='43.156.52.203'?'http://43.156.52.203:18085/bitget':'https://api.bitget.com') + '/api/v2/mix/market/tickers?productType=USDT-FUTURES', {cache:'no-store'})
+    fetch(BITGET_API + '/tickers?productType=USDT-FUTURES', {cache:'no-store'})
       .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}),
-    // MEXC blocked by Kominfo -- skip, Bitget handles all price data
+    // The VPS uses Bitget as the single price source.
     Promise.resolve(null),
     // Fear & Greed (always works)
     apf(ALT + '/fng/?limit=10&format=json'),
@@ -984,11 +1011,11 @@ function doRefresh() {
         if(sym) bitgetMap[sym] = t;
       });
     }
-    var mexcMap = {}; // MEXC blocked by Kominfo - skip
+    var mexcMap = {}; // kept for backwards-compatible fallback fields
 
     // If no data at all, fall back to CoinGecko
     if(!Object.keys(bitgetMap).length && !Object.keys(mexcMap).length) {
-      sLog('Bitget+MEXC failed, falling back to CoinGecko...');
+      sLog('Bitget failed, falling back to CoinGecko...');
       var ids = COINS.map(function(c){return c.id;}).join(',');
       return apf(CG + '/coins/markets?vs_currency=usd&ids=' + ids + '&per_page=100&page=1&sparkline=false&price_change_percentage=24h')
         .then(function(mkts){ return buildPairsFromCG(mkts, fg, news); });
@@ -998,14 +1025,15 @@ function doRefresh() {
     COINS.forEach(function(coin, i) {
       var sym = coin.s;
       var bg  = bitgetMap[sym];
-      // Price: Bitget only (MEXC blocked by Kominfo)
+      var mx  = mexcMap[sym];
+      // Price: Bitget futures
       var price = bg ? nn(bg.lastPr) : 0;
       if(!price) return; // skip if no price data
 
-      // 24h change: Bitget gives -0.013 (decimal), MEXC gives -0.011 (decimal)
+      // Bitget change24h is a decimal, so convert it to percent.
       var chg = bg ? (nn(bg.change24h) * 100) : (mx ? (nn(mx.priceChangePercent) * 100) : 0);
 
-      // Volume: Bitget quoteVolume (USDT), MEXC quoteVolume
+      // Bitget quote volume is already denominated in USDT.
       var vol = bg ? nn(bg.quoteVolume) : (mx ? nn(mx.quoteVolume) : 0);
 
       // Funding: real from Bitget
@@ -1014,7 +1042,9 @@ function doRefresh() {
 
       // OI: from Bitget holdingAmount * markPrice
       var oiRaw = bg ? nn(bg.holdingAmount) * price : 0;
-      var oi    = bg ? parseFloat((chg * 0.35 + (Math.random() - 0.47) * 2).toFixed(2)) : 0;
+      // OI delta is unknown until the derivatives snapshot is enriched below.
+      // Never manufacture a random value that can affect score or tier.
+      var oi    = 0;
 
       var liq = Math.round(Math.abs(chg) * vol * 0.0002);
       var sc  = score44(chg, fund, oi, fundReal, false);
@@ -1037,11 +1067,12 @@ function doRefresh() {
       });
     });
 
-    if(!pairs.length) throw new Error('No pairs built from Bitget/MEXC');
+      if(!pairs.length) throw new Error('No pairs built from Bitget');
     continueRefresh(pairs, fg, news);
 
     } catch(ethen) { sLog('Render error: ' + (ethen.message||ethen)); }
   }).catch(function(e) {
+    G.refreshing = false;
     setDot('err'); setUpd('Error');
     sLog('Fetch error: ' + (e&&e.message||e));
     document.getElementById('tbody').innerHTML = '<tr><td colspan="15"><div class="ld" style="color:#f0883e;"><span>Fetch error. Retrying in 30s...</span></div></td></tr>';
@@ -1054,8 +1085,9 @@ function buildPairsFromCG(mkts, fg, news) {
   if(!Array.isArray(mkts)||!mkts.length) throw new Error('CoinGecko also failed');
   var pairs = mkts.map(function(m, i) {
     var chg  = nn(m.price_change_percentage_24h);
-    var fund = parseFloat((chg * 0.0006 + (Math.random() - 0.5) * 0.012).toFixed(4));
-    var oi   = parseFloat((chg * 0.35 + (Math.random() - 0.47) * 3).toFixed(2));
+    // CoinGecko fallback has no derivatives fields. Keep them explicitly unknown.
+    var fund = 0;
+    var oi   = 0;
     var liq  = Math.round(Math.abs(chg) * nn(m.total_volume) * 0.002);
     var sc   = score44(chg, fund, oi);
     return {
@@ -1074,6 +1106,7 @@ function continueRefresh(pairs, fg, news) {
     try {
 
     G.pairs = pairs;
+    G.refreshing = false;
     document.getElementById('h-cnt').textContent = pairs.length;
     document.getElementById('c-l1').textContent = pairs.filter(function(p){return p.layer==='L1';}).length;
     document.getElementById('c-l2').textContent = pairs.filter(function(p){return p.layer==='L2';}).length;
@@ -1091,15 +1124,18 @@ function continueRefresh(pairs, fg, news) {
     if (at.length) { nb.textContent = at.length; nb.style.display = 'inline'; } else { nb.style.display = 'none'; }
 
     // KPIs
-    // BTC dominance from CoinGecko global (optional, low priority)
-    setTimeout(function(){
-      apf(CG + '/global').then(function(g) {
-        if (g && g.data) {
-          var dom = g.data.market_cap_percentage;
-          if (dom && dom.btc) document.getElementById('h-dom').textContent = dom.btc.toFixed(1) + '%';
-        }
-      }).catch(function(){});
-    }, 5000); // delay 5s to avoid rate limit conflict with main fetches
+    // CoinGecko global is optional. Skip it on the VPS because the public
+    // endpoint is rate-limited there and would only create console noise.
+    if (!PROXY_BASE) {
+      setTimeout(function(){
+        apfCached(CG + '/global', 300000).then(function(g) {
+          if (g && g.data) {
+            var dom = g.data.market_cap_percentage;
+            if (dom && dom.btc) document.getElementById('h-dom').textContent = dom.btc.toFixed(1) + '%';
+          }
+        }).catch(function(){});
+      }, 5000);
+    }
 
     ['BTC','ETH','SOL'].forEach(function(sym, i) {
       var p = fp(sym);
@@ -1128,7 +1164,7 @@ function continueRefresh(pairs, fg, news) {
     loadRSI(G.coinId);
 
     document.getElementById('scan-ts').textContent = 'Last: ' + new Date().toLocaleTimeString('id-ID');
-    document.getElementById('scan-ts').title = 'Price/Vol: CoinGecko | Funding/OI: Binance fapi + Bybit (loading...)';
+    document.getElementById('scan-ts').title = 'Price/Vol/Funding: Bitget | OI: derivatives snapshot (live when available)';
     setDot('ok'); setUpd('Bitget+BingX+Gate | ' + new Date().toLocaleTimeString('id-ID'));
     sLog('Refresh OK -- ' + pairs.length + ' pairs, ' + at.length + ' A-TIER');
     renderWL(); // sync watchlist with live data
@@ -1156,8 +1192,15 @@ function runScan() {
   sLog('=== V4.4 SCAN START ===');
   sLog('Layer 1: fetching top-20 OI pairs...');
   G.derivsTs = 0; // force refresh of derivatives
+  G.pairs = [];
   doRefresh();
-  setTimeout(function() {
+  function finishScan(waited) {
+    if (G.refreshing || !Array.isArray(G.pairs) || !G.pairs.length) {
+      if (waited < 15000) { setTimeout(function(){ finishScan(waited + 500); }, 500); return; }
+      setDot('err'); setUpd('Data belum siap');
+      sLog('Scan dihentikan: data market belum tersedia setelah 15 detik. Klik Refresh dan coba lagi.');
+      return;
+    }
     var gems = G.pairs.filter(function(p){ return p.layer==='L2' && p.fund<0 && p.oi>0; });
     sLog('Layer 2 complete: ' + gems.length + ' hidden gems');
     gems.slice(0,5).forEach(function(g) {
@@ -1168,7 +1211,8 @@ function runScan() {
     if (at.length) {
       toast('<b>' + at.length + ' A-TIER found!</b><br>' + at.slice(0,3).map(function(p){return p.s + ' (' + p.sc + ')';}).join(', '), 'a');
     }
-  }, 1500);
+  }
+  setTimeout(function(){ finishScan(0); }, 500);
 }
 
 function renderFG(data) {
@@ -1266,15 +1310,15 @@ function renderTable() {
     if(hasPaperTrade) sigBadge += ' <span style="font-size:8px;background:rgba(63,185,80,.15);color:#3fb950;border:1px solid rgba(63,185,80,.3);padding:1px 4px;border-radius:3px;">PAPER</span>';
     row += '<td>' + sigBadge + '</td>';
 
-    var p1hStr = p.p1h !== undefined ? '<td class="' + (p.p1h>=0?'up':'dn') + '">' + (p.p1h>=0?'+':'') + (+p.p1h).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
-    var p6hStr = p.p6h !== undefined ? '<td class="' + (p.p6h>=0?'up':'dn') + '">' + (p.p6h>=0?'+':'') + (+p.p6h).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
-    var p7dStr = p.p7d !== undefined ? '<td class="' + (p.p7d>=0?'up':'dn') + '">' + (p.p7d>=0?'+':'') + (+p.p7d).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
-    var athStr = p.athPct !== undefined ? '<td style="color:#e3b341;font-size:10px;">' + (+p.athPct).toFixed(0) + '%</td>' : '<td style="color:#484f58;">-</td>';
+    var p1hStr = p.p1h != null ? '<td class="' + (p.p1h>=0?'up':'dn') + '">' + (p.p1h>=0?'+':'') + (+p.p1h).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
+    var p6hStr = p.p6h != null ? '<td class="' + (p.p6h>=0?'up':'dn') + '">' + (p.p6h>=0?'+':'') + (+p.p6h).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
+    var p7dStr = p.p7d != null ? '<td class="' + (p.p7d>=0?'up':'dn') + '">' + (p.p7d>=0?'+':'') + (+p.p7d).toFixed(1) + '%</td>' : '<td style="color:#484f58;">-</td>';
+    var athStr = p.athPct != null ? '<td style="color:#e3b341;font-size:10px;">' + (+p.athPct).toFixed(0) + '%</td>' : '<td style="color:#484f58;">-</td>';
     row += p1hStr + p6hStr + p7dStr + athStr;
-    var p1hC = p.p1h!==undefined?(p.p1h>=0?'up':'dn'):'';
-    var p4hC = p.p4h!==undefined?(p.p4h>=0?'up':'dn'):'';
-    row += '<td class="'+p1hC+'">'+(p.p1h!==undefined?(p.p1h>=0?'+':'')+p.p1h.toFixed(1)+'%':'-')+'</td>';
-    row += '<td class="'+p4hC+'">'+(p.p4h!==undefined?(p.p4h>=0?'+':'')+p.p4h.toFixed(1)+'%':'-')+'</td>';
+    var p1hC = p.p1h!=null?(p.p1h>=0?'up':'dn'):'';
+    var p4hC = p.p4h!=null?(p.p4h>=0?'up':'dn'):'';
+    row += '<td class="'+p1hC+'">'+(p.p1h!=null?(p.p1h>=0?'+':'')+p.p1h.toFixed(1)+'%':'-')+'</td>';
+    row += '<td class="'+p4hC+'">'+(p.p4h!=null?(p.p4h>=0?'+':'')+p.p4h.toFixed(1)+'%':'-')+'</td>';
     var cp = p.candle;
     var cpCol = !cp?'#484f58':cp.signal==='BUY'?'#3fb950':cp.signal==='SELL'?'#f85149':'#8b949e';
     row += '<td style="color:'+cpCol+';font-size:10px;">'+(cp?cp.pattern:'-')+'</td>';
@@ -1382,9 +1426,10 @@ function onCoinInput(v) {
   }
 }
 function loadCandle(id, days) {
-  apf(CG + '/coins/' + id + '/ohlc?vs_currency=usd&days=' + days).then(function(ohlc) {
-    if (!Array.isArray(ohlc) || !ohlc.length) return;
-    var data = ohlc.map(function(c){ return [+c[0],+c[1],+c[2],+c[3],+c[4]]; });
+  var wanted = parseInt(days,10) || 30;
+  fetchMarketHistory(id, coinSymbolForId(id), wanted).then(function(result) {
+    var data = result.data;
+    if (data.length < 2) throw new Error('Not enough candles');
     if (G.charts.ohlc) { try { G.charts.ohlc.destroy(); } catch(e){} }
     G.charts.ohlc = hcStock('c-ohlc', {
       chart:{backgroundColor:'transparent',style:{fontFamily:'inherit'},margin:[10,10,30,60]},
@@ -1397,7 +1442,10 @@ function loadCandle(id, days) {
       series:[{type:'candlestick',name:id,data:data,dataGrouping:{enabled:false}}],
       credits:{enabled:false}
     });
-  }).catch(function(){});
+    sLog('Chart '+id+' loaded '+data.length+' candles from '+result.source+'.');
+  }).catch(function(e){
+    sLog('Chart '+id+' unavailable: '+(e.message||e));
+  });
 }
 
 function sInd(t, btn) {
@@ -1425,9 +1473,10 @@ function calcEMA(d, n) {
 }
 
 function loadRSI(id) {
-  apf(CG + '/coins/' + id + '/market_chart?vs_currency=usd&days=90&interval=daily').then(function(data) {
-    if (!data || !data.prices) return;
-    var pr = data.prices, c = pr.map(function(p){return p[1];}), t = pr.map(function(p){return p[0];});
+  fetchMarketHistory(id, coinSymbolForId(id), 120).then(function(result) {
+    var data = result.data;
+    if (data.length < 40) throw new Error('Not enough candles for RSI/MACD');
+    var c = data.map(function(p){return p[4];}), t = data.map(function(p){return p[0];});
     var ra = calcRSI(c, 14), rd = ra.map(function(v,i){ return [t[i+14], v]; });
     if (G.charts.rsi) { try { G.charts.rsi.destroy(); } catch(e){} }
     G.charts.rsi = hcChart('c-rsi', {
@@ -1454,12 +1503,15 @@ function loadRSI(id) {
       tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},shared:true},
       series:[
         {name:'MACD',type:'line',data:macd.slice(8).map(function(v,i){return[tb[i],v];}),color:'#58a6ff',lineWidth:1.5,marker:{enabled:false}},
-        {name:'Sig',type:'line',data:sig2.map(function(v,i){return[tb[i],v];}),color:'#e3b341',lineWidth:1,dashStyle:'dash',marker:{enabled:false}},
+        {name:'Sig',type:'line',data:sig2.slice(8).map(function(v,i){return[tb[i],v];}),color:'#e3b341',lineWidth:1,dashStyle:'dash',marker:{enabled:false}},
         {name:'Hist',type:'column',data:hist.map(function(v,i){return {x:tb[i],y:v,color:v>=0?'#3fb950':'#f85149'};}),borderWidth:0}
       ],
       legend:{enabled:false},credits:{enabled:false}
     });
-  }).catch(function(){});
+    sLog('RSI/MACD '+id+' loaded from '+result.source+'.');
+  }).catch(function(e){
+    sLog('RSI/MACD '+id+' unavailable: '+(e.message||e));
+  });
 }
 
 function renderPump() {
@@ -1999,7 +2051,7 @@ function renderOIFromDeriv() {
   var rows = [];
   pairs.slice(0, 25).forEach(function(p) {
     var sym = p.s + 'USDT';
-    var d = G.derivs[sym] || {};
+    var d = G.derivs[p.s] || {};
     var oiUSD = d.oi ? '$' + (d.oi / 1e9).toFixed(2) + 'B' : fV(p.vol * 0.8);
     var fundSrc = d.src ? ' <span style="font-size:8px;color:#3fb950;">' + d.src + '</span>' : '';
     var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
@@ -2018,7 +2070,7 @@ function renderOIFromDeriv() {
   var ladder = [];
   sorted.slice(0, 20).forEach(function(p) {
     var sym2 = p.s + 'USDT';
-    var d2 = G.derivs[sym2] || {};
+    var d2 = G.derivs[p.s] || {};
     var col = p.fund < 0 ? '#3fb950' : p.fund > 0.01 ? '#f85149' : '#8b949e';
     var bw = Math.min(100, Math.abs(p.fund) * 2000);
     var srcTag = (d2 && d2.src) ? '<span style="font-size:8px;color:' + col + ';margin-left:4px;">' + d2.src + '</span>' : '<span style="font-size:8px;color:#484f58;margin-left:4px;">est</span>';
@@ -2084,9 +2136,87 @@ function fetchOI() {
 //   Gate.io: BTC funding_rate=0.000015, SOL funding_rate=0.000013
 // ============================================================
 
-var BITGET_API = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/bitget/api/v2/mix/market' : 'https://api.bitget.com/api/v2/mix/market';
-var BINGX_API  = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/bingx/openApi/swap/v2/quote' : 'https://open-api.bingx.com/openApi/swap/v2/quote';
-var GATE_API   = (window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
+var BITGET_API = PROXY_BASE ? PROXY_BASE + '/bitget/api/v2/mix/market' : 'https://api.bitget.com/api/v2/mix/market';
+var BINGX_API  = PROXY_BASE ? PROXY_BASE + '/bingx/openApi/swap/v2/quote' : 'https://open-api.bingx.com/openApi/swap/v2/quote';
+var GATE_API   = (PROXY_BASE ? PROXY_BASE + '/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
+
+// Normalise exchange candles into [timestamp, open, high, low, close, volume, quoteVolume].
+// Bitget may return the newest candle first, while chart libraries expect ascending time.
+var BITGET_CANDLE_CACHE = {};
+function normaliseCandles(rows) {
+  if (!Array.isArray(rows)) return [];
+  var seen = {};
+  return rows.map(function(k) {
+    return [parseInt(k[0],10), parseFloat(k[1]), parseFloat(k[2]), parseFloat(k[3]), parseFloat(k[4]), parseFloat(k[5])||0, parseFloat(k[6])||0];
+  }).filter(function(k) {
+    return Number.isFinite(k[0]) && k[0] > 0 && k[2] >= k[3] && k[4] > 0;
+  }).filter(function(k) {
+    if (seen[k[0]]) return false;
+    seen[k[0]] = true;
+    return true;
+  }).sort(function(a,b){ return a[0]-b[0]; });
+}
+function fetchBitgetCandles(sym, granularity, limit) {
+  var key = sym + ':' + granularity + ':' + limit;
+  var now = Date.now();
+  var cached = BITGET_CANDLE_CACHE[key];
+  if (cached && now - cached.ts < 60000) return Promise.resolve(cached.data);
+  var url = BITGET_API + '/candles?productType=USDT-FUTURES&symbol=' + encodeURIComponent(sym + 'USDT')
+    + '&granularity=' + encodeURIComponent(granularity) + '&limit=' + encodeURIComponent(limit || 100);
+  return fetch(url, {cache:'no-store'}).then(function(r) {
+    if (!r.ok) throw new Error('Bitget candles HTTP ' + r.status);
+    return r.json();
+  }).then(function(d) {
+    if (!d || d.code !== '00000') throw new Error((d && d.msg) || 'Bitget candles response invalid');
+    var data = normaliseCandles(d.data);
+    if (!data.length) throw new Error('Bitget candles empty for ' + sym + ' ' + granularity);
+    BITGET_CANDLE_CACHE[key] = {ts:Date.now(), data:data};
+    return data;
+  });
+}
+
+function coinSymbolForId(id) {
+  for (var i=0; i<COINS.length; i++) {
+    if (COINS[i].id === id) return COINS[i].s;
+  }
+  return '';
+}
+
+function normaliseOhlc(rows) {
+  if (!Array.isArray(rows)) return [];
+  var seen = {};
+  return rows.map(function(k) {
+    return [parseInt(k[0],10), parseFloat(k[1]), parseFloat(k[2]), parseFloat(k[3]), parseFloat(k[4])];
+  }).filter(function(k) {
+    return Number.isFinite(k[0]) && k[0] > 0 &&
+      Number.isFinite(k[1]) && Number.isFinite(k[2]) && Number.isFinite(k[3]) && Number.isFinite(k[4]) &&
+      k[2] >= k[3] && k[4] > 0;
+  }).filter(function(k) {
+    if (seen[k[0]]) return false;
+    seen[k[0]] = true;
+    return true;
+  }).sort(function(a,b){ return a[0]-b[0]; });
+}
+
+// Use Bitget daily candles first. CoinGecko is only a fallback for symbols
+// that do not have a futures market or when the exchange endpoint is down.
+function fetchMarketHistory(coinId, sym, days) {
+  var symbol = sym || coinSymbolForId(coinId);
+  var wanted = Math.max(2, Math.min(1000, parseInt(days,10) || 30));
+  var primary = symbol ? fetchBitgetCandles(symbol, '1D', wanted).then(function(rows){
+    return {data:normaliseOhlc(rows), source:'Bitget'};
+  }) : Promise.reject(new Error('Unknown symbol for '+coinId));
+  return primary.then(function(result) {
+    if (result.data.length < 2) throw new Error('Bitget history empty for '+symbol);
+    return result;
+  }).catch(function() {
+    return apfCached(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + wanted, 300000).then(function(rows){
+      var data = normaliseOhlc(rows);
+      if (data.length < 2) throw new Error('CoinGecko history empty for '+coinId);
+      return {data:data, source:'CoinGecko'};
+    });
+  });
+}
 
 // Symbol maps
 var BITGET_SYMS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','DOT','AVAX',
@@ -2277,6 +2407,14 @@ function enrichPairsWithDerivatives() {
     if (fh) fh.innerHTML = 'FUNDING <span style="font-size:8px;color:#3fb950;">LIVE</span>';
     renderTable();
     renderSigs(G.pairs);
+    document.getElementById('c-l1').textContent = G.pairs.filter(function(x){return x.tier==='A';}).length;
+    document.getElementById('c-l2').textContent = G.pairs.filter(function(x){return x.tier==='B';}).length;
+    document.getElementById('c-tot').textContent = G.pairs.length;
+    var updatedAt = G.pairs.filter(function(x){return x.tier==='A';}).length;
+    var badge = document.getElementById('nb');
+    if (badge) { badge.textContent = updatedAt; badge.style.display = updatedAt ? 'inline' : 'none'; }
+    try { renderFund(G.pairs); renderOI(G.pairs); renderVol(G.pairs); } catch(e) {}
+    try { computeTop5(G.pairs); } catch(e) {}
     try { renderPositionsWidget(); } catch(e) {}
     renderWL();
 
@@ -2336,7 +2474,7 @@ function requestNotifPermission() {
 // ============================================================
 // UPGRADE 1: CANDLE PATTERN RECOGNITION
 // Calculates Hammer, Engulf, Doji, Shooting Star from OHLC data
-// Uses CoinGecko /ohlc endpoint (already used for charts)
+// Uses the same Bitget history path as the chart, with CoinGecko fallback.
 // ============================================================
 var CANDLE_CACHE = {}; // { 'BTC': { pattern, signal, ts } }
 
@@ -2386,11 +2524,11 @@ function fetchCandlePattern(coinId, sym) {
   if (CANDLE_CACHE[sym] && now - CANDLE_CACHE[sym].ts < 300000) {
     return Promise.resolve(CANDLE_CACHE[sym]);
   }
-  return fetch(CG + '/coins/'+coinId+'/ohlc?vs_currency=usd&days=3',{cache:'no-store'})
-    .then(function(r){return r.ok?r.json():null;})
-    .then(function(data){
-      var result = detectCandlePattern(data);
+  return fetchMarketHistory(coinId, sym, 3)
+    .then(function(history){
+      var result = detectCandlePattern(history.data);
       result.ts = Date.now();
+      result.source = history.source;
       CANDLE_CACHE[sym] = result;
       return result;
     })
@@ -2428,18 +2566,17 @@ function calcEMAFromData(prices, n) {
 function fetchEMALevels(coinId, sym) {
   var now = Date.now();
   if(EMA_CACHE[sym] && now-EMA_CACHE[sym].ts<300000) return Promise.resolve(EMA_CACHE[sym]);
-  return fetch(CG + '/coins/'+coinId+'/market_chart?vs_currency=usd&days=60&interval=daily',{cache:'no-store'})
-    .then(function(r){return r.ok?r.json():null;})
-    .then(function(data){
-      if(!data||!data.prices) return null;
-      var prices = data.prices.map(function(p){return p[1];});
+  return fetchMarketHistory(coinId, sym, 60)
+    .then(function(history){
+      if(!history || !history.data || history.data.length < 50) return null;
+      var prices = history.data.map(function(p){return p[4];});
       var ema21 = calcEMAFromData(prices,21);
       var ema50 = calcEMAFromData(prices,50);
       var last21 = ema21[ema21.length-1];
       var last50 = ema50[ema50.length-1];
       var result = {
         ema21: last21, ema50: last50, ts: Date.now(),
-        priceVsEma21: null, priceVsEma50: null
+        priceVsEma21: null, priceVsEma50: null, source: history.source
       };
       EMA_CACHE[sym] = result;
       return result;
@@ -2489,7 +2626,7 @@ function detectVolSpikes(pairs) {
   });
   if(spikes.length>0) {
     spikes.forEach(function(p){
-      sLog('VOL SPIKE: '+p.s+' vol='+vs.ratio+'x avg ('+p.tier+')');
+      sLog('VOL SPIKE: '+p.s+' vol='+p.volSpike.ratio+'x avg ('+p.tier+')');
       toast('<b style="color:#f0883e;">Vol Spike: '+p.s+' '+p.volSpike.ratio+'x avg</b> - watch for breakout','a');
     });
   }
@@ -2530,25 +2667,20 @@ function estimateLiquidation(vol, chg, price) {
 }
 
 // ============================================================
-// UPGRADE 6: MULTI-TF % FROM MEXC (Indonesia-accessible, no key)
-// MEXC /api/v3/klines?symbol=BTCUSDT&interval=1h&limit=6 (6h candles)
-// Already confirmed working from Indonesia
+// UPGRADE 6: MULTI-TF % FROM BITGET futures candles
+// Uses the same exchange family as the live price/funding feed.
 // ============================================================
 var MTF_CACHE = {};
 
-function fetchMTFFromMEXC(sym) {
+function fetchMTFFromBitget(sym) {
   var now = Date.now();
   if(MTF_CACHE[sym] && now-MTF_CACHE[sym].ts<120000) return Promise.resolve(MTF_CACHE[sym]);
 
-  var symbol = sym+'USDT';
-  // Fetch 1h klines (limit=6 = last 6h, limit=24 = last 24h)
+  // Fetch completed 1H, 4H and 1D candles for the MTF percentage cards.
   return Promise.all([
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];}),
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];}),
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];})
+    fetchBitgetCandles(sym, '1H', 6).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '4H', 6).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '1D', 7).catch(function(){return [];} )
   ]).then(function(res){
     var h1data=res[0], h4data=res[1], d1data=res[2];
     var result = {ts: Date.now(), p1h:null, p4h:null, p7d:null};
@@ -2579,11 +2711,11 @@ function fetchTopMTF() {
   var top = G.pairs.filter(function(p){return p.tier==='A'||p.tier==='B';}).slice(0,8);
   top.forEach(function(p,i){
     setTimeout(function(){
-      fetchMTFFromMEXC(p.s).then(function(mtf){
-        p.p1h  = mtf.p1h;
-        p.p4h  = mtf.p4h;
-        p.p7d  = mtf.p7d;
-        p.mtfReal = true;
+      fetchMTFFromBitget(p.s).then(function(mtf){
+        p.p1h  = mtf.p1h == null ? undefined : mtf.p1h;
+        p.p4h  = mtf.p4h == null ? undefined : mtf.p4h;
+        p.p7d  = mtf.p7d == null ? undefined : mtf.p7d;
+        p.mtfReal = mtf.p1h !== null || mtf.p4h !== null || mtf.p7d !== null;
       }).catch(function(){});
     }, i*300);
   });
@@ -2610,14 +2742,14 @@ function runAllUpgrades(pairs) {
     fetchTopCandlePatterns();
   }, 2000);
 
-  // Multi-TF from MEXC (async, staggered)
+  // Multi-TF from Bitget (async, staggered)
   setTimeout(function(){
     fetchTopMTF();
     setTimeout(function(){
       // Re-render table after MTF data arrives
       if(G.pairs.some(function(p){return p.p1h!==undefined;})){
         renderTable();
-        sLog('MTF data loaded from MEXC (1H/4H/7D)');
+        sLog('MTF data loaded from Bitget (1H/4H/7D)');
       }
     }, 8000);
   }, 4000);
@@ -2627,7 +2759,7 @@ function runAllUpgrades(pairs) {
 // ============================================================
 // MTF CASCADE ANALYSIS ENGINE
 // D1 -> H4 -> H1 -> M15 (SOP V4.3 methodology)
-// Data: CoinGecko OHLC (D1, 7D) + MEXC klines (H4, H1, M15)
+// Data: Bitget futures candles for D1/H4/H1/M15
 // ============================================================
 
 function analyzeMTFCascade(coinId, sym, dir, mode) {
@@ -2635,21 +2767,11 @@ function analyzeMTFCascade(coinId, sym, dir, mode) {
   mode = mode || 'A';
 
   return Promise.all([
-    // D1: CoinGecko 30-day OHLC (1 candle = 1 day)
-    fetch(CG + '/coins/'+coinId+'/ohlc?vs_currency=usd&days=30',{cache:'no-store'})
-      .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
-
-    // H4: MEXC klines 4h, last 20 candles
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
-
-    // H1: MEXC klines 1h, last 24 candles
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
-
-    // M15: MEXC klines 15m, last 16 candles
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];})
+    // Use one exchange and explicit intervals so D1/H4/H1/M15 are comparable.
+    fetchBitgetCandles(sym, '1D', 40).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '4H', 20).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '1H', 24).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '15m', 16).catch(function(){return [];})
 
   ]).then(function(res) {
     var d1Data=res[0], h4Data=res[1], h1Data=res[2], m15Data=res[3];
@@ -2665,13 +2787,19 @@ function analyzeMTFCascade(coinId, sym, dir, mode) {
     result.summary = buildSummary(result, dir, mode);
     return result;
   }).catch(function(e) {
-    return { d1:null, h4:null, h1:null, m15:null, summary:{status:'ERROR',msg:'Data unavailable: '+e.message} };
+    return {
+      d1: analyzeD1([], dir, mode),
+      h4: analyzeTF([], 'H4', dir),
+      h1: analyzeTF([], 'H1', dir),
+      m15: analyzeTF([], 'M15', dir),
+      summary:{status:'DATA ERROR', color:'#f85149', goCount:0, abortCount:0, msg:'Data unavailable: '+(e.message||e), action:'Retry after the market data service recovers.'}
+    };
   });
 }
 
-// Analyze D1 timeframe (uses CoinGecko OHLC format [ts,o,h,l,c])
+// Analyze D1 timeframe ([ts,o,h,l,c] normalized from Bitget candles)
 function analyzeD1(ohlc, dir, mode) {
-  if(!ohlc||ohlc.length<10) return {status:'NO_DATA',verdict:'UNKNOWN',detail:''};
+  if(!ohlc||ohlc.length<10) return {status:'NO_DATA',verdict:'UNKNOWN',tf:'D1',color:'#8b949e',detail:'No candle data',role:'Direction - waiting for data'};
 
   var closes  = ohlc.map(function(c){return c[4];});
   var highs   = ohlc.map(function(c){return c[2];});
@@ -2736,9 +2864,9 @@ function analyzeD1(ohlc, dir, mode) {
   };
 }
 
-// Analyze H4/H1/M15 (MEXC klines format: [ts,o,h,l,c,vol,...])
+// Analyze H4/H1/M15 (Bitget candle format: [ts,o,h,l,c,vol,...])
 function analyzeTF(klines, tf, dir) {
-  if(!klines||klines.length<5) return {status:'NO_DATA',verdict:'UNKNOWN',tf:tf,detail:'Fetch failed'};
+  if(!klines||klines.length<5) return {status:'NO_DATA',verdict:'UNKNOWN',tf:tf,color:'#8b949e',detail:'No candle data',role:'Waiting for data'};
 
   var closes = klines.map(function(k){return parseFloat(k[4]);});
   var highs  = klines.map(function(k){return parseFloat(k[2]);});
@@ -2851,16 +2979,18 @@ function renderMTFAnalysis(mtf, containerId) {
   var html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px;">';
   tfs.forEach(function(tf) {
     if(!tf) { html += '<div style="background:#161b25;border-radius:6px;padding:8px;text-align:center;"><div style="color:#484f58;">No data</div></div>'; return; }
+    var tfColor = tf.color || '#8b949e';
+    var tfDetail = tf.detail || 'No candle data';
     var interval = tfIntervals[tf.tf]||'240';
-    html += '<div style="background:#0d1117;border:1px solid '+tf.color+'33;border-radius:6px;padding:8px;border-top:3px solid '+tf.color+';">';
+    html += '<div style="background:#0d1117;border:1px solid '+tfColor+'33;border-radius:6px;padding:8px;border-top:3px solid '+tfColor+';">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
-    html += '<b style="font-size:13px;color:'+tf.color+';">'+tf.tf+'</b>';
+    html += '<b style="font-size:13px;color:'+tfColor+';">'+tf.tf+'</b>';
     html += '<a href="https://gocharting.com/?ticker=BINANCE:'+sym+'USDT&interval='+interval+'" target="_blank" style="color:#484f58;font-size:9px;text-decoration:none;">chart &rarr;</a>';
     html += '</div>';
     html += '<div style="font-size:10px;color:#484f58;margin-bottom:4px;">'+tf.role+'</div>';
-    html += '<div style="font-size:12px;font-weight:700;color:'+tf.color+';margin-bottom:5px;">'+tf.verdict+'</div>';
+    html += '<div style="font-size:12px;font-weight:700;color:'+tfColor+';margin-bottom:5px;">'+(tf.verdict||'NO_DATA')+'</div>';
     // Detail lines
-    var details = tf.detail.split(' | ');
+    var details = tfDetail.split(' | ');
     html += '<div style="font-size:10px;color:#8b949e;line-height:1.8;">';
     details.forEach(function(d){ html += '<div>'+d+'</div>'; });
     html += '</div>';
@@ -2893,6 +3023,80 @@ function renderMTFAnalysis(mtf, containerId) {
   }
 
   el.innerHTML = html;
+}
+
+// Render the H4 gate as an explicit checklist so an empty card never looks like
+// a missing feature and the trader can see exactly why the H4 result passed or failed.
+function renderH4Checklist(mtf) {
+  var el = document.getElementById('p2-h4-checklist');
+  if(!el) return;
+  if(!mtf || !mtf.h4) {
+    el.innerHTML = '<div style="color:#8b949e;font-size:10px;padding:8px 0;">Menunggu data H4...</div>';
+    return;
+  }
+  var h4 = mtf.h4;
+  var d1 = mtf.d1;
+  if(h4.verdict === 'UNKNOWN') {
+    el.innerHTML = '<div style="color:#8b949e;font-size:10px;padding:8px 0;">Data candle H4 belum tersedia. Tekan Refresh setelah layanan data pulih.</div>';
+    return;
+  }
+  var dir = P2.data && P2.data.dir === 'SHORT' ? 'SHORT' : 'LONG';
+  var detail = h4.detail || '';
+  var structureText = dir === 'SHORT' ? 'LH+LL ok' : 'HH+HL ok';
+  var emaText = dir === 'SHORT' ? 'Below EMA' : 'Above EMA';
+  var patternOk = !!(h4.pattern && h4.pattern.signal === (dir === 'SHORT' ? 'SELL' : 'BUY'));
+  var volumeOk = parseFloat(h4.volRatio) >= 1.2;
+  var rows = [
+    {label:'H4 verdict', ok:h4.verdict === 'GO', note:h4.verdict},
+    {label:'Arah terhadap EMA21', ok:detail.indexOf(emaText) >= 0, note:detail.indexOf(emaText) >= 0 ? emaText : 'Belum sesuai arah '+dir},
+    {label:'Struktur market', ok:detail.indexOf(structureText) >= 0, note:detail.indexOf(structureText) >= 0 ? structureText : 'Struktur belum terkonfirmasi'},
+    {label:'Pattern candle', ok:patternOk, note:h4.pattern && h4.pattern.pattern ? h4.pattern.pattern+' ('+(h4.pattern.signal||'NEUTRAL')+')' : 'Belum ada pattern'},
+    {label:'Volume confirmation', ok:volumeOk, note:(h4.volRatio || '0')+'x rata-rata (target ≥1.2x)'},
+    {label:'D1 tidak melawan setup', ok:!!(d1 && d1.verdict !== 'ABORT' && d1.verdict !== 'UNKNOWN'), note:d1 ? 'D1 '+d1.verdict : 'D1 belum tersedia'}
+  ];
+  var html = '<div style="font-size:10px;color:#8b949e;margin-bottom:8px;">Gate H4 untuk posisi <b style="color:'+(dir==='SHORT'?'#f85149':'#3fb950')+';">'+dir+'</b></div>';
+  rows.forEach(function(row){
+    var col = row.ok ? '#3fb950' : '#f0883e';
+    var icon = row.ok ? '&#10003;' : '&#9679;';
+    html += '<div style="display:flex;align-items:flex-start;gap:7px;padding:6px 0;border-bottom:1px solid #21262d;">';
+    html += '<span style="color:'+col+';font-weight:700;width:12px;">'+icon+'</span>';
+    html += '<div><div style="font-size:10px;color:#c9d1d9;">'+row.label+'</div><div style="font-size:9px;color:'+col+';margin-top:2px;">'+row.note+'</div></div>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+// The MTF result is authoritative. Update the final decision panel after the
+// candle analysis completes so it cannot disagree with the header verdict.
+function renderP2DecisionFromMTF(mtf) {
+  if(!mtf || !mtf.summary || !P2.data) return;
+  var el = document.getElementById('p2-decision');
+  if(!el) return;
+  var s = mtf.summary;
+  var p = P2.data.p;
+  var dir = P2.data.dir || 'LONG';
+  var setup = P2.data.setup || generateBestSetup(p, mtf, dir);
+  function money(v) {
+    if(v===undefined||v===null||isNaN(v)) return '--';
+    return v>=1000 ? '$'+Math.round(v).toLocaleString('en') : '$'+v.toFixed(v>=1?3:6);
+  }
+  var lines = [];
+  lines.push(s.action || 'Tunggu konfirmasi candle berikutnya.');
+  if(s.status === 'ENTRY NOW' && setup) {
+    lines.push('Set SL at '+money(setup.sl.price)+' ('+(dir==='SHORT'?'+':'-')+setup.sl.pct+'%)');
+    lines.push('Set TP1 at '+money(setup.tp.tp1)+' ('+(dir==='SHORT'?'-':'+')+setup.tp.tp1Pct+'%, 2R)');
+  } else if(s.status === 'ABORT' || s.status === 'SKIP') {
+    lines.push('Jangan entry dan jangan mengejar harga. Tunggu setup baru.');
+  } else {
+    lines.push('Jangan entry dulu; tunggu H1/H4 memberikan konfirmasi berikutnya.');
+  }
+  el.innerHTML =
+    '<div style="font-size:22px;font-weight:800;color:'+s.color+';text-align:center;padding:10px 0;">'+s.status+'</div>'
+    + '<div style="font-size:11px;color:#8b949e;text-align:center;margin-bottom:10px;">MTF final: '+s.goCount+'/4 TF aligned'+(s.abortCount ? ' | '+s.abortCount+' ABORT' : '')+'</div>'
+    + '<div style="font-size:11px;color:#c9d1d9;text-align:center;margin-bottom:10px;">'+s.msg+'</div>'
+    + '<div style="background:#161b25;border-radius:6px;padding:8px 10px;font-size:10px;line-height:2.2;color:#c9d1d9;">'
+    + lines.map(function(line){ return '<div style="display:flex;gap:6px;"><span style="color:'+s.color+'">&#9658;</span>'+line+'</div>'; }).join('')
+    + '</div>';
 }
 
 
@@ -3003,7 +3207,7 @@ function analyzeOrderFlow(pair) {
 function generateBestSetup(pair, mtfResult, dir) {
   var p = pair;
   if(!p||!p.price) return null;
-  dir = dir || (p.chg >= 0 ? 'LONG' : 'LONG'); // default LONG (bias)
+  dir = dir === 'SHORT' ? 'SHORT' : 'LONG';
   var price = p.price;
 
   // ---- Setup Mode Selection ----
@@ -3028,38 +3232,51 @@ function generateBestSetup(pair, mtfResult, dir) {
   var atr = price * 0.025; // approximate 2.5% ATR
 
   if(mode === 'C') {
-    entryLow  = Math.max(ema21 * 0.99, price * 0.985);
-    entryHigh = price * 1.005;
-    entryReason = 'Enter near EMA21 ($' + ema21.toFixed(3) + ') on pullback. Wait for H1 trigger candle.';
+    if (dir === 'SHORT') {
+      entryLow  = price * 0.995;
+      entryHigh = Math.min(price * 1.005, Math.max(entryLow, ema21 * 1.01));
+      entryReason = 'Short near EMA21 ($' + ema21.toFixed(3) + ') on a pullback. Wait for H1 bearish trigger candle.';
+    } else {
+      entryLow  = Math.max(ema21 * 0.99, price * 0.985);
+      entryHigh = price * 1.005;
+      entryReason = 'Enter near EMA21 ($' + ema21.toFixed(3) + ') on pullback. Wait for H1 bullish trigger candle.';
+    }
   } else {
     entryLow  = price * 0.99;
     entryHigh = price * 1.01;
-    entryReason = 'Enter at current zone after confirmation. Volume must be > 1.5x avg.';
+    entryReason = (dir === 'SHORT' ? 'Short at the current zone after bearish confirmation.' : 'Enter at current zone after bullish confirmation.') + ' Volume must be > 1.5x avg.';
   }
 
   // ---- Stop Loss ----
-  // Below swing low or below EMA21 - 1 ATR
+  // Put the stop on the invalidation side of the trade direction.
   var sl, slReason, slPct;
-  sl     = Math.min(ema21 * 0.975, price * 0.97);
-  slPct  = ((price - sl) / price * 100).toFixed(2);
-  slReason = 'SL below EMA21 (-1 ATR). Invalidation: close below $' + sl.toFixed(3) + ' ('+slPct+'% from entry)';
+  if (dir === 'SHORT') {
+    sl     = Math.max(ema21 * 1.025, price * 1.03);
+    slPct  = ((sl - price) / price * 100).toFixed(2);
+    slReason = 'SL above EMA21 (+1 ATR). Invalidation: close above $' + sl.toFixed(3) + ' ('+slPct+'% from entry)';
+  } else {
+    sl     = Math.min(ema21 * 0.975, price * 0.97);
+    slPct  = ((price - sl) / price * 100).toFixed(2);
+    slReason = 'SL below EMA21 (-1 ATR). Invalidation: close below $' + sl.toFixed(3) + ' ('+slPct+'% from entry)';
+  }
 
   // ---- Take Profit Levels ----
   var slDist = price - sl;
-  var tp1 = price + slDist * 2;      // 2R
-  var tp2 = price + slDist * 3.5;    // 3.5R
-  var tp3 = price + slDist * 5;      // 5R (runner)
+  if (dir === 'SHORT') slDist = sl - price;
+  var tp1 = dir === 'SHORT' ? price - slDist * 2 : price + slDist * 2;
+  var tp2 = dir === 'SHORT' ? price - slDist * 3.5 : price + slDist * 3.5;
+  var tp3 = dir === 'SHORT' ? price - slDist * 5 : price + slDist * 5;
   var tp1Pct = (slDist * 2 / price * 100).toFixed(2);
   var tp2Pct = (slDist * 3.5 / price * 100).toFixed(2);
 
   // ---- Confidence Score ----
   var conf = 0;
-  if(p.fund < 0) conf += 20;
+  if((dir === 'SHORT' && p.fund > 0) || (dir === 'LONG' && p.fund < 0)) conf += 20;
   if(p.oi > 0) conf += 15;
   if(Math.abs(p.chg) <= 3.5) conf += 15;
   if(p.sc >= 7.5) conf += 20;
   var cp = p.candle;
-  if(cp && cp.signal === 'BUY') conf += 15;
+  if(cp && cp.signal === (dir === 'SHORT' ? 'SELL' : 'BUY')) conf += 15;
   if(mtfResult && mtfResult.summary) {
     var gos = mtfResult.summary.goCount || 0;
     conf += gos * 5;
@@ -3068,13 +3285,17 @@ function generateBestSetup(pair, mtfResult, dir) {
 
   // ---- Invalidation Conditions ----
   var invalidations = [];
-  invalidations.push('Candle close below $' + sl.toFixed(3) + ' = immediate exit');
-  invalidations.push('Funding rises above +0.010% = thesis broken (too crowded)');
+  invalidations.push(dir === 'SHORT' ? 'Candle close above $' + sl.toFixed(3) + ' = immediate exit' : 'Candle close below $' + sl.toFixed(3) + ' = immediate exit');
+  invalidations.push(dir === 'SHORT' ? 'Funding falls below -0.010% = short side too crowded' : 'Funding rises above +0.010% = long thesis too crowded');
   if(p.oi < 0) invalidations.push('OI continues to decline = position unwinding, exit');
   invalidations.push('BTC drops below key support = correlation risk, reduce size');
 
   // ---- Trigger Candle (H1) ----
-  var triggerCandleByMode = {
+  var triggerCandleByMode = dir === 'SHORT' ? {
+    A:'Shooting Star or Bearish Engulfing at supply zone with volume > 1.5x avg',
+    B:'Strong bearish candle closing below retest level with volume confirmation',
+    C:'Rejection candle at EMA21 (wick touching EMA, body below) or Doji reversal'
+  } : {
     A:'Hammer or Bullish Engulfing at demand zone with volume > 1.5x avg',
     B:'Strong bullish candle closing above retest level with volume confirmation',
     C:'Rejection candle at EMA21 (wick touching EMA, body above) or Doji reversal'
@@ -3082,16 +3303,16 @@ function generateBestSetup(pair, mtfResult, dir) {
 
   // ---- Reasons to enter ----
   var reasonsFor = [];
-  if(p.fund < 0) reasonsFor.push('Funding negative ('+( p.fund*100).toFixed(4)+'%) = shorts paying longs = bullish pressure');
+  if((dir === 'SHORT' && p.fund > 0) || (dir === 'LONG' && p.fund < 0)) reasonsFor.push('Funding supports '+dir+' ('+( p.fund*100).toFixed(4)+'%)');
   if(p.oi > 0)  reasonsFor.push('OI rising = fresh money entering = trend continuation likely');
   if(p.sc >= 7.5) reasonsFor.push('V4.4 Score '+p.sc+'/12 = strong confluence');
   if(Math.abs(p.chg) <= 2) reasonsFor.push('Price not extended ('+p.chg.toFixed(2)+'%) = good entry timing');
-  if(cp && cp.signal === 'BUY') reasonsFor.push('Candle pattern: '+cp.pattern+' = reversal signal');
+  if(cp && cp.signal === (dir === 'SHORT' ? 'SELL' : 'BUY')) reasonsFor.push('Candle pattern: '+cp.pattern+' = reversal signal');
 
   // ---- Reasons NOT to enter (risks) ----
   var reasonsAgainst = [];
   if(Math.abs(p.chg) > 5) reasonsAgainst.push('WARNING: Price extended '+p.chg.toFixed(1)+'% - chasing risk');
-  if(p.fund > 0.005) reasonsAgainst.push('Funding positive (+'+( p.fund*100).toFixed(4)+'%) - crowded trade');
+  if(dir === 'SHORT' ? p.fund < -0.005 : p.fund > 0.005) reasonsAgainst.push('Funding conflicts with '+dir+' direction ('+( p.fund*100).toFixed(4)+'%)');
   if(p.volSpike && p.volSpike.ratio < 1.0) reasonsAgainst.push('Volume below average - no conviction');
   if(mtfResult && mtfResult.d1 && mtfResult.d1.verdict === 'ABORT') reasonsAgainst.push('D1 ABORT - do NOT enter against D1 trend');
 
@@ -3113,14 +3334,24 @@ function renderOrderFlowAndSetup(pair, mtfResult, containerId) {
   var el = document.getElementById(containerId);
   if(!el) return;
   var of2 = analyzeOrderFlow(pair);
-  var dir = P2.data && P2.data.wl ? P2.data.wl.dir : 'LONG';
+  var dir = P2.data ? (P2.data.dir || (P2.data.wl ? P2.data.wl.dir : 'LONG')) : 'LONG';
   var setup = generateBestSetup(pair, mtfResult, dir);
   if(!of2||!setup) { el.innerHTML='<div style="color:#484f58;padding:10px;">No data</div>'; return; }
+  if (P2.data) P2.data.setup = setup;
+  calcPositionSize();
 
   function fmt(v) {
     if(v===undefined||v===null) return '--';
     return v>=1000?'$'+Math.round(v).toLocaleString('en'):'$'+v.toFixed(v>=1?3:5);
   }
+
+  // Keep the compact Phase 2 header synchronized with the detailed setup card.
+  var hEntry = document.getElementById('p2-en');
+  var hSL = document.getElementById('p2-sl');
+  var hTP = document.getElementById('p2-tp');
+  if (hEntry) hEntry.textContent = fmt(setup.entry.low) + ' - ' + fmt(setup.entry.high);
+  if (hSL) hSL.textContent = fmt(setup.sl.price);
+  if (hTP) hTP.textContent = fmt(setup.tp.tp1);
 
   var html = '';
 
@@ -3184,14 +3415,16 @@ function renderOrderFlowAndSetup(pair, mtfResult, containerId) {
 
   html += '<div style="background:#0d1117;border:1px solid rgba(248,81,73,.2);border-radius:6px;padding:8px;">';
   html += '<div style="font-size:9px;color:#f85149;margin-bottom:4px;">STOP LOSS</div>';
-  html += '<div style="font-size:12px;font-weight:700;color:#f85149;">'+fmt(setup.sl.price)+' <span style="font-size:10px;">(-'+setup.sl.pct+'%)</span></div>';
+  var slSign = setup.dir === 'SHORT' ? '+' : '-';
+  html += '<div style="font-size:12px;font-weight:700;color:#f85149;">'+fmt(setup.sl.price)+' <span style="font-size:10px;">('+slSign+setup.sl.pct+'%)</span></div>';
   html += '<div style="font-size:9px;color:#484f58;margin-top:3px;">'+setup.sl.reason+'</div>';
   html += '</div>';
 
   html += '<div style="background:#0d1117;border:1px solid rgba(63,185,80,.2);border-radius:6px;padding:8px;">';
   html += '<div style="font-size:9px;color:#3fb950;margin-bottom:4px;">TAKE PROFIT</div>';
-  html += '<div style="font-size:11px;font-weight:700;color:#3fb950;">TP1: '+fmt(setup.tp.tp1)+' <span style="font-size:9px;">(+'+setup.tp.tp1Pct+'%)</span></div>';
-  html += '<div style="font-size:11px;color:#56d364;">TP2: '+fmt(setup.tp.tp2)+' <span style="font-size:9px;">(+'+setup.tp.tp2Pct+'%)</span></div>';
+  var tpSign = setup.dir === 'SHORT' ? '-' : '+';
+  html += '<div style="font-size:11px;font-weight:700;color:#3fb950;">TP1: '+fmt(setup.tp.tp1)+' <span style="font-size:9px;">('+tpSign+setup.tp.tp1Pct+'%)</span></div>';
+  html += '<div style="font-size:11px;color:#56d364;">TP2: '+fmt(setup.tp.tp2)+' <span style="font-size:9px;">('+tpSign+setup.tp.tp2Pct+'%)</span></div>';
   html += '<div style="font-size:10px;color:#484f58;">TP3: '+fmt(setup.tp.tp3)+' (runner)</div>';
   html += '</div>';
 
@@ -3243,6 +3476,14 @@ function renderOrderFlowAndSetup(pair, mtfResult, containerId) {
 // Auto-computed after each scan
 // Ranking: V4.4 score * 0.4 + funding bonus * 0.3 + signal bonus * 0.2 + tier bonus * 0.1
 // ============================================================
+function directionForPair(pair) {
+  if(!pair) return 'LONG';
+  for(var i=0;i<G.wl.length;i++) {
+    if(G.wl[i].sym === pair.s || G.wl[i].sym === pair.s+'USDT') return G.wl[i].dir || 'LONG';
+  }
+  return pair.chg < 0 ? 'SHORT' : 'LONG';
+}
+
 function computeTop5(pairs) {
   if(!pairs||!pairs.length) return;
 
@@ -3278,8 +3519,10 @@ function computeTop5(pairs) {
     var fundStr = (p.fund*100).toFixed(4) + '%';
     var chgCol  = p.chg >= 0 ? '#3fb950' : '#f85149';
     var entryEst = p.price; // use current price as rough entry
-    var slEst    = (entryEst * 0.97).toFixed(entryEst >= 1 ? 3 : 5);
-    var tp1Est   = (entryEst * 1.06).toFixed(entryEst >= 1 ? 3 : 5);
+    var setupDir = directionForPair(p);
+    var topSetup = generateBestSetup(p, null, setupDir);
+    var slEst    = topSetup ? topSetup.sl.price.toFixed(entryEst >= 1 ? 3 : 5) : (entryEst * (setupDir==='SHORT'?1.03:0.97)).toFixed(entryEst >= 1 ? 3 : 5);
+    var tp1Est   = topSetup ? topSetup.tp.tp1.toFixed(entryEst >= 1 ? 3 : 5) : (entryEst * (setupDir==='SHORT'?0.94:1.06)).toFixed(entryEst >= 1 ? 3 : 5);
     var medals   = ['#e3b341','#8b949e','#cd7f32','#484f58','#484f58'];
     var priceStr = entryEst >= 1000 ? '$'+Math.round(entryEst).toLocaleString('en') : '$'+entryEst.toFixed(entryEst>=1?3:5);
 
@@ -3290,6 +3533,7 @@ function computeTop5(pairs) {
       + '<div style="display:flex;align-items:center;gap:6px;">'
       + '<span style="font-size:14px;color:' + medals[i] + ';">' + (i===0?'#1':i===1?'#2':i===2?'#3':'#'+(i+1)) + '</span>'
       + '<b style="font-size:13px;">' + p.s + '</b>'
+      + '<span class="badge ' + (setupDir==='SHORT'?'bn':'ba') + '" style="font-size:8px;">' + setupDir + '</span>'
       + '</div>'
       + '<span class="badge ' + (p.tier==='A'?'ba':'bb') + '">' + p.tier + '</span>'
       + '</div>'
@@ -3465,7 +3709,8 @@ function autoExecuteTopSetups() {
     if(alreadyOpen) return;
 
     // Generate setup for entry limit
-    var setup = generateBestSetup(p, null, 'LONG');
+    var tradeDir = directionForPair(p);
+    var setup = generateBestSetup(p, null, tradeDir);
     if(!setup) return;
 
     var tradeId = ++BOT.tradeIdSeq;
@@ -3474,7 +3719,7 @@ function autoExecuteTopSetups() {
   var riskDollar = BOT.equity * _riskPct / 100;
     var entryLimit = parseFloat(((setup.entry.low + setup.entry.high) / 2).toFixed(p.price>=1?3:6));
     var slPrice    = setup.sl.price;
-    var slDist     = entryLimit - slPrice;
+    var slDist     = Math.abs(entryLimit - slPrice);
     var contracts  = slDist>0 ? riskDollar/slDist : 0;
     var posSize    = contracts * entryLimit;
     var tp1Price   = setup.tp.tp1;
@@ -3483,7 +3728,7 @@ function autoExecuteTopSetups() {
     var trade = {
       id:         tradeId,
       sym:        p.s,
-      dir:        'LONG',
+      dir:        tradeDir,
       entryLimit: entryLimit,
       currentPrice: p.price,
       sl:         parseFloat(slPrice.toFixed(p.price>=1?3:6)),
@@ -3497,21 +3742,21 @@ function autoExecuteTopSetups() {
       closeTime:  null,
       r:          0,
       pnl:        0,
-      reason:     'Auto: 1H scan | Fund:' + (p.fund*100).toFixed(4)+'% | Score:'+p.sc,
+      reason:     'Auto: 1H scan | '+tradeDir+' | Fund:' + (p.fund*100).toFixed(4)+'% | Score:'+p.sc,
       score:      p.sc,
       fund:       p.fund,
       tier:       p.tier
     };
 
     BOT.activeTrades.push(trade);
-    sLog('BOT LIMIT ORDER: '+p.s+' LONG @ $'+entryLimit+' | SL:$'+trade.sl+' TP1:$'+trade.tp1+' | Size:$'+posSize.toFixed(0));
+    sLog('BOT LIMIT ORDER: '+p.s+' '+tradeDir+' @ $'+entryLimit+' | SL:$'+trade.sl+' TP1:$'+trade.tp1+' | Size:$'+posSize.toFixed(0));
 
     if('Notification' in window && Notification.permission==='granted') {
       new Notification('NEXORA Paper Trade: '+p.s, {
-        body: 'Limit LONG @ $'+entryLimit+' | SL: $'+trade.sl+' | TP1: $'+trade.tp1
+        body: 'Limit '+tradeDir+' @ $'+entryLimit+' | SL: $'+trade.sl+' | TP1: $'+trade.tp1
       });
     }
-    toast('<b style="color:#58a6ff;">PAPER LIMIT SET: '+p.s+'</b> LONG @ $'+entryLimit+' | SL $'+trade.sl, 'a');
+    toast('<b style="color:#58a6ff;">PAPER LIMIT SET: '+p.s+'</b> '+tradeDir+' @ $'+entryLimit+' | SL $'+trade.sl, 'a');
   });
 
   updateActiveTradesPanel();
@@ -3548,8 +3793,8 @@ function monitorActiveTrades() {
         trade.status = 'OPEN';
         trade.entryActual = price;
         sLog('BOT FILLED: '+trade.sym+' @ $'+price+' (limit was $'+trade.entryLimit+')');
-        tgAlert('PAPER_FILL', trade.sym, {entry:price, sl:trade.sl, tp1:trade.tp1});
-        toast('<b style="color:#3fb950;">PAPER FILLED: '+trade.sym+'</b> LONG @ $'+price, 'a');
+        tgAlert('PAPER_FILL', trade.sym, {entry:price, sl:trade.sl, tp1:trade.tp1, dir:trade.dir});
+        toast('<b style="color:#3fb950;">PAPER FILLED: '+trade.sym+'</b> '+trade.dir+' @ $'+price, 'a');
         changed = true;
       }
       // Cancel if price moved too far from limit (>5% away)
@@ -3572,12 +3817,20 @@ function monitorActiveTrades() {
         closeTrade(trade, price, 'WIN', 'Hit TP1 $'+trade.tp1, now);
         changed = true;
       }
+    } else {
+      if(price >= trade.sl) {
+        closeTrade(trade, price, 'LOSS', 'Hit SL $'+trade.sl, now);
+        changed = true;
+      } else if(price <= trade.tp1) {
+        closeTrade(trade, price, 'WIN', 'Hit TP1 $'+trade.tp1, now);
+        changed = true;
+      }
     }
 
     // Unrealized PnL
     if(trade.status === 'OPEN') {
       var entryPx = trade.entryActual || trade.entryLimit;
-      trade.unrealPnl = ((price - entryPx) / entryPx) * trade.size;
+      trade.unrealPnl = ((price - entryPx) / entryPx) * trade.size * (trade.dir==='LONG'?1:-1);
     }
   });
 
@@ -3594,7 +3847,7 @@ function monitorActiveTrades() {
 
 function closeTrade(trade, exitPrice, outcome, reason, closeTime) {
   var entryP = trade.entryActual || trade.entryLimit;
-  var slDist = entryP - trade.sl;
+  var slDist = Math.abs(entryP - trade.sl);
   var rVal   = slDist > 0 ? (trade.dir==='LONG' ? (exitPrice-entryP)/slDist : (entryP-exitPrice)/slDist) : 0;
   var pnl    = ((exitPrice - entryP) / entryP) * trade.size * (trade.dir==='LONG'?1:-1);
 
@@ -3767,7 +4020,7 @@ function runConnectionTest() {
   // Test Gate.io
   document.getElementById('test-gate').textContent = 'Testing...';
   document.getElementById('test-gate').style.color = '#e3b341';
-  fetch('https://api.gateio.ws/api/v4/futures/usdt/contracts/BTC_USDT', {cache:'no-store'})
+  fetch(GATE_API + '/BTC_USDT', {cache:'no-store'})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if (d && d.funding_rate !== undefined) {
@@ -3839,6 +4092,10 @@ function runP2Analysis(sym, coinId) {
 
   P2.coin = sym;
   P2.data = { p: p, wl: wl };
+  P2.lastMTF = null;
+  ['p2-en','p2-sl','p2-tp'].forEach(function(id){ var el=document.getElementById(id); if(el) el.textContent='--'; });
+  var h4Checklist = document.getElementById('p2-h4-checklist');
+  if(h4Checklist) h4Checklist.innerHTML = '<div style="color:#8b949e;font-size:10px;padding:8px 0;">Menunggu data H4...</div>';
 
   document.getElementById('p2-empty').style.display = 'none';
   document.getElementById('p2-content').style.display = 'block';
@@ -3852,7 +4109,9 @@ function runP2Analysis(sym, coinId) {
   var mode = wl ? 'Mode ' + wl.mode : 'Mode A';
   mb.textContent = mode;
   var dirEl = document.getElementById('p2-dir');
-  var dir = wl ? wl.dir : (p.chg >= 0 ? 'LONG' : 'SHORT');
+  var dir = directionForPair(p);
+  P2.data.dir = dir;
+  P2.data.mode = wl ? wl.mode : 'A';
   dirEl.textContent = dir;
   dirEl.className = dir === 'LONG' ? 'up' : 'dn';
 
@@ -3905,7 +4164,7 @@ function runP2Analysis(sym, coinId) {
     var e21Col = price>ema.ema21?'#3fb950':'#f85149';
     var e50Col = price>ema.ema50?'#3fb950':'#f85149';
     var emaBlock = '<div style="margin-top:8px;background:#161b25;border-radius:5px;padding:7px 10px;">';
-    emaBlock += '<div style="color:#484f58;font-size:9px;margin-bottom:5px;text-transform:uppercase;">EMA Levels (calculated from 60D CoinGecko data)</div>';
+    emaBlock += '<div style="color:#484f58;font-size:9px;margin-bottom:5px;text-transform:uppercase;">EMA Levels (calculated from 60D '+(ema.source||'market')+' data)</div>';
     emaBlock += '<div style="display:flex;gap:12px;font-size:11px;">';
     emaBlock += '<span>EMA21: <b style="color:'+e21Col+'">'+e21Str+'</b> <span style="color:'+e21Col+';">'+(eVsE21>=0?'+':'')+eVsE21+'%</span></span>';
     emaBlock += '<span>EMA50: <b style="color:'+e50Col+'">'+e50Str+'</b> <span style="color:'+e50Col+';">'+(eVsE50>=0?'+':'')+eVsE50+'%</span></span>';
@@ -3934,6 +4193,9 @@ function runP2Analysis(sym, coinId) {
     + '<div style="display:flex;justify-content:space-between;margin-top:3px;font-size:9px;color:#484f58;"><span>0% (In Zone)</span><span>3% (READY)</span><span>10% (WATCHLIST)</span><span>>10% (SKIP)</span></div>';
 
   // Final decision
+  // Initial confluence is based only on the data already available in the scan.
+  // The final MTF verdict is rendered separately after the candle requests finish.
+  var aligned = (p.sc >= 8 ? 1 : 0) + (Math.abs(p.chg) <= 3.5 ? 1 : 0) + (p.oi > 0 ? 1 : 0);
   var dec = proxStep === 2 && aligned >= 2 ? { t: 'ENTRY NOW', c: '#3fb950', bg: 'rgba(63,185,80,.1)' } :
             proxStep === 2 && aligned < 2  ? { t: 'PREPARE', c: '#f0883e', bg: 'rgba(240,136,62,.1)' } :
             proxStep === 3                  ? { t: 'WATCHLIST', c: '#f0883e', bg: 'rgba(240,136,62,.1)' } :
@@ -3941,8 +4203,12 @@ function runP2Analysis(sym, coinId) {
 
   document.getElementById('p2-verdict').textContent = dec.t;
   document.getElementById('p2-verdict').style.cssText = 'color:' + dec.c + ';background:' + dec.bg + ';padding:3px 10px;border-radius:5px;font-size:13px;font-weight:700;border:1px solid ' + dec.c + '33;';
+  var decSL = dir === 'SHORT' ? p.price * 1.03 : p.price * 0.97;
+  var decTP = dir === 'SHORT' ? p.price * 0.94 : p.price * 1.06;
+  var decSLPct = dir === 'SHORT' ? '+3%' : '-3%';
+  var decTPPct = dir === 'SHORT' ? '-6%' : '+6%';
   var decActions = {
-    'ENTRY NOW': ['1. Open GoCharting H1 - verify trigger candle (Hammer/Engulf)','2. Volume must be > 1.5x 20-period avg','3. Set SL at $' + (p.price*0.97).toFixed(p.price>=1?3:5) + ' (-3%)','4. Set TP1 at $' + (p.price*1.06).toFixed(p.price>=1?3:5) + ' (+6%, 2R)'],
+    'ENTRY NOW': ['1. Open GoCharting H1 - verify trigger candle (Hammer/Engulf)','2. Volume must be > 1.5x 20-period avg','3. Set SL at $' + decSL.toFixed(p.price>=1?3:5) + ' (' + decSLPct + ')','4. Set TP1 at $' + decTP.toFixed(p.price>=1?3:5) + ' (' + decTPPct + ', 2R)'],
     'PREPARE':   ['1. Open GoCharting H1 - monitor for trigger','2. Set price alert at entry zone','3. Wait for candle close confirmation','4. Check funding stays negative'],
     'WATCHLIST': ['1. Add to watchlist (click + Add above)','2. Set alert when price approaches zone','3. Re-analyze at next 4H close','4. Monitor OI for confirmation'],
     'SKIP':      ['1. Price too far from zone - do NOT chase','2. Wait for pullback to entry zone','3. Re-evaluate in next scan cycle','4. Move to next candidate']
@@ -3951,7 +4217,7 @@ function runP2Analysis(sym, coinId) {
   document.getElementById('p2-decision').innerHTML =
     '<div style="font-size:22px;font-weight:800;color:' + dec.c + ';text-align:center;padding:10px 0;">' + dec.t + '</div>'
     + '<div style="font-size:11px;color:#8b949e;text-align:center;margin-bottom:10px;">'
-    + 'Proximity: ' + prox.toFixed(1) + '% | TF aligned: ' + aligned + '/3 | Score: ' + p.sc + '/12'
+    + 'Proximity: ' + prox.toFixed(1) + '% | Initial confluence: ' + aligned + '/3 | Score: ' + p.sc + '/12'
     + '</div>'
     + '<div style="background:#161b25;border-radius:6px;padding:8px 10px;font-size:10px;line-height:2.2;color:#c9d1d9;">'
     + steps.map(function(s){ return '<div style="display:flex;gap:6px;"><span style="color:' + dec.c + '">&#9658;</span>' + s + '</div>'; }).join('')
@@ -3975,6 +4241,8 @@ function runP2Analysis(sym, coinId) {
 function calcPositionSize() {
   if (!P2.data) return;
   var p = P2.data.p;
+  var setup = P2.data.setup || null;
+  var dir = P2.data.dir || (P2.data.wl ? P2.data.wl.dir : 'LONG');
   var equity = parseFloat(document.getElementById('p2-equity').value) || 285;
   var riskPct = parseFloat(document.getElementById('p2-risk-pct').value) || 2;
   var riskDollar = equity * riskPct / 100;
@@ -3983,7 +4251,9 @@ function calcPositionSize() {
 
   // Estimate SL distance
   var slDist = 0;
-  if (wl && wl.sl && wl.sl !== '--') {
+  if (setup && setup.sl && setup.sl.price) {
+    slDist = Math.abs(price - setup.sl.price);
+  } else if (wl && wl.sl && wl.sl !== '--') {
     var slStr = wl.sl.replace('$','').replace(',','');
     var slNum = parseFloat(slStr);
     if (!isNaN(slNum) && !isNaN(price)) slDist = Math.abs(price - slNum);
@@ -3993,8 +4263,8 @@ function calcPositionSize() {
   var contracts = slDist > 0 ? (riskDollar / slDist) : 0;
   var posSize = contracts * price;
   var slPct = (slDist / price * 100).toFixed(2);
-  var tp1 = price + (slDist * 2);
-  var rrRatio = slDist > 0 ? (tp1 - price) / slDist : 0;
+  var tp1 = setup && setup.tp && setup.tp.tp1 ? setup.tp.tp1 : (dir === 'SHORT' ? price - (slDist * 2) : price + (slDist * 2));
+  var rrRatio = slDist > 0 ? Math.abs(tp1 - price) / slDist : 0;
   var priceStr = price >= 1000 ? '$' + Math.round(price).toLocaleString('en') : '$' + price.toFixed(price >= 1 ? 3 : 6);
   var tp1Str = tp1 >= 1000 ? '$' + Math.round(tp1).toLocaleString('en') : '$' + tp1.toFixed(tp1 >= 1 ? 3 : 6);
 
@@ -4035,7 +4305,7 @@ function addToWatchlistFromP2() {
   var el_en = document.getElementById('p2-en');
   G.wl.push({
     sym: sym,
-    dir: P2.data.wl ? P2.data.wl.dir : (p.chg >= 0 ? 'LONG' : 'SHORT'),
+    dir: P2.data.dir || (P2.data.wl ? P2.data.wl.dir : (p.chg >= 0 ? 'LONG' : 'SHORT')),
     mode: 'A',
     tier: p.tier,
     sc: p.sc,
@@ -4055,11 +4325,11 @@ function runP2MTFAnalysis() {
   if(!P2.coin||!P2.data) return;
   var sym = P2.coin;
   var coinId = P2.data.p.id;
-  var dir = P2.data.wl ? P2.data.wl.dir : 'LONG';
-  var mode = P2.data.wl ? P2.data.wl.mode : 'A';
+  var dir = P2.data.dir || (P2.data.wl ? P2.data.wl.dir : 'LONG');
+  var mode = P2.data.mode || (P2.data.wl ? P2.data.wl.mode : 'A');
   var btn = document.getElementById('p2-run-mtf');
   if(btn) { btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Loading...'; }
-  document.getElementById('p2-mtf-full').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:20px;color:#484f58;"><div class="sp"></div> Fetching D1/H4/H1/M15 data from CoinGecko + MEXC...</div>';
+  document.getElementById('p2-mtf-full').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:20px;color:#484f58;"><div class="sp"></div> Fetching D1/H4/H1/M15 candles from Bitget...</div>';
 
   analyzeMTFCascade(coinId, sym, dir, mode)
     .then(function(mtf) {
@@ -4074,7 +4344,10 @@ function runP2MTFAnalysis() {
         }
       }
       P2.lastMTF = mtf; // store for order flow
-    sLog('MTF analysis: '+sym+' D1='+mtf.d1.verdict+' H4='+mtf.h4.verdict+' H1='+mtf.h1.verdict+' M15='+mtf.m15.verdict);
+      renderH4Checklist(mtf);
+      renderP2DecisionFromMTF(mtf);
+      function mtfVerdict(tf) { return tf && tf.verdict ? tf.verdict : 'NO_DATA'; }
+    sLog('MTF analysis: '+sym+' D1='+mtfVerdict(mtf.d1)+' H4='+mtfVerdict(mtf.h4)+' H1='+mtfVerdict(mtf.h1)+' M15='+mtfVerdict(mtf.m15));
     // Refresh order flow with MTF data
     setTimeout(function(){ renderOrderFlowAndSetup(P2.data.p, mtf, 'p2-orderflow'); }, 300);
     })
@@ -4259,7 +4532,7 @@ function renderPositionsWidget() {
       if(p && p.price) {
         var entryP = t.entryActual || t.entryLimit;
         t.currentPrice = p.price;
-        t.unrealPnl = ((p.price - entryP) / entryP) * t.size;
+        t.unrealPnl = ((p.price - entryP) / entryP) * t.size * ((t.dir||'LONG')==='LONG'?1:-1);
         totalPnl += t.unrealPnl;
       }
     }
@@ -4277,12 +4550,13 @@ function renderPositionsWidget() {
 
     var entryP   = t.entryActual || t.entryLimit;
     var unreal   = t.unrealPnl || 0;
-    var unrealPct= entryP > 0 ? ((curPrice - entryP) / entryP * 100) : 0;
+    var tradeDir = t.dir || 'LONG';
+    var unrealPct= entryP > 0 ? ((curPrice - entryP) / entryP * 100 * (tradeDir==='LONG'?1:-1)) : 0;
 
     // Progress bar: how far from entry to TP
-    var slDist = entryP - t.sl;
-    var tpDist = t.tp1 - entryP;
-    var curDist = curPrice - entryP;
+    var slDist = Math.abs(entryP - t.sl);
+    var tpDist = Math.abs(t.tp1 - entryP);
+    var curDist = (curPrice - entryP) * (tradeDir==='LONG'?1:-1);
     var progress = tpDist > 0 ? Math.max(0, Math.min(100, (curDist / tpDist) * 100)) : 0;
     var progressColor = progress >= 50 ? '#3fb950' : progress >= 0 ? '#e3b341' : '#f85149';
 
@@ -4299,6 +4573,7 @@ function renderPositionsWidget() {
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">'
       + '<div style="display:flex;align-items:center;gap:5px;">'
       + '<b style="font-size:12px;">' + t.sym + '</b>'
+      + '<span style="font-size:9px;color:' + (tradeDir==='LONG'?'#3fb950':'#f85149') + ';">' + tradeDir + '</span>'
       + '<span style="font-size:9px;background:rgba(' + (isPending?'227,179,65':'63,185,80') + ',.12);color:' + statusCol + ';border:1px solid ' + statusCol + '33;padding:1px 5px;border-radius:3px;">' + t.status + '</span>'
       + '</div>'
       + '<button onclick="cancelTrade(' + t.id + ')" style="background:transparent;border:none;color:#484f58;cursor:pointer;font-size:10px;padding:0 2px;" title="Cancel">x</button>'
@@ -4331,16 +4606,28 @@ setInterval(saveToStorage, 30000); // auto-save every 30s
 
 // ============================================================
 // BACKTEST ENGINE V4.4
-// Uses real CoinGecko OHLC daily data
+// Uses real Bitget daily candles with CoinGecko fallback
 // Strategy: V4.4 signals applied to historical candles
 // ============================================================
 var BT = { results: [], running: false };
 
 function runBacktest() {
   if(BT.running) return;
-  var symVal = document.getElementById('bt-sym').value;
+  var symVal = (document.getElementById('bt-sym').value || 'BTC').trim();
   var parts  = symVal.split('|');
-  var coinId = parts[0], sym = parts[1];
+  var coinId = (parts[0] || '').trim();
+  var sym    = (parts[1] || '').trim().toUpperCase();
+  // Accept both the old "coinId|SYMBOL" format and the visible simple form "BTC".
+  if(!sym) {
+    sym = coinId.toUpperCase();
+    for(var ci=0; ci<COINS.length; ci++) {
+      if(COINS[ci].s === sym) { coinId = COINS[ci].id; break; }
+    }
+  }
+  if(!coinId || !sym) {
+    toast('<i class="fa-solid fa-circle-exclamation" style="color:#f85149;"></i> Isi Symbol, contoh: BTC atau ETH.', 'a');
+    return;
+  }
   var days   = parseInt(document.getElementById('bt-days').value);
   var slPct  = parseFloat(document.getElementById('bt-sl').value) / 100;
   var rr     = parseFloat(document.getElementById('bt-rr').value);
@@ -4353,57 +4640,27 @@ function runBacktest() {
   document.getElementById('bt-loading').style.display = 'block';
   document.getElementById('bt-results').style.display = 'none';
   document.getElementById('bt-loading-msg').textContent = 'Fetching ' + days + 'd OHLC for ' + sym + '...';
-
-  // MEXC daily klines (primary -- confirmed working in Indonesia)
-  var mexcSym = sym + 'USDT';
-  // MEXC blocked by Kominfo - use CoinGecko for backtest
-  fetch(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
-    .then(function(r){ return r.ok ? r.json() : null; })
-    .then(function(klines) {
-      if(!klines || !klines.length) throw new Error('MEXC no data');
-      // MEXC format: [openTime, open, high, low, close, vol, ...]
-      var ohlc = klines.map(function(k){ return [+k[0], +k[1], +k[2], +k[3], +k[4]]; });
-      document.getElementById('bt-loading-msg').textContent = 'Analyzing ' + ohlc.length + ' candles (MEXC)...';
-      setTimeout(function() {
-        try {
-          var res = runV44Strategy(ohlc, slPct, rr, minSc);
-          BT.results = res;
-          renderBacktestResults(res, sym, days, 'MEXC');
-        } catch(e2) { sLog('Strategy error: '+e2.message); }
-        BT.running = false;
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-play"></i> Run Backtest';
-        document.getElementById('bt-loading').style.display = 'none';
-      }, 50);
+  fetchMarketHistory(coinId, sym, days)
+    .then(function(history) {
+      var ohlc = history.data;
+      if(!ohlc || ohlc.length < 6) throw new Error('Not enough candles for backtest');
+      document.getElementById('bt-loading-msg').textContent = 'Analyzing ' + ohlc.length + ' candles (' + history.source + ')...';
+      var res = runV44Strategy(ohlc, slPct, rr, minSc);
+      BT.results = res;
+      renderBacktestResults(res, sym, days, history.source);
+      sLog('Backtest '+sym+' completed using '+history.source+'.');
+      BT.running = false;
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-play"></i> Run Backtest';
+      document.getElementById('bt-loading').style.display = 'none';
     })
-    .catch(function(eMexc) {
-      // Fallback: CoinGecko OHLC
-      sLog('MEXC failed, trying CoinGecko...');
-      document.getElementById('bt-loading-msg').textContent = 'Trying CoinGecko fallback...';
-      fetch(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
-        .then(function(r2){ return r2.ok ? r2.json() : null; })
-        .then(function(ohlc2) {
-          if(!ohlc2||!ohlc2.length) throw new Error('CoinGecko also failed');
-          document.getElementById('bt-loading-msg').textContent = 'Analyzing ' + ohlc2.length + ' candles (CG)...';
-          setTimeout(function() {
-            try {
-              var res2 = runV44Strategy(ohlc2, slPct, rr, minSc);
-              BT.results = res2;
-              renderBacktestResults(res2, sym, days, 'CoinGecko');
-            } catch(e3) { sLog('Strategy error: '+e3.message); }
-            BT.running = false;
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fa-solid fa-play"></i> Run Backtest';
-            document.getElementById('bt-loading').style.display = 'none';
-          }, 50);
-        })
-        .catch(function() {
-          BT.running = false;
-          btn.disabled = false;
-          btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Retry';
-          document.getElementById('bt-loading').style.display = 'none';
-          toast('<i class="fa-solid fa-circle-exclamation" style="color:#f85149;"></i> Both MEXC and CoinGecko failed. Check internet.', 'a');
-        });
+    .catch(function(e) {
+      BT.running = false;
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Retry';
+      document.getElementById('bt-loading').style.display = 'none';
+      sLog('Backtest failed: '+(e.message||e));
+      toast('<i class="fa-solid fa-circle-exclamation" style="color:#f85149;"></i> Data candle tidak tersedia. Coba lagi setelah beberapa saat.', 'a');
     });
 }
 
@@ -4600,8 +4857,9 @@ function tgAlert(type, pair, data) {
       + '24h: ' + (data.chg !== undefined ? (data.chg>=0?'+':'')+data.chg.toFixed(2)+'%' : '?') + '\n'
       + 'GoCharting: https://gocharting.com/?ticker=BINANCE:' + pair + 'USDT&interval=240';
   } else if(type === 'PAPER_FILL') {
+    var fillDir = data.dir || 'LONG';
     msg = '<b>PAPER ORDER FILLED</b>\n'
-      + pair + ' LONG @ $' + (data.entry||'?') + '\n'
+      + pair + ' ' + fillDir + ' @ $' + (data.entry||'?') + '\n'
       + 'SL: $' + (data.sl||'?') + ' | TP1: $' + (data.tp1||'?');
   } else if(type === 'PAPER_CLOSE') {
     var emoji = data.r > 0 ? '\u2705' : '\u274c';
@@ -4642,7 +4900,7 @@ function fetchCPMomentum() {
   var promises = pairs.map(function(p, i) {
     return new Promise(function(resolve) {
       setTimeout(function() {
-        fetch('https://api.coinpaprika.com/v1/tickers/' + CP_IDS2[p.s] + '?quotes=USD', {cache:'no-store'})
+        fetch(CP_API + '/v1/tickers/' + CP_IDS2[p.s] + '?quotes=USD', {cache:'no-store'})
           .then(function(r){ return r.ok ? r.json() : null; })
           .then(function(d) {
             if(d && d.quotes && d.quotes.USD) {
@@ -4698,10 +4956,9 @@ function runMultiBacktest() {
   MULTI_BT_PAIRS.forEach(function(pair, i) {
     document.getElementById('bt-loading-msg').textContent = 'Testing ' + pair.s + ' (' + (i+1) + '/' + MULTI_BT_PAIRS.length + ')...';
     setTimeout(function() {
-      fetch(CG + '/coins/' + pair.id + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
-        .then(function(r){ return r.ok ? r.json() : []; })
-        .then(function(klines) {
-          var ohlc = (klines||[]).map(function(k){ return [+k[0],+k[1],+k[2],+k[3],+k[4]]; });
+      fetchMarketHistory(pair.id, pair.s, days)
+        .then(function(history) {
+          var ohlc = history.data || [];
           var trades = ohlc.length >= 6 ? runV44Strategy(ohlc, slPct, rr, minSc) : [];
           var wins   = trades.filter(function(t){return t.r>0;}).length;
           var netR   = trades.reduce(function(s,t){return s+t.r;},0);
