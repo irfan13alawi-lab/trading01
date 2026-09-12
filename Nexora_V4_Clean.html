@@ -795,7 +795,7 @@ var COINS = [
   {id:'tron',s:'TRX'},{id:'matic-network',s:'MATIC'},{id:'litecoin',s:'LTC'},
   {id:'synthetix-network-token',s:'SNX'}
 ];
-var CG = 'https://api.coingecko.com/api/v3';
+var CG = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/coingecko/api/v3' : 'https://api.coingecko.com/api/v3';
 var ALT = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/altme' : 'https://api.alternative.me';
 
 function fP(v) {
@@ -2084,8 +2084,8 @@ function fetchOI() {
 //   Gate.io: BTC funding_rate=0.000015, SOL funding_rate=0.000013
 // ============================================================
 
-var BITGET_API = 'https://api.bitget.com/api/v2/mix/market';
-var BINGX_API  = 'https://open-api.bingx.com/openApi/swap/v2/quote';
+var BITGET_API = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/bitget/api/v2/mix/market' : 'https://api.bitget.com/api/v2/mix/market';
+var BINGX_API  = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/bingx/openApi/swap/v2/quote' : 'https://open-api.bingx.com/openApi/swap/v2/quote';
 var GATE_API   = (window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
 
 // Symbol maps
@@ -2386,7 +2386,7 @@ function fetchCandlePattern(coinId, sym) {
   if (CANDLE_CACHE[sym] && now - CANDLE_CACHE[sym].ts < 300000) {
     return Promise.resolve(CANDLE_CACHE[sym]);
   }
-  return fetch('https://api.coingecko.com/api/v3/coins/'+coinId+'/ohlc?vs_currency=usd&days=3',{cache:'no-store'})
+  return fetch(CG + '/coins/'+coinId+'/ohlc?vs_currency=usd&days=3',{cache:'no-store'})
     .then(function(r){return r.ok?r.json():null;})
     .then(function(data){
       var result = detectCandlePattern(data);
@@ -2428,7 +2428,7 @@ function calcEMAFromData(prices, n) {
 function fetchEMALevels(coinId, sym) {
   var now = Date.now();
   if(EMA_CACHE[sym] && now-EMA_CACHE[sym].ts<300000) return Promise.resolve(EMA_CACHE[sym]);
-  return fetch('https://api.coingecko.com/api/v3/coins/'+coinId+'/market_chart?vs_currency=usd&days=60&interval=daily',{cache:'no-store'})
+  return fetch(CG + '/coins/'+coinId+'/market_chart?vs_currency=usd&days=60&interval=daily',{cache:'no-store'})
     .then(function(r){return r.ok?r.json():null;})
     .then(function(data){
       if(!data||!data.prices) return null;
@@ -2636,7 +2636,7 @@ function analyzeMTFCascade(coinId, sym, dir, mode) {
 
   return Promise.all([
     // D1: CoinGecko 30-day OHLC (1 candle = 1 day)
-    fetch('https://api.coingecko.com/api/v3/coins/'+coinId+'/ohlc?vs_currency=usd&days=30',{cache:'no-store'})
+    fetch(CG + '/coins/'+coinId+'/ohlc?vs_currency=usd&days=30',{cache:'no-store'})
       .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
 
     // H4: MEXC klines 4h, last 20 candles
@@ -3727,7 +3727,7 @@ function runConnectionTest() {
   // Test Bitget
   document.getElementById('test-bitget').textContent = 'Testing...';
   document.getElementById('test-bitget').style.color = '#e3b341';
-  fetch('https://api.bitget.com/api/v2/mix/market/ticker?productType=USDT-FUTURES&symbol=BTCUSDT', {cache:'no-store'})
+  fetch(BITGET_API + '/ticker?productType=USDT-FUTURES&symbol=BTCUSDT', {cache:'no-store'})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if (d && d.data && d.data[0] && d.data[0].fundingRate !== undefined) {
@@ -3747,7 +3747,7 @@ function runConnectionTest() {
   // Test BingX
   document.getElementById('test-bingx').textContent = 'Testing...';
   document.getElementById('test-bingx').style.color = '#e3b341';
-  fetch('https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex?symbol=BTC-USDT', {cache:'no-store'})
+  fetch(BINGX_API + '/premiumIndex?symbol=BTC-USDT', {cache:'no-store'})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if (d && d.data && d.data.lastFundingRate !== undefined) {
@@ -4357,7 +4357,7 @@ function runBacktest() {
   // MEXC daily klines (primary -- confirmed working in Indonesia)
   var mexcSym = sym + 'USDT';
   // MEXC blocked by Kominfo - use CoinGecko for backtest
-  fetch('https://api.coingecko.com/api/v3/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
+  fetch(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(klines) {
       if(!klines || !klines.length) throw new Error('MEXC no data');
@@ -4380,7 +4380,7 @@ function runBacktest() {
       // Fallback: CoinGecko OHLC
       sLog('MEXC failed, trying CoinGecko...');
       document.getElementById('bt-loading-msg').textContent = 'Trying CoinGecko fallback...';
-      fetch('https://api.coingecko.com/api/v3/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
+      fetch(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
         .then(function(r2){ return r2.ok ? r2.json() : null; })
         .then(function(ohlc2) {
           if(!ohlc2||!ohlc2.length) throw new Error('CoinGecko also failed');
@@ -4698,7 +4698,7 @@ function runMultiBacktest() {
   MULTI_BT_PAIRS.forEach(function(pair, i) {
     document.getElementById('bt-loading-msg').textContent = 'Testing ' + pair.s + ' (' + (i+1) + '/' + MULTI_BT_PAIRS.length + ')...';
     setTimeout(function() {
-      fetch('https://api.coingecko.com/api/v3/coins/' + pair.id + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
+      fetch(CG + '/coins/' + pair.id + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
         .then(function(r){ return r.ok ? r.json() : []; })
         .then(function(klines) {
           var ohlc = (klines||[]).map(function(k){ return [+k[0],+k[1],+k[2],+k[3],+k[4]]; });
