@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Backup files
+*.bak
+*_backup.*
+
+# Old versions (keep only latest)
+.versions/
+
+# Node (if ever used)
+node_modules/
+npm-debug.log
+
+# Python
+__pycache__/
+*.pyc
+.env
