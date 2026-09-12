@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexora Command Center V4</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-<script src="/vendor/highcharts/highstock.js"></script>
-<script src="/vendor/highcharts/modules/accessibility.js"></script>
-<script src="/vendor/highcharts/modules/heatmap.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/highstock.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/modules/accessibility.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/modules/heatmap.js"></script>
 <style>
 :root{
   --bg:#07090f; --bg2:#0d1117; --bg3:#161b25; --border:#21262d;
@@ -796,7 +796,7 @@ var COINS = [
   {id:'synthetix-network-token',s:'SNX'}
 ];
 var CG = 'https://api.coingecko.com/api/v3';
-var ALT = 'https://api.alternative.me';
+var ALT = window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/altme' : 'https://api.alternative.me';
 
 function fP(v) {
   if (v == null) return '--';
@@ -963,11 +963,10 @@ function doRefresh() {
   // FALLBACK: CoinGecko (only if Bitget fails)
   Promise.all([
     // Bitget futures: price + funding + OI + vol in 1 call
-    fetch('https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES', {cache:'no-store'})
+    fetch((window.location.hostname==='43.156.52.203'?'http://43.156.52.203:18085/bitget':'https://api.bitget.com') + '/api/v2/mix/market/tickers?productType=USDT-FUTURES', {cache:'no-store'})
       .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}),
-    // MEXC spot: 24h price change for all symbols
-    fetch('https://api.mexc.com/api/v3/ticker/24hr', {cache:'no-store'})
-      .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}),
+    // MEXC blocked by Kominfo -- skip, Bitget handles all price data
+    Promise.resolve(null),
     // Fear & Greed (always works)
     apf(ALT + '/fng/?limit=10&format=json'),
     // News (optional)
@@ -985,13 +984,7 @@ function doRefresh() {
         if(sym) bitgetMap[sym] = t;
       });
     }
-    var mexcMap = {}; // sym -> mexc ticker
-    if(Array.isArray(mexcData)) {
-      mexcData.forEach(function(t){
-        var sym = t.symbol ? t.symbol.replace('USDT','') : '';
-        if(sym) mexcMap[sym] = t;
-      });
-    }
+    var mexcMap = {}; // MEXC blocked by Kominfo - skip
 
     // If no data at all, fall back to CoinGecko
     if(!Object.keys(bitgetMap).length && !Object.keys(mexcMap).length) {
@@ -1005,10 +998,8 @@ function doRefresh() {
     COINS.forEach(function(coin, i) {
       var sym = coin.s;
       var bg  = bitgetMap[sym];
-      var mx  = mexcMap[sym+'USDT'] || mexcMap[sym];
-
-      // Price: prefer Bitget (futures mark price), fallback MEXC
-      var price = bg ? nn(bg.lastPr) : (mx ? nn(mx.lastPrice||mx.prevClosePrice) : 0);
+      // Price: Bitget only (MEXC blocked by Kominfo)
+      var price = bg ? nn(bg.lastPr) : 0;
       if(!price) return; // skip if no price data
 
       // 24h change: Bitget gives -0.013 (decimal), MEXC gives -0.011 (decimal)
@@ -1138,7 +1129,7 @@ function continueRefresh(pairs, fg, news) {
 
     document.getElementById('scan-ts').textContent = 'Last: ' + new Date().toLocaleTimeString('id-ID');
     document.getElementById('scan-ts').title = 'Price/Vol: CoinGecko | Funding/OI: Binance fapi + Bybit (loading...)';
-    setDot('ok'); setUpd('Bitget+MEXC | ' + new Date().toLocaleTimeString('id-ID'));
+    setDot('ok'); setUpd('Bitget+BingX+Gate | ' + new Date().toLocaleTimeString('id-ID'));
     sLog('Refresh OK -- ' + pairs.length + ' pairs, ' + at.length + ' A-TIER');
     renderWL(); // sync watchlist with live data
     document.getElementById('wl-last-update') && (document.getElementById('wl-last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString('id-ID'));
@@ -2095,7 +2086,7 @@ function fetchOI() {
 
 var BITGET_API = 'https://api.bitget.com/api/v2/mix/market';
 var BINGX_API  = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-var GATE_API   = 'https://api.gateio.ws/api/v4/futures/usdt/contracts';
+var GATE_API   = (window.location.hostname==='43.156.52.203' ? 'http://43.156.52.203:18085/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
 
 // Symbol maps
 var BITGET_SYMS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','DOT','AVAX',
@@ -2552,11 +2543,11 @@ function fetchMTFFromMEXC(sym) {
   var symbol = sym+'USDT';
   // Fetch 1h klines (limit=6 = last 6h, limit=24 = last 24h)
   return Promise.all([
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+symbol+'&interval=1h&limit=2',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];}),
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+symbol+'&interval=4h&limit=2',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];}),
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+symbol+'&interval=1d&limit=8',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[]; }).catch(function(){return [];})
   ]).then(function(res){
     var h1data=res[0], h4data=res[1], d1data=res[2];
@@ -2649,15 +2640,15 @@ function analyzeMTFCascade(coinId, sym, dir, mode) {
       .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
 
     // H4: MEXC klines 4h, last 20 candles
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+sym+'USDT&interval=4h&limit=20',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
 
     // H1: MEXC klines 1h, last 24 candles
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+sym+'USDT&interval=1h&limit=24',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];}),
 
     // M15: MEXC klines 15m, last 16 candles
-    fetch('https://api.mexc.com/api/v3/klines?symbol='+sym+'USDT&interval=15m&limit=16',{cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():[];}).catch(function(){return [];})
 
   ]).then(function(res) {
@@ -4365,7 +4356,8 @@ function runBacktest() {
 
   // MEXC daily klines (primary -- confirmed working in Indonesia)
   var mexcSym = sym + 'USDT';
-  fetch('https://api.mexc.com/api/v3/klines?symbol=' + mexcSym + '&interval=1d&limit=' + Math.min(days, 1000), {cache:'no-store'})
+  // MEXC blocked by Kominfo - use CoinGecko for backtest
+  fetch('https://api.coingecko.com/api/v3/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(klines) {
       if(!klines || !klines.length) throw new Error('MEXC no data');
@@ -4706,7 +4698,7 @@ function runMultiBacktest() {
   MULTI_BT_PAIRS.forEach(function(pair, i) {
     document.getElementById('bt-loading-msg').textContent = 'Testing ' + pair.s + ' (' + (i+1) + '/' + MULTI_BT_PAIRS.length + ')...';
     setTimeout(function() {
-      fetch('https://api.mexc.com/api/v3/klines?symbol=' + pair.s + 'USDT&interval=1d&limit=' + Math.min(days,1000), {cache:'no-store'})
+      fetch('https://api.coingecko.com/api/v3/coins/' + pair.id + '/ohlc?vs_currency=usd&days=' + days, {cache:'no-store'})
         .then(function(r){ return r.ok ? r.json() : []; })
         .then(function(klines) {
           var ohlc = (klines||[]).map(function(k){ return [+k[0],+k[1],+k[2],+k[3],+k[4]]; });
