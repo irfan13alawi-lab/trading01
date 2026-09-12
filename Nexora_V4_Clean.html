@@ -1105,7 +1105,7 @@ function continueRefresh(pairs, fg, news) {
       var p = fp(sym);
       if (!p) return;
       var ids2 = ['k-btc','k-eth','k-sol'], cs = ['k-btcc','k-ethc','k-solc'], hs = ['h-btc','h-eth','h-eth'];
-      var ev = document.getElementById(ids2[i]);
+      var ev = document.getElementById(ids2[i]); if (!ev || !document.getElementById(cs[i])) return;
       ev.textContent = fP(p.price); ev.className = 'kv ' + (p.chg >= 0 ? 'up' : 'dn');
       document.getElementById(cs[i]).textContent = fC(p.chg);
       document.getElementById(cs[i]).className = 'ks ' + (p.chg >= 0 ? 'up' : 'dn');
