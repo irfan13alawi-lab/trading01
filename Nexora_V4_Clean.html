@@ -970,7 +970,7 @@ function doRefresh() {
     // Fear & Greed (always works)
     apf(ALT + '/fng/?limit=10&format=json'),
     // News (optional)
-    fetch('https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true&kind=news',{mode:'cors',cache:'no-store'})
+    Promise.resolve(null)
       .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})
   ]).then(function(res) {
     try {
