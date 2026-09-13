@@ -142,6 +142,7 @@ function defaultPaperState() {
     oiSnapshot: {},
     activeTrades: [],
     closedTrades: [],
+    invalidatedTrades: [],
     recentScans: []
   };
 }
@@ -155,8 +156,21 @@ function loadPaperState() {
       oiSnapshot: parsed.oiSnapshot || {},
       activeTrades: Array.isArray(parsed.activeTrades) ? parsed.activeTrades : [],
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [],
+      invalidatedTrades: Array.isArray(parsed.invalidatedTrades) ? parsed.invalidatedTrades : [],
       recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : []
     };
+    // Exclude historical trades from the first worker version. Their stop
+    // side was reversed, so counting them would corrupt the one-week trial.
+    const invalid = state.closedTrades.filter(trade => {
+      const entry = paperNumber(trade.entryLimit);
+      const sl = paperNumber(trade.sl);
+      if (!entry || !sl || !trade.dir) return false;
+      return trade.dir === 'SHORT' ? sl <= entry : sl >= entry;
+    });
+    if (invalid.length) {
+      state.invalidatedTrades = invalid.concat(state.invalidatedTrades).slice(0, 100);
+      state.closedTrades = state.closedTrades.filter(trade => invalid.indexOf(trade) < 0);
+    }
     // Repair paper orders created by the first worker version, which had the
     // stop side reversed for SHORT and LONG orders.
     state.activeTrades.forEach(trade => {
@@ -498,8 +512,10 @@ function paperStatus() {
     lastError: paperState.lastError, activeTrades: active,
     recentScans: paperState.recentScans.slice(0, 20),
     closedTrades: closed.slice(0, 100),
+    invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
     summary: {
       open, pending, closed: closed.length, wins, losses,
+      invalidated: paperState.invalidatedTrades.length,
       netR: Number(netR.toFixed(2))
     }
   };
