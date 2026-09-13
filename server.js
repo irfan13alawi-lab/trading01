@@ -10,6 +10,10 @@ const PAPER_MONITOR_MS = 30000;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_PER_SCAN = 3;
 const PAPER_MAX_ACTIVE = 30;
+// Keep enough server history for a normal one-week paper trial. The status
+// endpoint remains lightweight; /paper/history serves the full retained set.
+const PAPER_MAX_CLOSED_TRADES = 5000;
+const PAPER_MAX_RECENT_SCANS = 1000;
 const PAPER_STARTING_EQUITY = Number(process.env.PAPER_STARTING_EQUITY || 285);
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
@@ -30,6 +34,15 @@ const APIS = {
   '/coinpaprika': 'https://api.coinpaprika.com'
 };
 
+const sourceHealth = {};
+Object.keys(APIS).forEach(prefix => {
+  sourceHealth[prefix.slice(1)] = {
+    status: 'UNKNOWN', lastAttemptAt: null, lastOkAt: null,
+    lastErrorAt: null, lastLatencyMs: null, lastHttpStatus: null,
+    lastPath: null, lastError: null
+  };
+});
+
 const cache = new Map();
 const prefixes = Object.keys(APIS).sort((a, b) => b.length - a.length);
 
@@ -44,6 +57,40 @@ function corsHeaders() {
 function send(res, status, body, contentType) {
   res.writeHead(status, {...corsHeaders(), 'Content-Type': contentType || 'application/json'});
   res.end(body);
+}
+
+function markSourceHealth(prefix, result) {
+  const item = sourceHealth[prefix.slice(1)];
+  if (!item) return;
+  const now = new Date().toISOString();
+  item.lastAttemptAt = now;
+  item.lastLatencyMs = result.latencyMs;
+  item.lastHttpStatus = result.status;
+  item.lastPath = result.path || null;
+  if (result.status >= 200 && result.status < 300) {
+    item.status = 'LIVE';
+    item.lastOkAt = now;
+    item.lastError = null;
+  } else {
+    item.status = 'ERROR';
+    item.lastErrorAt = now;
+    item.lastError = 'HTTP ' + result.status;
+  }
+}
+
+function markSourceError(prefix, error, pathName) {
+  const item = sourceHealth[prefix.slice(1)];
+  if (!item) return;
+  const now = new Date().toISOString();
+  item.status = 'ERROR';
+  item.lastAttemptAt = now;
+  item.lastErrorAt = now;
+  item.lastPath = pathName || null;
+  item.lastError = error.message;
+}
+
+function sourceHealthView() {
+  return Object.fromEntries(Object.entries(sourceHealth).map(([name, item]) => [name, {...item}]));
 }
 
 function cacheTtl(prefix, pathname) {
@@ -263,7 +310,9 @@ function buildPaperPairs(payload) {
     paperState.oiSnapshot[sym] = oiUsd;
     const sc = paperScore(chg, fund, oi, previousOi > 0);
     const pair = {
-      sym, price, chg, fund, oi, oiUSD: oiUsd, sc,
+      sym, price, chg,
+      volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
+      fund, oi, oiUSD: oiUsd, sc,
       tier: paperTier(sc), sig: paperSignal(chg, oi, fund)
     };
     if (pair.tier === 'C' || pair.fund >= 0.005 ||
@@ -330,17 +379,77 @@ function paperTradeView(trade) {
     entryLimit: trade.entryLimit, entryActual: trade.entryActual || null,
     currentPrice: trade.currentPrice, sl: trade.sl, tp1: trade.tp1, tp2: trade.tp2,
     size: trade.size, contracts: trade.contracts, score: trade.score, tier: trade.tier,
-    fund: trade.fund, oi: trade.oi, createdAt: trade.createdAt,
+    fund: trade.fund, oi: trade.oi, volume: trade.volume || 0, mtf: trade.mtf || null,
+    createdAt: trade.createdAt,
     openedAt: trade.openedAt || null, cycleKey: trade.cycleKey,
-    unrealPnl: Number((trade.unrealPnl || 0).toFixed(2)), reason: trade.reason
+    unrealPnl: Number((trade.unrealPnl || 0).toFixed(2)),
+    executionModel: trade.executionModel || 'LIMIT_STRICT', reason: trade.reason
   };
 }
 
 function paperCandidateView(pair) {
+  const reasons = [];
+  if (pair.chg < 0) reasons.push('24H turun -> kandidat SHORT pullback');
+  else if (pair.chg > 0) reasons.push('24H naik -> kandidat LONG pullback');
+  if (pair.fund < 0) reasons.push('funding negatif');
+  if (pair.oi > 0) reasons.push('OI meningkat ' + pair.oi.toFixed(2) + '%');
+  if (Math.abs(pair.chg) <= 2) reasons.push('pergerakan belum terlalu extended');
+  if (pair.mtf) {
+    ['H4', 'H1', 'M15'].forEach(tf => {
+      const item = pair.mtf[tf];
+      if (item && item.direction !== 'NEUTRAL') reasons.push(tf + ' ' + item.direction);
+    });
+  }
   return {
-    sym: pair.sym, price: pair.price, chg: pair.chg, fund: pair.fund,
-    oi: pair.oi, score: pair.sc, tier: pair.tier, sig: pair.sig, rank: pair.rank
+    sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
+    fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
+    sig: pair.sig, rank: pair.rank, direction: pair.chg < 0 ? 'SHORT' : 'LONG',
+    mtf: pair.mtf || null, evidence: reasons
   };
+}
+
+async function fetchPaperCandles(sym, granularity) {
+  const target = APIS['/bitget'] +
+    '/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=' +
+    encodeURIComponent(sym + 'USDT') + '&granularity=' +
+    encodeURIComponent(granularity) + '&limit=3';
+  const startedAt = Date.now();
+  const result = await requestUpstream(target);
+  markSourceHealth('/bitget', {
+    ...result, latencyMs: Date.now() - startedAt,
+    path: '/api/v2/mix/market/candles'
+  });
+  if (result.status < 200 || result.status >= 300) throw new Error('Bitget candles HTTP ' + result.status);
+  const payload = JSON.parse(result.body);
+  if (!payload || payload.code !== '00000' || !Array.isArray(payload.data)) return [];
+  return payload.data.map(row => ({
+    ts: Number(row[0]), open: Number(row[1]), close: Number(row[4])
+  })).filter(row => row.open > 0 && row.close > 0).sort((a, b) => a.ts - b.ts);
+}
+
+function paperCandleEvidence(rows) {
+  if (!rows || !rows.length) return null;
+  const last = rows[rows.length - 1];
+  const change = (last.close - last.open) / last.open * 100;
+  return {
+    change: Number(change.toFixed(3)),
+    direction: change > 0.05 ? 'LONG' : change < -0.05 ? 'SHORT' : 'NEUTRAL'
+  };
+}
+
+async function enrichPaperMtf(pair) {
+  // One failed timeframe must not erase the other valid timeframes.
+  const rows = await Promise.all([
+    fetchPaperCandles(pair.sym, '4H').catch(() => []),
+    fetchPaperCandles(pair.sym, '1H').catch(() => []),
+    fetchPaperCandles(pair.sym, '15m').catch(() => [])
+  ]);
+  pair.mtf = {
+    H4: paperCandleEvidence(rows[0]),
+    H1: paperCandleEvidence(rows[1]),
+    M15: paperCandleEvidence(rows[2])
+  };
+  return pair;
 }
 
 function closePaperTrade(trade, exitPrice, outcome, reason) {
@@ -361,7 +470,7 @@ function closePaperTrade(trade, exitPrice, outcome, reason) {
     ...paperTradeView(trade), exitPrice, closedAt: trade.closedAt,
     outcome, closeReason: reason, r: trade.r, pnl: trade.pnl
   });
-  paperState.closedTrades = paperState.closedTrades.slice(0, 200);
+  paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
   console.log('[paper] closed', trade.sym, outcome, reason);
 }
 
@@ -403,6 +512,7 @@ async function runPaperScan(reason, requestedCycleKey) {
       selected.push(pair);
       activeSymbols.add(pair.sym);
     }
+    await Promise.all(selected.map(enrichPaperMtf));
     const placed = selected.map(pair => {
       const setup = paperSetup(pair);
       const id = 'VPS-' + String(++paperState.nextId).padStart(6, '0');
@@ -412,7 +522,9 @@ async function runPaperScan(reason, requestedCycleKey) {
         size: setup.size, contracts: setup.contracts, status: 'PENDING',
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
-        unrealPnl: 0, reason: 'Auto VPS: 15M scan'
+        volume: pair.volume, mtf: pair.mtf,
+        unrealPnl: 0, executionModel: 'LIMIT_STRICT',
+        reason: 'Auto VPS: 15M scan'
       };
       paperState.activeTrades.push(trade);
       console.log('[paper] placed', id, pair.sym, setup.dir, '@', setup.entry);
@@ -427,7 +539,7 @@ async function runPaperScan(reason, requestedCycleKey) {
       selected: ranked.slice(0, 10).map(paperCandidateView),
       placed
     });
-    paperState.recentScans = paperState.recentScans.slice(0, 100);
+    paperState.recentScans = paperState.recentScans.slice(0, PAPER_MAX_RECENT_SCANS);
     savePaperState();
     console.log('[paper] scan complete', cycleKey, 'placed', placed.length);
   } catch (error) {
@@ -469,12 +581,16 @@ async function monitorPaperTrades() {
             ...paperTradeView(trade), closedAt: trade.closedAt,
             closeReason: trade.closeReason, outcome: 'CANCELLED', pnl: 0, r: 0
           });
-          paperState.closedTrades = paperState.closedTrades.slice(0, 200);
+          paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
           changed = true;
         } else {
+          // Strict limit semantics: a buy limit fills only at or below its
+          // entry; a sell limit fills only at or above its entry. The old
+          // 0.5% tolerance made every new order fill immediately because the
+          // entry offset itself is only 0.3%.
           const filled = trade.dir === 'LONG'
-            ? price <= trade.entryLimit * 1.005
-            : price >= trade.entryLimit * 0.995;
+            ? price <= trade.entryLimit
+            : price >= trade.entryLimit;
           if (filled) {
             trade.status = 'OPEN';
             trade.entryActual = price;
@@ -554,6 +670,14 @@ function paperStatus() {
   };
 }
 
+function paperHistory() {
+  return {
+    ok: true,
+    closedTrades: paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES),
+    invalidatedTrades: paperState.invalidatedTrades.slice(0, 100)
+  };
+}
+
 function startPaperBot() {
   if (process.env.PAPER_BOT_ENABLED === 'false') return;
   paperStarted = true;
@@ -582,7 +706,8 @@ const server = http.createServer(async (req, res) => {
       service: 'nexora-proxy',
       port: PORT,
       paperBot: paperStarted,
-      time: new Date().toISOString()
+      time: new Date().toISOString(),
+      sources: sourceHealthView()
     }));
     return;
   }
@@ -592,6 +717,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperStatus()));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/history') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    send(res, 200, JSON.stringify(paperHistory()));
     return;
   }
 
@@ -617,12 +750,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    const startedAt = Date.now();
     const result = await requestUpstream(target);
+    result.latencyMs = Date.now() - startedAt;
+    result.path = upstreamPath;
+    markSourceHealth(prefix, result);
     if (result.status >= 200 && result.status < 300) {
       cache.set(key, {...result, expiresAt: Date.now() + cacheTtl(prefix, requestUrl.pathname)});
     }
     send(res, result.status, result.body, result.contentType);
   } catch (error) {
+    markSourceError(prefix, error, upstreamPath);
     console.error('[proxy]', prefix, upstreamPath, error.message);
     send(res, 502, JSON.stringify({error: 'Upstream unavailable', detail: error.message}));
   }
