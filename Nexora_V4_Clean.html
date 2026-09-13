@@ -2931,14 +2931,21 @@ function fetchMTFFromBitget(sym) {
   var now = Date.now();
   if(MTF_CACHE[sym] && now-MTF_CACHE[sym].ts<120000) return Promise.resolve(MTF_CACHE[sym]);
 
-  // Fetch completed 1H, 4H and 1D candles for the MTF percentage cards.
+  // Fetch completed 15M, 1H, 4H and 1D candles for the MTF percentage cards.
   return Promise.all([
+    fetchBitgetCandles(sym, '15m', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '1H', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '4H', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '1D', 7).catch(function(){return [];} )
   ]).then(function(res){
-    var h1data=res[0], h4data=res[1], d1data=res[2];
-    var result = {ts: Date.now(), p1h:null, p4h:null, p7d:null};
+    var m15data=res[0], h1data=res[1], h4data=res[2], d1data=res[3];
+    var result = {ts: Date.now(), p15m:null, p1h:null, p4h:null, p7d:null};
+
+    // 15M change: (close - open) / open * 100
+    if(m15data.length>=2){
+      var lastM15=m15data[m15data.length-1];
+      result.p15m = (parseFloat(lastM15[4])-parseFloat(lastM15[1]))/parseFloat(lastM15[1])*100;
+    }
 
     // 1H change: (close - open) / open * 100
     if(h1data.length>=2){
@@ -2970,7 +2977,8 @@ function fetchTopMTF() {
         p.p1h  = mtf.p1h == null ? undefined : mtf.p1h;
         p.p4h  = mtf.p4h == null ? undefined : mtf.p4h;
         p.p7d  = mtf.p7d == null ? undefined : mtf.p7d;
-        p.mtfReal = mtf.p1h !== null || mtf.p4h !== null || mtf.p7d !== null;
+        p.p15m = mtf.p15m == null ? undefined : mtf.p15m;
+        p.mtfReal = mtf.p15m !== null || mtf.p1h !== null || mtf.p4h !== null || mtf.p7d !== null;
         if(G.pairs.indexOf(p) >= 0) {
           renderTable();
           computeTop5(G.pairs);
@@ -3785,6 +3793,7 @@ function computeTop5(pairs) {
     var slEst    = topSetup ? topSetup.sl.price.toFixed(entryEst >= 1 ? 3 : 5) : (entryEst * (setupDir==='SHORT'?1.03:0.97)).toFixed(entryEst >= 1 ? 3 : 5);
     var tp1Est   = topSetup ? topSetup.tp.tp1.toFixed(entryEst >= 1 ? 3 : 5) : (entryEst * (setupDir==='SHORT'?0.94:1.06)).toFixed(entryEst >= 1 ? 3 : 5);
     var mtfBits  = [];
+    if(p.p15m != null) mtfBits.push('15M ' + fC(p.p15m));
     if(p.p4h != null) mtfBits.push('4H ' + fC(p.p4h));
     if(p.p1h != null) mtfBits.push('1H ' + fC(p.p1h));
     if(p.p7d != null) mtfBits.push('7D ' + fC(p.p7d));
