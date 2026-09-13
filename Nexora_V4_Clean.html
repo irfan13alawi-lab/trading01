@@ -765,7 +765,7 @@ function toast(msg, type) {
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
-  refreshing: false, derivsLoading: false, top5: [],
+  refreshing: false, derivsLoading: false, top5: [], paperServer: false,
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -803,6 +803,7 @@ var PROXY_BASE = window.location.port === '18084' ? 'http://' + window.location.
 var CG = PROXY_BASE ? PROXY_BASE + '/coingecko/api/v3' : 'https://api.coingecko.com/api/v3';
 var ALT = PROXY_BASE ? PROXY_BASE + '/altme' : 'https://api.alternative.me';
 var CP_API = PROXY_BASE ? PROXY_BASE + '/coinpaprika' : 'https://api.coinpaprika.com';
+var PAPER_API = PROXY_BASE ? PROXY_BASE + '/paper' : '';
 
 function fP(v) {
   if (v == null) return '--';
@@ -3600,7 +3601,7 @@ var BOT = {
   priceMonitorTimer: null,
   scanTimer: null,
   maxConcurrent: 30,
-  pendingTtlMs: 45 * 60 * 1000,
+  pendingTtlMs: 120 * 60 * 1000,
   perScan: 3,        // how many limit orders to place per scan (1-10)
   riskPct: 2,
   get equity() {
@@ -3609,6 +3610,78 @@ var BOT = {
     return el ? (parseFloat(el.value) || 285) : 285;
   }
 };
+
+// ---- VPS paper bot viewer ----
+// When the dashboard is served by the VPS, the server is the source of truth.
+// The browser only polls this endpoint, so closing the tab does not stop paper
+// scans. Local-file mode keeps the browser fallback for development.
+function applyServerPaperStatus(status, announce) {
+  if(!status || !status.ok) return;
+  var wasServer = G.paperServer;
+  G.paperServer = true;
+  BOT.paperMode = false;
+  BOT.activeTrades = Array.isArray(status.activeTrades) ? status.activeTrades : [];
+
+  var btn = document.getElementById('paper-toggle');
+  var lbl = document.getElementById('paper-mode-lbl');
+  var panel = document.getElementById('active-trades-panel');
+  if(btn) {
+    btn.style.background = 'rgba(63,185,80,.2)';
+    btn.style.borderColor = 'rgba(63,185,80,.5)';
+    btn.style.color = '#3fb950';
+    btn.title = 'Paper Bot berjalan di VPS — browser boleh ditutup';
+  }
+  if(lbl) {
+    lbl.textContent = 'PAPER VPS ON';
+    lbl.style.color = '#3fb950';
+  }
+  if(panel) panel.style.display = 'flex';
+  var perScan = document.getElementById('bot-per-scan');
+  if(perScan) perScan.textContent = status.perScan || 3;
+  var maxConc = document.getElementById('bot-max-conc');
+  if(maxConc) maxConc.textContent = status.maxConcurrent || 30;
+  updateActiveTradesPanel();
+  if(announce && !wasServer) {
+    sLog('PAPER BOT VPS CONNECTED — scan 15M, top 3, pending expiry 120m');
+    toast('<b style="color:#3fb950;">PAPER VPS ON</b> — browser boleh ditutup, bot tetap berjalan', 'a');
+  }
+}
+
+function useBrowserPaperFallback(message) {
+  if(G.paperServer) return;
+  if(message) sLog(message);
+  setPaperMode(true, true);
+}
+
+function pollPaperBotStatus() {
+  if(!PAPER_API || !G.paperServer) return;
+  fetch(PAPER_API + '/status', {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(status){
+      if(status && status.ok && status.running) applyServerPaperStatus(status, false);
+    })
+    .catch(function(){ /* keep the last known VPS state during a brief outage */ });
+}
+
+function detectPaperBot() {
+  if(!PAPER_API) {
+    useBrowserPaperFallback('PAPER VPS tidak tersedia pada file lokal — memakai browser fallback');
+    return;
+  }
+  fetch(PAPER_API + '/status', {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(status){
+      if(status && status.ok && status.running) {
+        applyServerPaperStatus(status, true);
+        setInterval(pollPaperBotStatus, 15000);
+      } else {
+        useBrowserPaperFallback('PAPER VPS belum aktif — memakai browser fallback');
+      }
+    })
+    .catch(function(){
+      useBrowserPaperFallback('PAPER VPS belum dapat dihubungi — memakai browser fallback');
+    });
+}
 
 // ---- Paper Mode control ----
 function setPaperMode(enabled, quiet) {
@@ -3641,6 +3714,10 @@ function setPaperMode(enabled, quiet) {
 }
 
 function togglePaperMode() {
+  if(G.paperServer) {
+    toast('<b style="color:#3fb950;">PAPER VPS ON</b> — mode server selalu aktif selama service VPS berjalan', 'a');
+    return;
+  }
   setPaperMode(!BOT.paperMode, false);
 }
 
@@ -3838,8 +3915,8 @@ function monitorActiveTrades() {
     if(trade.status === 'PENDING') {
       if(trade.createdAt && Date.now() - trade.createdAt > BOT.pendingTtlMs) {
         trade.status = 'CANCELLED';
-        trade.closeReason = 'Pending limit expired after 45 minutes';
-        sLog('BOT CANCELLED: '+trade.sym+' pending limit expired after 45 minutes');
+        trade.closeReason = 'Pending limit expired after 120 minutes';
+        sLog('BOT CANCELLED: '+trade.sym+' pending limit expired after 120 minutes');
         changed = true;
         return;
       }
@@ -3980,6 +4057,7 @@ function updateActiveTradesPanel() {
     var statusCol = t.status==='OPEN'?'#3fb950':t.status==='PENDING'?'#e3b341':'#484f58';
     var unreal = t.unrealPnl || 0;
     var unrealStr = t.status==='OPEN' ? ' | PnL: <span style="color:'+(unreal>=0?'#3fb950':'#f85149')+'">'+(unreal>=0?'+':'')+'$'+unreal.toFixed(2)+'</span>' : '';
+    var cancelBtn = G.paperServer ? '' : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
     return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;">'
       + '<span style="color:'+statusCol+';font-size:9px;min-width:50px;">'+t.status+'</span>'
       + '<b>'+t.sym+'</b>'
@@ -3987,7 +4065,7 @@ function updateActiveTradesPanel() {
       + '<span style="color:#484f58;">SL: <span style="color:#f85149;">$'+t.sl+'</span></span>'
       + '<span style="color:#484f58;">TP: <span style="color:#3fb950;">$'+t.tp1+'</span></span>'
       + unrealStr
-      + '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>'
+      + cancelBtn
       + '</div>';
   }).join('');
 }
@@ -4447,15 +4525,16 @@ if(_loaded) {
     }
   } catch(e) {}
 }
-// Paper mode is enabled by default for the one-week observation period.
-// The manual toggle remains available as an emergency pause.
-setPaperMode(true, true);
+// Prefer the VPS Paper Bot. Browser timers are only a development fallback
+// when this HTML is opened locally or the VPS bot is unavailable.
+setPaperMode(false, true);
+detectPaperBot();
 doRefresh();
 setInterval(doRefresh, 60000);
 tickCD();
 setInterval(tickCD, 1000);
 setTimeout(function(){
-  if(BOT.paperMode) queuePaperExecution('startup-' + Date.now());
+  if(BOT.paperMode && !G.paperServer) queuePaperExecution('startup-' + Date.now());
 }, 8000);
 
 

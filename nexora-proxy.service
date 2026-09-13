@@ -1,0 +1,16 @@
+[Unit]
+Description=Nexora proxy and VPS paper trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/nexora-proxy
+Environment=PAPER_BOT_ENABLED=true
+ExecStart=/usr/bin/env node /home/ubuntu/nexora-proxy/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
