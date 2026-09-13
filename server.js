@@ -121,7 +121,11 @@ function paperNextQuarter(timestamp) {
 }
 
 function paperRoundPrice(value) {
-  const decimals = value >= 1000 ? 3 : value >= 1 ? 4 : 6;
+  const absolute = Math.abs(value);
+  const decimals = absolute >= 1000 ? 3
+    : absolute >= 1 ? 4
+    : absolute >= 0.01 ? 5
+    : absolute >= 0.0001 ? 7 : 10;
   return Number(value.toFixed(decimals));
 }
 
@@ -145,7 +149,7 @@ function defaultPaperState() {
 function loadPaperState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(PAPER_STATE_FILE, 'utf8'));
-    return {
+    const state = {
       ...defaultPaperState(),
       ...parsed,
       oiSnapshot: parsed.oiSnapshot || {},
@@ -153,6 +157,16 @@ function loadPaperState() {
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [],
       recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : []
     };
+    // Repair paper orders created by the first worker version, which had the
+    // stop side reversed for SHORT and LONG orders.
+    state.activeTrades.forEach(trade => {
+      const entry = paperNumber(trade.entryLimit);
+      if (!entry || !trade.dir) return;
+      trade.sl = paperRoundPrice(entry * (trade.dir === 'LONG' ? 0.97 : 1.03));
+      trade.tp1 = paperRoundPrice(entry * (trade.dir === 'LONG' ? 1.06 : 0.94));
+      trade.tp2 = paperRoundPrice(entry * (trade.dir === 'LONG' ? 1.10 : 0.90));
+    });
+    return state;
   } catch (_) {
     return defaultPaperState();
   }
@@ -249,7 +263,7 @@ function buildPaperPairs(payload) {
 function paperSetup(pair) {
   const dir = pair.chg < 0 ? 'SHORT' : 'LONG';
   const entry = pair.price * (dir === 'LONG' ? 0.997 : 1.003);
-  const sl = entry * (dir === 'LONG' ? 1.03 : 0.97);
+  const sl = entry * (dir === 'LONG' ? 0.97 : 1.03);
   const tp1 = entry * (dir === 'LONG' ? 1.06 : 0.94);
   const tp2 = entry * (dir === 'LONG' ? 1.10 : 0.90);
   const riskDollar = 285 * 0.02;
