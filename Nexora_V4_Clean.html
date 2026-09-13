@@ -1232,7 +1232,7 @@ function doRefresh() {
         vol:   vol,
         fund:  fund,
         fundReal: fundReal,
-        fundSrc:  fundReal ? 'Bitget' : 'est',
+        fundSrc:  spotMarket ? 'N/A' : (fundReal ? 'Bitget' : 'est'),
         oi:    oi,
         oiUSD: oiRaw,
         liq:   spotMarket ? 0 : liq,
@@ -2659,8 +2659,8 @@ function normaliseOhlc(rows) {
   }).sort(function(a,b){ return a[0]-b[0]; });
 }
 
-// Use Bitget daily candles first. CoinGecko is only a fallback for symbols
-// that do not have a futures market or when the exchange endpoint is down.
+// Use candles from the selected market. CoinGecko is used only when it is the
+// explicitly selected Spot source; Futures never gets silently mixed with it.
 function fetchMarketHistory(coinId, sym, days) {
   var symbol = sym || coinSymbolForId(coinId);
   var wanted = Math.max(2, Math.min(1000, parseInt(days,10) || 30));
@@ -2941,7 +2941,7 @@ function requestNotifPermission() {
 // ============================================================
 // UPGRADE 1: CANDLE PATTERN RECOGNITION
 // Calculates Hammer, Engulf, Doji, Shooting Star from OHLC data
-// Uses the same Bitget history path as the chart, with CoinGecko fallback.
+// Uses the same selected-market history path as the chart.
 // ============================================================
 var CANDLE_CACHE = {}; // { 'BTC': { pattern, signal, ts } }
 
@@ -5427,7 +5427,7 @@ setInterval(saveToStorage, 30000); // auto-save every 30s
 
 // ============================================================
 // BACKTEST ENGINE V4.4
-// Uses real Bitget daily candles with CoinGecko fallback
+// Uses real candles from the selected market.
 // Strategy: V4.4 signals applied to historical candles
 // ============================================================
 var BT = { results: [], running: false };
