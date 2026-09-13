@@ -433,7 +433,9 @@ function paperTradeView(trade) {
     createdAt: trade.createdAt,
     openedAt: trade.openedAt || null, cycleKey: trade.cycleKey,
     unrealPnl: Number((trade.unrealPnl || 0).toFixed(2)),
-    executionModel: trade.executionModel || 'LIMIT_STRICT', reason: trade.reason
+    mfePnl: Number((trade.mfePnl || 0).toFixed(2)),
+    maePnl: Number((trade.maePnl || 0).toFixed(2)),
+    executionModel: trade.executionModel || 'LEGACY_TOLERANCE', reason: trade.reason
   };
 }
 
@@ -606,7 +608,8 @@ async function runPaperScan(reason, requestedCycleKey) {
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, mtf: pair.mtf,
-        unrealPnl: 0, executionModel: 'LIMIT_STRICT',
+        unrealPnl: 0, mfePnl: 0, maePnl: 0,
+        executionModel: 'LIMIT_STRICT',
         reason: 'Auto VPS: 15M scan'
       };
       paperState.activeTrades.push(trade);
@@ -694,6 +697,8 @@ async function monitorPaperTrades() {
       const entry = trade.entryActual || trade.entryLimit;
       trade.unrealPnl = ((price - entry) / entry) * trade.size *
         (trade.dir === 'LONG' ? 1 : -1);
+      trade.mfePnl = Math.max(paperNumber(trade.mfePnl), trade.unrealPnl);
+      trade.maePnl = Math.min(paperNumber(trade.maePnl), trade.unrealPnl);
       if (trade.dir === 'LONG' && price <= trade.sl) {
         closePaperTrade(trade, price, 'LOSS', 'Hit SL');
         changed = true;

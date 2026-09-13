@@ -2034,18 +2034,24 @@ function deleteTrade(idx) {
 }
 
 function exportJournal() {
-  var rows = ['#,Pair,Dir,Entry,Exit,R,PnL,Mode,TF,Outcome,ExitReason,Checklist%,Date,WhatWorked,WhatWentWrong,Lesson'];
-  G.trades.forEach(function(t, i) {
-    rows.push([i+1, t.sym, t.dir, t.entry, t.exit, t.r.toFixed(2), t.pnl.toFixed(2),
-      t.mode, t.tf, t.outcome, '"'+t.exitReason+'"', t.checksPct+'%', t.dt,
-      '"'+t.good+'"', '"'+t.bad+'"', '"'+t.lesson+'"'].join(','));
+  var source = G.paperServer ? G.vpsClosed : G.trades;
+  var exportTrades = journalFilteredTrades(source);
+  function csvCell(value) {
+    return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+  }
+  var rows = ['#,Pair,Dir,Entry,Exit,R,PnL,Mode,TF,Outcome,ExitReason,Checklist%,Date,DurationMin,MFE_PnL,MAE_PnL,ExecutionModel,WhatWorked,WhatWentWrong,Lesson'];
+  exportTrades.forEach(function(t, i) {
+    rows.push([i+1, csvCell(t.sym), csvCell(t.dir), t.entry, t.exit, Number(t.r||0).toFixed(2), Number(t.pnl||0).toFixed(2),
+      csvCell(t.mode), csvCell(t.tf), csvCell(t.outcome), csvCell(t.exitReason), (t.checksPct||0)+'%', csvCell(t.dt),
+      t.durationMs ? Math.round(t.durationMs/60000) : '', Number(t.mfePnl||0).toFixed(2), Number(t.maePnl||0).toFixed(2), csvCell(t.executionModel || ''),
+      csvCell(t.good), csvCell(t.bad), csvCell(t.lesson)].join(','));
   });
   var blob = new Blob([rows.join('\n')], {type:'text/csv'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'nexora-journal-' + new Date().toISOString().slice(0,10) + '.csv';
   a.click();
-  sLog('Journal exported: ' + G.trades.length + ' trades');
+  sLog('Journal exported: ' + exportTrades.length + ' trades');
 }
 
 function renderEquity() {
@@ -2069,6 +2075,26 @@ function renderEquity() {
   data.forEach(function(v){ if(v>peak) peak=v; if(peak-v>mdd) mdd=peak-v; });
   var totalPnl = trades.reduce(function(s,t){return s+(t.pnl||0);}, 0);
   var avgCheck = trades.length ? Math.round(trades.reduce(function(s,t){return s+(t.checksPct||0);},0)/trades.length) : 0;
+  var avgWin = wins ? trades.filter(function(t){return t.r>0;}).reduce(function(s,t){return s+t.r;},0)/wins : 0;
+  var avgLoss = losses ? trades.filter(function(t){return t.r<0;}).reduce(function(s,t){return s+t.r;},0)/losses : 0;
+  var tracked = trades.filter(function(t){return t.durationMs>0;});
+  var avgDurationMs = tracked.length ? tracked.reduce(function(s,t){return s+t.durationMs;},0)/tracked.length : 0;
+  var avgMfe = trades.length ? trades.reduce(function(s,t){return s+Number(t.mfePnl||0);},0)/trades.length : 0;
+  var avgMae = trades.length ? trades.reduce(function(s,t){return s+Number(t.maePnl||0);},0)/trades.length : 0;
+  var bySymbol = {};
+  trades.forEach(function(t){
+    if(!bySymbol[t.sym]) bySymbol[t.sym] = {count:0,wins:0,r:0,pnl:0};
+    bySymbol[t.sym].count++;
+    if(t.r>0) bySymbol[t.sym].wins++;
+    bySymbol[t.sym].r += Number(t.r||0);
+    bySymbol[t.sym].pnl += Number(t.pnl||0);
+  });
+  var symbolRows = Object.keys(bySymbol).sort(function(a,b){return bySymbol[b].r-bySymbol[a].r;}).slice(0,8);
+  function durationLabel(ms) {
+    if(!ms) return '--';
+    var mins = Math.round(ms/60000);
+    return mins >= 60 ? Math.floor(mins/60) + 'h ' + (mins%60) + 'm' : mins + 'm';
+  }
 
   document.getElementById('e-cnt').textContent = trades.length;
   document.getElementById('e-wr').textContent = wr + '%';
@@ -2131,10 +2157,14 @@ function renderEquity() {
     + '<div><span style="color:#484f58;">Wins</span><br><b style="color:#3fb950;">' + wins + '</b></div>'
     + '<div><span style="color:#484f58;">Losses</span><br><b style="color:#f85149;">' + losses + '</b></div>'
     + '<div><span style="color:#484f58;">Break Even</span><br><b style="color:#8b949e;">' + bes + '</b></div>'
-    + '<div><span style="color:#484f58;">Total P&L</span><br><b style="color:' + (totalPnl>=0?'#3fb950':'#f85149') + ';">$' + totalPnl.toFixed(2) + '</b></div>'
-    + '<div><span style="color:#484f58;">Max DD</span><br><b style="color:#f85149;">' + mdd.toFixed(1) + 'R</b></div>'
-    + '<div><span style="color:#484f58;">Avg Checklist</span><br><b style="color:' + (avgCheck>=80?'#3fb950':avgCheck>=60?'#f0883e':'#f85149') + ';">' + avgCheck + '%</b></div>'
-    + '</div>';
+     + '<div><span style="color:#484f58;">Total P&L</span><br><b style="color:' + (totalPnl>=0?'#3fb950':'#f85149') + ';">$' + totalPnl.toFixed(2) + '</b></div>'
+     + '<div><span style="color:#484f58;">Max DD</span><br><b style="color:#f85149;">' + mdd.toFixed(1) + 'R</b></div>'
+     + '<div><span style="color:#484f58;">Avg Checklist</span><br><b style="color:' + (avgCheck>=80?'#3fb950':avgCheck>=60?'#f0883e':'#f85149') + ';">' + avgCheck + '%</b></div>'
+     + '<div><span style="color:#484f58;">Avg Win / Loss</span><br><b style="color:#3fb950;">+' + avgWin.toFixed(2) + 'R</b> / <b style="color:#f85149;">' + (avgLoss>=0?'+':'') + avgLoss.toFixed(2) + 'R</b></div>'
+     + '<div><span style="color:#484f58;">Avg Duration</span><br><b style="color:#58a6ff;">' + durationLabel(avgDurationMs) + '</b></div>'
+     + '<div><span style="color:#484f58;">Avg MFE / MAE</span><br><b style="color:#3fb950;">+$' + avgMfe.toFixed(2) + '</b> / <b style="color:#f85149;">$' + avgMae.toFixed(2) + '</b></div>'
+     + (symbolRows.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By symbol</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + symbolRows.map(function(sym){var st=bySymbol[sym];return '<span class="badge ' + (st.r>=0?'ba':'br') + '" title="' + sourceEsc(sym) + '">' + sourceEsc(sym) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.wins/st.count*100) + '%)</span>';}).join('') + '</div></div>' : '')
+     + '</div>';
 
   // Lesson wall
   var lessons = trades.filter(function(t){return t.lesson&&t.lesson.length>2;}).slice(-8).reverse();
@@ -3910,6 +3940,12 @@ function applyServerClosedTrades(closedTrades) {
       mode: 'AUTO VPS',
       tf: '15M',
       dateKey: t.closedAt || '',
+      executionModel: t.executionModel || 'LEGACY_TOLERANCE',
+      openedAt: t.openedAt || '',
+      closedAt: t.closedAt || '',
+      durationMs: t.openedAt && t.closedAt ? Math.max(0, new Date(t.closedAt) - new Date(t.openedAt)) : 0,
+      mfePnl: Number(t.mfePnl || 0),
+      maePnl: Number(t.maePnl || 0),
       outcome: t.outcome || 'BE',
       exitReason: t.closeReason || '',
       good: t.outcome === 'WIN' ? 'Paper Bot VPS reached target' : '',
