@@ -1426,6 +1426,9 @@ function switchCoin(id, s) {
   loadCandle(id, G.iv);
   loadRSI(id);
   loadOrderFlow(s);
+  // Keep the Phase 2 card synchronized without forcing the user away from
+  // the current page. The same selection drives chart, MTF and setup data.
+  try { runP2Analysis(s, id, true); } catch(e) {}
 }
 
 function orderPrice(value) {
@@ -4597,9 +4600,9 @@ function runConnectionTest() {
 // ============================================================
 var P2 = { coin: null, data: null, lastMTF: null };
 
-function runP2Analysis(sym, coinId) {
+function runP2Analysis(sym, coinId, keepCurrentPage) {
   // Switch to Phase 2 tab
-  sp('p-p2', document.getElementById('nt-p2'));
+  if(!keepCurrentPage) sp('p-p2', document.getElementById('nt-p2'));
 
   var p = null;
   for (var i = 0; i < G.pairs.length; i++) {
