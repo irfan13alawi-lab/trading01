@@ -1263,7 +1263,7 @@ function runScan(autoMeta) {
     var gems = G.pairs.filter(function(p){ return p.layer==='L2' && p.fund<0 && p.oi>0; });
     sLog('Layer 2 complete: ' + gems.length + ' hidden gems');
     gems.slice(0,5).forEach(function(g) {
-      sLog('  GEM: ' + g.s + ' fund=' + g.fund.toFixed(4) + '% oi=' + g.oi.toFixed(1) + '% sc=' + g.sc);
+      sLog('  GEM: ' + g.s + ' fund=' + (g.fund*100).toFixed(4) + '% oi=' + g.oi.toFixed(1) + '% sc=' + g.sc);
     });
     var at = G.pairs.filter(function(p){return p.tier==='A';});
     sLog('DONE: ' + G.pairs.length + ' pairs | ' + at.length + ' A-TIER');
@@ -1378,7 +1378,7 @@ function renderTable() {
     row += '<td>' + fP(p.price) + '</td>';
     row += '<td class="' + cc + '">' + fC(p.chg) + '</td>';
     row += '<td>' + fV(p.vol) + '</td>';
-    row += '<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + p.fund.toFixed(4) + '%' + fundSrc + '</td>';
+    row += '<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%' + fundSrc + '</td>';
     row += '<td class="' + oc + '">' + (p.oi >= 0 ? 'up' : 'dn') + Math.abs(p.oi).toFixed(1) + '%</td>';
     row += '<td class="' + (p.liq>1e6?'up':'nu') + '">' + fV(p.liq) + '</td>';
     var scColor = p.sc >= 8 ? '#3fb950' : p.sc >= 6.5 ? '#58a6ff' : '#484f58';
@@ -1559,7 +1559,7 @@ function renderFund(pairs) {
     colorAxis:{min:-0.05,max:0.05,stops:[[0,'#3fb950'],[0.5,'#21262d'],[1,'#f85149']],labels:{style:{color:'#8b949e',fontSize:'9px'}}},
     legend:{enabled:false},
     tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},
-      formatter:function(){ var i=this.point.x+this.point.y*5,p=top[i]; return p ? '<b>'+p.s+'</b><br>Funding: '+(p.fund>=0?'+':'')+p.fund.toFixed(4)+'%' : false; }},
+      formatter:function(){ var i=this.point.x+this.point.y*5,p=top[i]; return p ? '<b>'+p.s+'</b><br>Funding: '+(p.fund>=0?'+':'')+(p.fund*100).toFixed(4)+'%' : false; }},
     series:[{name:'F',data:cd,dataLabels:{enabled:true,color:'#c9d1d9',style:{fontSize:'9px',fontWeight:'600',textOutline:'none'},
       formatter:function(){ var i=this.point.x+this.point.y*5; return top[i]?top[i].s:''; }},
       borderColor:'#07090f',borderWidth:1}],
@@ -1713,7 +1713,7 @@ function renderPump() {
   function gemRow(p, rank) {
     return '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.03);">'
       + '<div><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">L2</span><br>'
-      + '<span style="font-size:9px;color:#3fb950;">F: ' + p.fund.toFixed(4) + '%</span> '
+      + '<span style="font-size:9px;color:#3fb950;">F: ' + (p.fund*100).toFixed(4) + '%</span> '
       + '<span style="font-size:9px;color:#58a6ff;">OI: +' + p.oi.toFixed(1) + '%</span></div>'
       + '<b style="color:#58a6ff;">' + p.sc + '/12</b></div>';
   }
@@ -2315,7 +2315,7 @@ function renderOIFromDeriv() {
     rows.push('<td>' + oiUSD + '</td>');
     rows.push('<td class="' + (p.oi * 0.3 >= 0 ? 'up' : 'dn') + '">' + (p.oi * 0.3 >= 0 ? '+' : '') + (p.oi * 0.3).toFixed(2) + '%</td>');
     rows.push('<td class="' + (p.oi >= 0 ? 'up' : 'dn') + '">' + (p.oi >= 0 ? '+' : '') + p.oi.toFixed(2) + '%</td>');
-    rows.push('<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + p.fund.toFixed(4) + '%' + fundSrc + '</td>');
+    rows.push('<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%' + fundSrc + '</td>');
     rows.push('<td class="' + (p.liq > 1e6 ? 'up' : 'nu') + '">' + fV(p.liq) + '</td>');
     rows.push('</tr>');
   });
@@ -2334,7 +2334,7 @@ function renderOIFromDeriv() {
     ladder.push(srcTag);
     ladder.push('<div style="flex:1;margin:0 8px;height:4px;background:#07090f;border-radius:2px;overflow:hidden;">');
     ladder.push('<div style="height:100%;width:' + bw + '%;background:' + col + ';border-radius:2px;' + (p.fund < 0 ? 'margin-left:auto;' : '') + '"></div></div>');
-    ladder.push('<span style="color:' + col + ';font-size:10px;font-weight:700;min-width:60px;text-align:right;">' + (p.fund >= 0 ? '+' : '') + p.fund.toFixed(4) + '%</span>');
+    ladder.push('<span style="color:' + col + ';font-size:10px;font-weight:700;min-width:60px;text-align:right;">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%</span>');
     ladder.push('</div>');
   });
   document.getElementById('fund-ladder').innerHTML = ladder.join('');
@@ -2359,7 +2359,7 @@ function fetchOI() {
     rows.push('<td>' + oi_usd + '</td>');
     rows.push('<td class="' + (p.oi*0.3>=0?'up':'dn') + '">' + (p.oi*0.3>=0?'+':'') + (p.oi*0.3).toFixed(2) + '%</td>');
     rows.push('<td class="' + (p.oi>=0?'up':'dn') + '">' + (p.oi>=0?'+':'') + p.oi.toFixed(2) + '%</td>');
-    rows.push('<td style="' + fc + '">' + (p.fund>=0?'+':'') + p.fund.toFixed(4) + '%</td>');
+    rows.push('<td style="' + fc + '">' + (p.fund>=0?'+':'') + (p.fund*100).toFixed(4) + '%</td>');
     rows.push('<td class="' + (p.liq>1e6?'up':'nu') + '">' + fV(p.liq) + '</td>');
     rows.push('</tr>');
   });
@@ -2374,7 +2374,7 @@ function fetchOI() {
     ladder.push('<b style="min-width:55px;font-size:11px;">' + p.s + '</b>');
     ladder.push('<div style="flex:1;margin:0 8px;height:4px;background:#07090f;border-radius:2px;overflow:hidden;">');
     ladder.push('<div style="height:100%;width:' + bw + '%;background:' + col + ';border-radius:2px;' + (p.fund<0?'margin-left:auto;':'') + '"></div></div>');
-    ladder.push('<span style="color:' + col + ';font-size:10px;font-weight:700;min-width:60px;text-align:right;">' + (p.fund>=0?'+':'') + p.fund.toFixed(4) + '%</span>');
+    ladder.push('<span style="color:' + col + ';font-size:10px;font-weight:700;min-width:60px;text-align:right;">' + (p.fund>=0?'+':'') + (p.fund*100).toFixed(4) + '%</span>');
     ladder.push('</div>');
   });
   document.getElementById('fund-ladder').innerHTML = ladder.join('');
@@ -4677,7 +4677,7 @@ function runP2Analysis(sym, coinId, keepCurrentPage) {
   document.getElementById('p2-prox-val').style.color = proxColor;
   document.getElementById('p2-prox-lbl').textContent = proxStatus;
   document.getElementById('p2-sc').textContent = p.sc + '/12';
-  var fStr = p.fund < 0 ? 'Funding: ' + p.fund.toFixed(4) + '% (NEGATIVE - good)' : 'Funding: ' + p.fund.toFixed(4) + '%';
+  var fStr = p.fund < 0 ? 'Funding: ' + (p.fund*100).toFixed(4) + '% (NEGATIVE - good)' : 'Funding: ' + (p.fund*100).toFixed(4) + '%';
   document.getElementById('p2-funding').textContent = fStr;
   document.getElementById('p2-funding').style.color = p.fund < 0 ? '#3fb950' : '#8b949e';
 
