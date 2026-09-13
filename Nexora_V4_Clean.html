@@ -220,7 +220,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">uPnL</span><span class="v" id="bot-upnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
-  <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">5</span></div>
+  <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">30</span></div>
   <div id="bot-trades-list" style="flex:1 1 100%;display:flex;gap:8px;flex-wrap:wrap;"></div>
 </div>
 
@@ -765,7 +765,7 @@ function toast(msg, type) {
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
-  refreshing: false,
+  refreshing: false, derivsLoading: false, top5: [],
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -960,6 +960,7 @@ function buildDemoPairs() {
 
 function doRefresh() {
   G.refreshing = true;
+  G.derivsLoading = true;
   setDot('loading'); setUpd('Loading...');
 
   // QW sandbox detection (same as before - localStorage throws in sandbox)
@@ -984,6 +985,7 @@ function doRefresh() {
     document.getElementById('scan-ts').textContent = 'Preview mode';
     sLog('QW sandbox detected - showing demo data. Open in browser for live Bitget data.');
     G.refreshing = false;
+    G.derivsLoading = false;
     return;
   }
 
@@ -1074,6 +1076,7 @@ function doRefresh() {
     } catch(ethen) { sLog('Render error: ' + (ethen.message||ethen)); }
   }).catch(function(e) {
     G.refreshing = false;
+    G.derivsLoading = false;
     setDot('err'); setUpd('Error');
     sLog('Fetch error: ' + (e&&e.message||e));
     document.getElementById('tbody').innerHTML = '<tr><td colspan="15"><div class="ld" style="color:#f0883e;"><span>Fetch error. Retrying in 30s...</span></div></td></tr>';
@@ -1183,12 +1186,13 @@ function continueRefresh(pairs, fg, news) {
     setTimeout(function(){
       fetchRealDerivatives(derivSyms).then(function() {
         enrichPairsWithDerivatives();
-      }).catch(function(e){ sLog('Derivatives: ' + (e&&e.message||'unavailable')); });
+      }).catch(function(e){ sLog('Derivatives: ' + (e&&e.message||'unavailable')); })
+        .then(function(){ G.derivsLoading = false; });
     }, 1500);
-    } catch(ethen) { sLog('Render error: ' + (ethen.message||ethen)); }
+    } catch(ethen) { G.derivsLoading = false; sLog('Render error: ' + (ethen.message||ethen)); }
 }
 
-function runScan() {
+function runScan(autoMeta) {
   setDot('loading'); setUpd('Scanning...');
   sLog('=== V4.4 SCAN START ===');
   sLog('Layer 1: fetching top-20 OI pairs...');
@@ -1211,6 +1215,9 @@ function runScan() {
     sLog('DONE: ' + G.pairs.length + ' pairs | ' + at.length + ' A-TIER');
     if (at.length) {
       toast('<b>' + at.length + ' A-TIER found!</b><br>' + at.slice(0,3).map(function(p){return p.s + ' (' + p.sc + ')';}).join(', '), 'a');
+    }
+    if (BOT.paperMode) {
+      queuePaperExecution(autoMeta && autoMeta.cycleKey ? autoMeta.cycleKey : 'scan-' + Date.now());
     }
   }
   setTimeout(function(){ finishScan(0); }, 500);
@@ -3486,7 +3493,7 @@ function directionForPair(pair) {
 }
 
 function computeTop5(pairs) {
-  if(!pairs||!pairs.length) return;
+  if(!pairs||!pairs.length) { G.top5 = []; return; }
 
   // Score each pair
   var ranked = pairs.map(function(p) {
@@ -3511,7 +3518,8 @@ function computeTop5(pairs) {
     .sort(function(a,b){ return b.rank - a.rank; })
     .slice(0, 5);
 
-  if(!ranked.length) return;
+  if(!ranked.length) { G.top5 = []; return; }
+  G.top5 = ranked.map(function(r){ return r.p; });
 
   var modeNames = { A:'S/D Bounce', B:'Breakout', C:'Continuity' };
   var html = ranked.map(function(r, i) {
@@ -3579,7 +3587,7 @@ function runP2FromTop5(sym, coinId) {
 
 // ============================================================
 // PAPER BOT ENGINE
-// Auto-scan every 1H close, auto-execute top 3 setups as paper
+// Auto-scan every 15M close, auto-execute top 3 setups as paper
 // trades with limit orders, price monitor every 5 min
 // ============================================================
 
@@ -3588,9 +3596,11 @@ var BOT = {
   activeTrades: [],
   tradeIdSeq: 0,
   lastScan1H: 0,
+  lastExecKey: '',
   priceMonitorTimer: null,
   scanTimer: null,
-  maxConcurrent: 10,
+  maxConcurrent: 30,
+  pendingTtlMs: 45 * 60 * 1000,
   perScan: 3,        // how many limit orders to place per scan (1-10)
   riskPct: 2,
   get equity() {
@@ -3600,9 +3610,9 @@ var BOT = {
   }
 };
 
-// ---- Toggle Paper Mode ----
-function togglePaperMode() {
-  BOT.paperMode = !BOT.paperMode;
+// ---- Paper Mode control ----
+function setPaperMode(enabled, quiet) {
+  BOT.paperMode = !!enabled;
   var btn  = document.getElementById('paper-toggle');
   var lbl  = document.getElementById('paper-mode-lbl');
   var panel = document.getElementById('active-trades-panel');
@@ -3612,10 +3622,12 @@ function togglePaperMode() {
     btn.style.color       = '#3fb950';
     lbl.textContent = 'PAPER ON';
     lbl.style.color = '#3fb950';
-    panel.style.display = 'flex';
+    if(panel) panel.style.display = 'flex';
     startBotTimers();
-    sLog('PAPER MODE ON - auto-scanning every 15M, monitor every 5 min');
-    toast('<b style="color:#3fb950;">PAPER MODE ON</b> - auto-executing top 3 setups per scan', 'a');
+    if(!quiet) {
+      sLog('PAPER MODE ON - auto-scanning every 15M, monitor every 5 min');
+      toast('<b style="color:#3fb950;">PAPER MODE ON</b> - auto-executing top 3 setups per scan', 'a');
+    }
   } else {
     btn.style.background  = 'rgba(248,81,73,.1)';
     btn.style.borderColor = 'rgba(248,81,73,.3)';
@@ -3623,9 +3635,13 @@ function togglePaperMode() {
     lbl.textContent = 'PAPER OFF';
     lbl.style.color = '#484f58';
     stopBotTimers();
-    sLog('PAPER MODE OFF');
+    if(!quiet) sLog('PAPER MODE OFF');
   }
   updateActiveTradesPanel();
+}
+
+function togglePaperMode() {
+  setPaperMode(!BOT.paperMode, false);
 }
 
 function startBotTimers() {
@@ -3633,7 +3649,7 @@ function startBotTimers() {
   if(BOT.priceMonitorTimer) clearInterval(BOT.priceMonitorTimer);
   BOT.priceMonitorTimer = setInterval(function(){ monitorActiveTrades(); }, 5 * 60 * 1000);
 
-  // 1H close scanner - check every 60 seconds if we crossed an hour boundary
+  // 15M close scanner - check every 15 seconds for a new quarter-hour candle
   if(BOT.scanTimer) clearInterval(BOT.scanTimer);
   BOT.scanTimer = setInterval(function(){ checkHourlyClose(); }, 15 * 1000); // check every 15s for 15M accuracy
 
@@ -3645,7 +3661,7 @@ function stopBotTimers() {
   if(BOT.scanTimer)         { clearInterval(BOT.scanTimer);         BOT.scanTimer = null; }
 }
 
-// ---- 1H Close Detection ----
+// ---- 15M Close Detection ----
 function checkHourlyClose() {
   if(!BOT.paperMode) return;
   var now    = new Date();
@@ -3665,19 +3681,39 @@ function checkHourlyClose() {
     if('Notification' in window && Notification.permission === 'granted') {
       new Notification('NEXORA: 15M Scan', {body: '15-min close at ' + label + ' -- scanning setups...'});
     }
-    doRefresh();
-    setTimeout(function(){
-      if(BOT.paperMode) autoExecuteTopSetups();
-    }, 12000); // wait 12s for data
+    runScan({cycleKey: scanKey, reason: '15M close'});
   }
 }
 
+// ---- Wait for the complete scan before placing paper orders ----
+function queuePaperExecution(cycleKey) {
+  if(!BOT.paperMode) return;
+  var started = Date.now();
+  var key = cycleKey || ('manual-' + Date.now());
+  function attempt() {
+    if(!BOT.paperMode) return;
+    if(G.refreshing || G.derivsLoading || !G.pairs || !G.pairs.length) {
+      if(Date.now() - started < 30000) { setTimeout(attempt, 500); return; }
+      sLog('BOT AUTO: data belum siap setelah 30 detik, siklus dilewati');
+      return;
+    }
+    autoExecuteTopSetups(key);
+  }
+  setTimeout(attempt, 2500);
+}
+
 // ---- Auto Execute Top 3 Setups ----
-function autoExecuteTopSetups() {
+function autoExecuteTopSetups(cycleKey) {
   if(!BOT.paperMode) return;
   if(!G.pairs || !G.pairs.length) { sLog('BOT: no pairs data, skip'); return; }
+  var executionKey = cycleKey || ('manual-' + Date.now());
+  if(BOT.lastExecKey === executionKey) {
+    sLog('BOT: cycle ' + executionKey + ' sudah dieksekusi, skip duplicate');
+    return;
+  }
+  BOT.lastExecKey = executionKey;
 
-  var active = BOT.activeTrades.filter(function(t){return t.status==='OPEN';});
+  var active = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='PENDING';});
   if(active.length >= BOT.maxConcurrent) {
     sLog('BOT: max concurrent trades ('+BOT.maxConcurrent+') reached, skip');
     return;
@@ -3699,15 +3735,24 @@ function autoExecuteTopSetups() {
   }).filter(function(r){
     // Must meet entry criteria
     return r.p.tier!=='C' && r.p.fund<0.005 && Math.abs(r.p.chg)<=3.5 && r.p.sc>=7.0;
-  }).sort(function(a,b){return b.rank-a.rank;}).slice(0, toExec);
+  }).sort(function(a,b){return b.rank-a.rank;});
 
   if(!ranked.length) { sLog('BOT: no qualifying setups this scan'); return; }
 
-  ranked.forEach(function(r) {
+  // Always choose the next best symbols, not just the first three, when one
+  // of the top signals already has an open or pending paper trade.
+  var candidates = [];
+  for(var ri=0; ri<ranked.length && candidates.length<toExec; ri++) {
+    var candidateSym = ranked[ri].p.s;
+    var alreadyActive = BOT.activeTrades.some(function(t){
+      return t.sym===candidateSym && (t.status==='OPEN'||t.status==='PENDING');
+    });
+    if(!alreadyActive) candidates.push(ranked[ri]);
+  }
+  if(!candidates.length) { sLog('BOT: semua setup terbaik sudah aktif, skip siklus'); return; }
+
+  candidates.forEach(function(r) {
     var p = r.p;
-    // Skip if already have active trade for this symbol
-    var alreadyOpen = BOT.activeTrades.some(function(t){return t.sym===p.s&&t.status==='OPEN';});
-    if(alreadyOpen) return;
 
     // Generate setup for entry limit
     var tradeDir = directionForPair(p);
@@ -3741,9 +3786,11 @@ function autoExecuteTopSetups() {
       openTime:   new Date().toLocaleTimeString('id-ID'),
       openDate:   new Date().toLocaleDateString('id-ID'),
       closeTime:  null,
+      createdAt:  Date.now(),
+      cycleKey:   executionKey,
       r:          0,
       pnl:        0,
-      reason:     'Auto: 1H scan | '+tradeDir+' | Fund:' + (p.fund*100).toFixed(4)+'% | Score:'+p.sc,
+      reason:     'Auto: 15M scan | '+tradeDir+' | Fund:' + (p.fund*100).toFixed(4)+'% | Score:'+p.sc,
       score:      p.sc,
       fund:       p.fund,
       tier:       p.tier
@@ -3763,8 +3810,8 @@ function autoExecuteTopSetups() {
   updateActiveTradesPanel();
 
   // Also log to trading journal as pending
-  if(ranked.length > 0) {
-    sLog('BOT: '+ranked.length+' limit orders placed. Monitoring...');
+  if(candidates.length > 0) {
+    sLog('BOT: '+candidates.length+' limit orders placed. Monitoring...');
   }
 }
 
@@ -3789,6 +3836,13 @@ function monitorActiveTrades() {
 
     // Check if PENDING limit order got filled
     if(trade.status === 'PENDING') {
+      if(trade.createdAt && Date.now() - trade.createdAt > BOT.pendingTtlMs) {
+        trade.status = 'CANCELLED';
+        trade.closeReason = 'Pending limit expired after 45 minutes';
+        sLog('BOT CANCELLED: '+trade.sym+' pending limit expired after 45 minutes');
+        changed = true;
+        return;
+      }
       var filled = trade.dir==='LONG' ? price<=trade.entryLimit*1.005 : price>=trade.entryLimit*0.995;
       if(filled) {
         trade.status = 'OPEN';
@@ -4393,10 +4447,16 @@ if(_loaded) {
     }
   } catch(e) {}
 }
+// Paper mode is enabled by default for the one-week observation period.
+// The manual toggle remains available as an emergency pause.
+setPaperMode(true, true);
 doRefresh();
 setInterval(doRefresh, 60000);
 tickCD();
 setInterval(tickCD, 1000);
+setTimeout(function(){
+  if(BOT.paperMode) queuePaperExecution('startup-' + Date.now());
+}, 8000);
 
 
 // ============================================================
@@ -4445,7 +4505,10 @@ function importBackup(event) {
       // Restore all data
       if(Array.isArray(data.trades))       G.trades         = data.trades;
       if(Array.isArray(data.eq))           G.eq             = data.eq;
-      if(Array.isArray(data.activeTrades)) BOT.activeTrades = data.activeTrades;
+      if(Array.isArray(data.activeTrades)) {
+        BOT.activeTrades = data.activeTrades;
+        BOT.tradeIdSeq = BOT.activeTrades.reduce(function(maxId, t){ return Math.max(maxId, Number(t.id)||0); }, 0);
+      }
       if(Array.isArray(data.wl))           G.wl             = data.wl;
       if(data.oiSnap)                      G.oiSnap         = data.oiSnap;
 
@@ -4491,7 +4554,10 @@ function loadFromStorage() {
     var d = JSON.parse(raw);
     if(Array.isArray(d.trades))       G.trades         = d.trades;
     if(Array.isArray(d.eq))           G.eq             = d.eq;
-    if(Array.isArray(d.activeTrades)) BOT.activeTrades = d.activeTrades;
+    if(Array.isArray(d.activeTrades)) {
+      BOT.activeTrades = d.activeTrades;
+      BOT.tradeIdSeq = BOT.activeTrades.reduce(function(maxId, t){ return Math.max(maxId, Number(t.id)||0); }, 0);
+    }
     if(Array.isArray(d.wl))           G.wl             = d.wl;
     var cnt = d.trades ? d.trades.length : 0;
     var ts  = d.savedAt ? new Date(d.savedAt).toLocaleString('id-ID') : '?';
@@ -4872,7 +4938,7 @@ function tgAlert(type, pair, data) {
       + 'P&L: $' + (data.pnl||0).toFixed(2) + '\n'
       + 'Reason: ' + (data.reason||'?');
   } else if(type === 'SCAN') {
-    msg = '<b>NEXORA 1H SCAN COMPLETE</b>\n'
+    msg = '<b>NEXORA 15M SCAN COMPLETE</b>\n'
       + 'Pairs: ' + (data.total||'?') + ' | A-TIER: ' + (data.atier||0) + '\n'
       + (data.top3 ? 'Top 3: ' + data.top3 : '');
   }
