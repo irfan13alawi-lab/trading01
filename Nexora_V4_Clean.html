@@ -219,6 +219,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">Bot Trades</span><span class="v" id="bot-trade-cnt">0</span></div>
   <div class="hstat"><span class="l">uPnL</span><span class="v" id="bot-upnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
+  <div class="hstat"><span class="l">Equity</span><span class="v" id="bot-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
   <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">30</span></div>
   <div id="bot-trades-list" style="flex:1 1 100%;display:flex;gap:8px;flex-wrap:wrap;"></div>
@@ -765,7 +766,7 @@ function toast(msg, type) {
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
-  refreshing: false, derivsLoading: false, top5: [], paperServer: false,
+  refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [],
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -1804,8 +1805,11 @@ function exportJournal() {
 }
 
 function renderEquity() {
-  var trades = G.trades;
-  var data = G.eq.length ? G.eq : [0];
+  var useVpsEquity = G.paperServer && Array.isArray(G.vpsClosed);
+  var trades = useVpsEquity ? G.vpsClosed : G.trades;
+  var data = useVpsEquity
+    ? (trades.length ? trades.map(function(t){ return t.cum; }) : [0])
+    : (G.eq.length ? G.eq : [0]);
 
   // Stats
   var wins = trades.filter(function(t){return t.r>0;}).length;
@@ -3641,7 +3645,55 @@ function applyServerPaperStatus(status, announce) {
   if(perScan) perScan.textContent = status.perScan || 3;
   var maxConc = document.getElementById('bot-max-conc');
   if(maxConc) maxConc.textContent = status.maxConcurrent || 30;
+  if(status.equity != null) {
+    var equity = Number(status.equity);
+    G.vpsEquity = equity;
+    var botEq = document.getElementById('bot-equity');
+    if(botEq) {
+      botEq.textContent = '$' + equity.toFixed(2);
+      botEq.style.color = equity >= Number(status.startingEquity || 285) ? '#3fb950' : '#f85149';
+      botEq.title = 'Start: $' + Number(status.startingEquity || 285).toFixed(2)
+        + ' | Realized: $' + Number(status.realizedPnl || 0).toFixed(2)
+        + ' | uPnL: $' + Number(status.unrealizedPnl || 0).toFixed(2);
+    }
+    var equityInput = document.getElementById('p2-equity');
+    if(equityInput && document.activeElement !== equityInput) {
+      equityInput.value = equity.toFixed(2);
+    }
+  }
+  var rawClosed = Array.isArray(status.closedTrades) ? status.closedTrades
+    .filter(function(t){ return t.outcome !== 'CANCELLED'; }) : [];
+  var cum = 0;
+  G.vpsClosed = rawClosed.slice().sort(function(a,b){
+    return String(a.closedAt || '').localeCompare(String(b.closedAt || ''));
+  }).map(function(t) {
+    cum += Number(t.r || 0);
+    return {
+      r: Number(t.r || 0),
+      cum: cum,
+      dt: t.closedAt ? new Date(t.closedAt).toLocaleDateString('id-ID') : '',
+      sym: t.sym || '?',
+      dir: t.dir || 'LONG',
+      entry: Number(t.entryActual || t.entryLimit || 0),
+      exit: Number(t.exitPrice || 0),
+      size: Number(t.size || 0),
+      mode: 'AUTO VPS',
+      tf: '15M',
+      outcome: t.outcome || 'BE',
+      exitReason: t.closeReason || '',
+      good: t.outcome === 'WIN' ? 'Paper Bot VPS reached target' : '',
+      bad: t.outcome === 'LOSS' ? 'Paper Bot VPS reached stop' : '',
+      lesson: 'VPS paper trade — review funding/OI at entry',
+      checks: 0, checksPct: 0,
+      pnl: Number(t.pnl || 0)
+    };
+  });
   updateActiveTradesPanel();
+  try { renderPositionsWidget(); } catch(e) {}
+  var eqPage = document.getElementById('p-eq');
+  if(eqPage && eqPage.classList.contains('on')) {
+    try { renderEquity(); } catch(e) {}
+  }
   if(announce && !wasServer) {
     sLog('PAPER BOT VPS CONNECTED — scan 15M, top 3, pending expiry 120m');
     toast('<b style="color:#3fb950;">PAPER VPS ON</b> — browser boleh ditutup, bot tetap berjalan', 'a');

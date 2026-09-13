@@ -10,6 +10,7 @@ const PAPER_MONITOR_MS = 30000;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_PER_SCAN = 3;
 const PAPER_MAX_ACTIVE = 30;
+const PAPER_STARTING_EQUITY = Number(process.env.PAPER_STARTING_EQUITY || 285);
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 let fetchFn = globalThis.fetch;
@@ -132,6 +133,7 @@ function paperRoundPrice(value) {
 function defaultPaperState() {
   return {
     enabled: true,
+    startingEquity: PAPER_STARTING_EQUITY,
     startedAt: new Date().toISOString(),
     lastScanAt: null,
     lastCycleKey: null,
@@ -287,7 +289,7 @@ function paperSetup(pair) {
   const sl = entry * (dir === 'LONG' ? 0.97 : 1.03);
   const tp1 = entry * (dir === 'LONG' ? 1.06 : 0.94);
   const tp2 = entry * (dir === 'LONG' ? 1.10 : 0.90);
-  const riskDollar = 285 * 0.02;
+  const riskDollar = paperEquity() * 0.02;
   const stopDistance = Math.abs(entry - sl);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
@@ -304,6 +306,22 @@ function paperSetup(pair) {
 function paperActiveCount() {
   return paperState.activeTrades.filter(t =>
     t.status === 'PENDING' || t.status === 'OPEN').length;
+}
+
+function paperRealizedPnl() {
+  return paperState.closedTrades.reduce((sum, trade) =>
+    sum + paperNumber(trade.pnl), 0);
+}
+
+function paperUnrealizedPnl() {
+  return paperState.activeTrades
+    .filter(trade => trade.status === 'OPEN')
+    .reduce((sum, trade) => sum + paperNumber(trade.unrealPnl), 0);
+}
+
+function paperEquity() {
+  return paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
+    paperRealizedPnl() + paperUnrealizedPnl();
 }
 
 function paperTradeView(trade) {
@@ -509,10 +527,17 @@ function paperStatus() {
   const wins = closed.filter(t => t.outcome === 'WIN').length;
   const losses = closed.filter(t => t.outcome === 'LOSS').length;
   const netR = closed.reduce((sum, t) => sum + paperNumber(t.r), 0);
+  const realizedPnl = paperRealizedPnl();
+  const unrealizedPnl = paperUnrealizedPnl();
+  const equity = paperEquity();
   return {
     ok: true, service: 'nexora-paper-bot', enabled: paperState.enabled,
     running: paperStarted, interval: '15M', perScan: PAPER_PER_SCAN,
     pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: PAPER_MAX_ACTIVE,
+    startingEquity: paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY),
+    realizedPnl: Number(realizedPnl.toFixed(2)),
+    unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
+    equity: Number(equity.toFixed(2)),
     lastScanAt: paperState.lastScanAt, lastCycleKey: paperState.lastCycleKey,
     nextScanAt: new Date(paperNextQuarter(Date.now())).toISOString(),
     lastMonitorAt: paperState.lastMonitorAt, lastPriceAt: paperState.lastPriceAt,
@@ -523,7 +548,8 @@ function paperStatus() {
     summary: {
       open, pending, closed: closed.length, wins, losses,
       invalidated: paperState.invalidatedTrades.length,
-      netR: Number(netR.toFixed(2))
+      netR: Number(netR.toFixed(2)),
+      equity: Number(equity.toFixed(2))
     }
   };
 }
