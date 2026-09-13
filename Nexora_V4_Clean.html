@@ -47,6 +47,10 @@ a:hover{text-decoration:underline;}
 .hstat .l{color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:.5px;}
 .hstat .v{font-weight:700;font-size:12px;}
 .hright{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.market-picker{display:flex;align-items:center;gap:4px;padding:3px 5px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;}
+.market-picker select{width:auto;padding:3px 5px;border:0;background:transparent;font-size:10px;font-weight:700;cursor:pointer;}
+.market-picker select:focus{outline:none;border:0;}
+.market-picker .market-label{font-size:9px;font-weight:700;color:var(--blue);padding:0 4px;white-space:nowrap;}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--text3);}
 .dot-g{background:var(--green);box-shadow:0 0 6px var(--green);}
 .dot-r{background:var(--red);box-shadow:0 0 6px var(--red);}
@@ -204,6 +208,17 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="hstat"><span class="l">Scanned</span><span class="v" id="h-cnt">0</span></div>
   </div>
   <div class="hright">
+    <div class="market-picker" title="Pilih sumber dan jenis market">
+      <select id="market-exchange" aria-label="Exchange" onchange="setMarketSelection()">
+        <option value="bitget">Bitget</option>
+        <option value="coingecko">CoinGecko</option>
+      </select>
+      <select id="market-type" aria-label="Market type" onchange="setMarketSelection()">
+        <option value="futures">Futures</option>
+        <option value="spot">Spot</option>
+      </select>
+      <span class="market-label" id="market-label">Bitget Futures</span>
+    </div>
     <span class="dot" id="sdot"></span>
     <span class="muted" id="upd">Idle</span>
     <div class="cd"><i class="fa-solid fa-clock"></i> 15M: <b id="cdv">--</b></div>
@@ -344,6 +359,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
         <span class="muted" id="scan-ts"></span>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
+        <span class="muted" id="market-note">Paper Bot VPS memakai Bitget Futures</span>
         <span class="muted" id="pcnt">0 coins</span>
         <input type="text" id="srch" placeholder="Search..." style="width:120px;" oninput="onSrch()">
         <button class="btn btn-sm btn-blue" onclick="runScan()"><i class="fa-solid fa-play"></i> Run Scan</button>
@@ -815,7 +831,7 @@ var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
   refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [],
-  scanView: 'grid', scanFocus: 'BTC',
+  scanView: 'grid', scanFocus: 'BTC', marketExchange: 'bitget', marketType: 'futures',
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -857,6 +873,64 @@ var PAPER_API = PROXY_BASE ? PROXY_BASE + '/paper' : '';
 var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
 
+// Persist only the user's market view; paper execution remains server-side
+// Bitget Futures and never follows a Spot selection in the browser.
+try {
+  var savedMarket = JSON.parse(localStorage.getItem('nexora_market_selection') || 'null');
+  if (savedMarket && (savedMarket.exchange === 'bitget' || savedMarket.exchange === 'coingecko')) {
+    G.marketExchange = savedMarket.exchange;
+    G.marketType = savedMarket.exchange === 'coingecko' ? 'spot' : (savedMarket.type === 'spot' ? 'spot' : 'futures');
+  }
+} catch(e) {}
+
+function marketIsSpot() { return G.marketType === 'spot'; }
+function marketIsBitget() { return G.marketExchange === 'bitget'; }
+function marketLabel() {
+  if (G.marketExchange === 'coingecko') return 'CoinGecko Spot';
+  return 'Bitget ' + (marketIsSpot() ? 'Spot' : 'Futures');
+}
+function updateMarketControls() {
+  var ex = document.getElementById('market-exchange');
+  var type = document.getElementById('market-type');
+  var label = document.getElementById('market-label');
+  if (ex) ex.value = G.marketExchange;
+  if (type) {
+    type.value = G.marketType;
+    var cgOnly = G.marketExchange === 'coingecko';
+    Array.prototype.forEach.call(type.options, function(opt) { opt.disabled = cgOnly && opt.value !== 'spot'; });
+    type.disabled = cgOnly;
+  }
+  if (label) {
+    label.textContent = marketLabel();
+    label.style.color = marketIsSpot() ? '#e3b341' : '#58a6ff';
+    label.title = marketIsSpot() ? 'Spot tidak menyediakan Funding/OI derivatif' : 'Funding/OI tersedia dari market Futures';
+  }
+  var note = document.getElementById('market-note');
+  if (note) {
+    note.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : 'Paper Bot VPS memakai Bitget Futures';
+    note.style.color = marketIsSpot() ? '#e3b341' : '#8b949e';
+  }
+}
+function setMarketSelection() {
+  var ex = document.getElementById('market-exchange');
+  var type = document.getElementById('market-type');
+  var nextExchange = ex ? ex.value : 'bitget';
+  var nextType = nextExchange === 'coingecko' ? 'spot' : (type && type.value === 'spot' ? 'spot' : 'futures');
+  var changed = nextExchange !== G.marketExchange || nextType !== G.marketType;
+  G.marketExchange = nextExchange === 'coingecko' ? 'coingecko' : 'bitget';
+  G.marketType = nextType;
+  updateMarketControls();
+  try { localStorage.setItem('nexora_market_selection', JSON.stringify({exchange:G.marketExchange, type:G.marketType})); } catch(e) {}
+  if (!changed) return;
+  G.derivs = {};
+  G.derivsTs = 0;
+  G.pairs = [];
+  setDot('loading');
+  setUpd('Loading ' + marketLabel() + '...');
+  sLog('Market changed to ' + marketLabel() + ' — refreshing with matching endpoints');
+  doRefresh();
+}
+
 function fP(v) {
   if (v == null) return '--';
   if (v >= 1000) return '$' + v.toLocaleString('en', {maximumFractionDigits:1});
@@ -870,7 +944,20 @@ function fV(v) {
   if (v >= 1e6) return '$' + (v/1e6).toFixed(0) + 'M';
   return '$' + (v/1e3).toFixed(0) + 'K';
 }
+function hasDerivatives(p) { return !!p && p.derivativesAvailable !== false; }
+function fundingText(p, decimals) {
+  if (!hasDerivatives(p) || p.fund == null) return 'N/A';
+  return (p.fund >= 0 ? '+' : '') + (p.fund * 100).toFixed(decimals == null ? 4 : decimals) + '%';
+}
+function oiText(p, decimals) {
+  if (!hasDerivatives(p) || p.oi == null) return 'N/A';
+  return (p.oi >= 0 ? '+' : '') + Number(p.oi).toFixed(decimals == null ? 1 : decimals) + '%';
+}
 function nn(v) { return isNaN(+v) ? 0 : +v; }
+function percentFromTicker(v) {
+  var n = nn(v);
+  return Math.abs(n) <= 1 ? n * 100 : n;
+}
 function fp(id) { for (var i=0;i<G.pairs.length;i++) if (G.pairs[i].s===id) return G.pairs[i]; return null; }
 
 function setDot(state) {
@@ -913,28 +1000,47 @@ function tickCD() {
 
 function score44(chg, fund, oi, isRealFund, isRealOI) {
   chg = nn(chg); fund = nn(fund); oi = nn(oi);
+  var derivativesAvailable = arguments.length < 6 || arguments[5] !== false;
+  var volumeRatio = arguments.length >= 7 ? Number(arguments[6]) : null;
   // Funding score (V4.4 table - higher weight for verified negative funding)
-  var fs = fund <= -0.010 ? 2.5
-         : fund <  0      ? 2.2
-         : fund <  0.002  ? 2.0
-         : fund <  0.004  ? 1.5
-         : fund <  0.006  ? 1.2
-         : fund <  0.008  ? 0.8
-         : fund <  0.010  ? 0.4 : 0;
+  var fs = !derivativesAvailable ? 0 : fund <= -0.0005 ? 2.5
+          : fund <  0      ? 1.8
+          : fund <= 0.0005 ? 1.0
+          : fund <  0.002  ? 0.7
+          : fund <  0.004  ? 0.4
+          : fund <  0.006  ? 0.2 : 0;
   // Price action score
-  var ps = chg >= -2 && chg <= 0  ? 2.5
-         : chg >  0 && chg <= 1   ? 2.0
-         : chg >  1 && chg <= 3   ? 1.5
-         : chg >  3 && chg <= 5   ? 1.0
-         : chg >  5 && chg <= 8   ? 0.5 : 0;
+  var ps = chg >= -2 && chg < -1  ? 2.5
+         : chg >= -1 && chg <= 0  ? 2.0
+         : chg >  0 && chg <= 1   ? 1.5
+         : chg >  1 && chg <= 3   ? 1.2
+         : chg >  3 && chg <= 5   ? 0.8
+         : chg >  5 && chg <= 8   ? 0.4 : 0;
   // OI score  -  real delta gets bonus weight
-  var os = oi > 2  ? 2.0
-         : oi > 0  ? 1.5
+  var os = !derivativesAvailable ? 0 : oi > 2  ? 2.0
+          : oi > 0  ? 1.5
          : oi >= -1 ? 0.5 : 0;
   if (isRealOI && oi > 1) os = Math.min(2.0, os + 0.3); // +0.3 bonus for confirmed OI rise
+  var vs = !Number.isFinite(volumeRatio) ? 0
+    : volumeRatio >= 2 ? 1.0
+    : volumeRatio >= 1.5 ? 0.7
+    : volumeRatio >= 1 ? 0.3 : 0;
   // Base score: regime(1.0) + vol filter(2.0)
-  var total = fs + ps + os + 2.0 + 1.0;
+  // Spot has no funding/OI. Keep its score conservative and do not imply
+  // derivative confirmation that was never received.
+  var total = fs + ps + os + vs + 3.0;
   return Math.min(12, parseFloat(total.toFixed(1)));
+}
+function applyMarketQualityScores(pairs) {
+  var volumes = pairs.map(function(p){return Number(p.vol);}).filter(function(v){return Number.isFinite(v) && v > 0;}).sort(function(a,b){return a-b;});
+  var mid = volumes.length ? volumes[Math.floor(volumes.length / 2)] : 0;
+  pairs.forEach(function(p) {
+    p.volRatio = mid > 0 && p.vol > 0 ? Number((p.vol / mid).toFixed(2)) : null;
+    p.sc = score44(p.chg, p.fund, p.oi, !!p.fundReal, !!p.oiDeltaReal, hasDerivatives(p), p.volRatio);
+    p.tier = tier(p.sc);
+    p.sig = sig(p.chg, p.fund, p.oi);
+  });
+  return pairs;
 }
 function tier(sc) { return sc >= 8 ? 'A' : sc >= 6.5 ? 'B' : 'C'; }
 function sig(chg, fund, oi) {
@@ -1042,22 +1148,36 @@ function doRefresh() {
     return;
   }
 
-  // PRIMARY: Bitget futures tickers (all pairs, 1 call).
-  // FALLBACK: CoinGecko only if Bitget is unavailable.
+  // PRIMARY: the selected market endpoint (one call).
+  // CoinGecko is an explicit Spot market, not a silent derivatives fallback.
+  var marketRequest;
+  if (G.marketExchange === 'coingecko') {
+    var cgIds = COINS.map(function(c){return c.id;}).join(',');
+    marketRequest = apf(CG + '/coins/markets?vs_currency=usd&ids=' + cgIds + '&per_page=100&page=1&sparkline=false&price_change_percentage=24h')
+      .then(function(rows){ return {provider:'coingecko', data:rows}; });
+  } else {
+    var marketApi = marketIsSpot() ? BITGET_SPOT_API : BITGET_API;
+    var marketQuery = marketIsSpot() ? 'category=SPOT' : 'productType=USDT-FUTURES';
+    marketRequest = apf(marketApi + '/tickers?' + marketQuery)
+      .then(function(data){ return {provider:'bitget', data:data}; });
+  }
   Promise.all([
-    // Bitget futures: price + funding + OI + vol in 1 call
-    fetch(BITGET_API + '/tickers?productType=USDT-FUTURES', {cache:'no-store'})
-      .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}),
-    // The VPS uses Bitget as the single price source.
+    marketRequest,
     Promise.resolve(null),
     // Fear & Greed (always works)
-    apf(ALT + '/fng/?limit=10&format=json'),
+    apf(ALT + '/fng/?limit=10&format=json').catch(function(){ return null; }),
     // News (optional)
     Promise.resolve(null)
       .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})
   ]).then(function(res) {
     try {
-    var bitgetData = res[0], mexcData = res[1], fg = res[2], news = res[3];
+    var marketPayload = res[0], mexcData = res[1], fg = res[2], news = res[3];
+
+    if (marketPayload && marketPayload.provider === 'coingecko') {
+      return buildPairsFromCG(marketPayload.data, fg, news);
+    }
+    var bitgetData = marketPayload ? marketPayload.data : null;
+    var spotMarket = marketIsSpot();
 
     // Build lookup maps
     var bitgetMap = {}; // sym -> bitget ticker
@@ -1069,12 +1189,10 @@ function doRefresh() {
     }
     var mexcMap = {}; // kept for backwards-compatible fallback fields
 
-    // If no data at all, fall back to CoinGecko
+    // If the selected Bitget market has no data, try the same provider once
+    // through its explicit error path rather than silently mixing markets.
     if(!Object.keys(bitgetMap).length && !Object.keys(mexcMap).length) {
-      sLog('Bitget failed, falling back to CoinGecko...');
-      var ids = COINS.map(function(c){return c.id;}).join(',');
-      return apf(CG + '/coins/markets?vs_currency=usd&ids=' + ids + '&per_page=100&page=1&sparkline=false&price_change_percentage=24h')
-        .then(function(mkts){ return buildPairsFromCG(mkts, fg, news); });
+      throw new Error('Bitget ' + (spotMarket ? 'Spot' : 'Futures') + ' returned no ticker data');
     }
 
     var pairs = [];
@@ -1082,28 +1200,30 @@ function doRefresh() {
       var sym = coin.s;
       var bg  = bitgetMap[sym];
       var mx  = mexcMap[sym];
-      // Price: Bitget futures
+      // Price: selected Bitget market
       var price = bg ? nn(bg.lastPr) : 0;
       if(!price) return; // skip if no price data
 
-      // Bitget change24h is a decimal, so convert it to percent.
-      var chg = bg ? (nn(bg.change24h) * 100) : (mx ? (nn(mx.priceChangePercent) * 100) : 0);
+      // Bitget returns change24h as a ratio on these market endpoints. Keep a
+      // heuristic for payload variants that already return percentage points.
+      var rawChg = bg ? (bg.change24h != null ? bg.change24h : bg.priceChangePercent) : (mx ? mx.priceChangePercent : 0);
+      var chg = percentFromTicker(rawChg);
 
       // Bitget quote volume is already denominated in USDT.
       var vol = bg ? nn(bg.quoteVolume) : (mx ? nn(mx.quoteVolume) : 0);
 
-      // Funding: real from Bitget
-      var fund = bg ? nn(bg.fundingRate) : 0;
-      var fundReal = !!bg;
+      // Funding/OI are derivative-only. Spot gets explicit unavailable fields.
+      var fund = !spotMarket && bg ? nn(bg.fundingRate) : 0;
+      var fundReal = !spotMarket && !!bg;
 
       // OI: from Bitget holdingAmount * markPrice
-      var oiRaw = bg ? nn(bg.holdingAmount) * price : 0;
+      var oiRaw = !spotMarket && bg ? nn(bg.holdingAmount || bg.openInterest) * price : 0;
       // OI delta is unknown until the derivatives snapshot is enriched below.
       // Never manufacture a random value that can affect score or tier.
       var oi    = 0;
 
       var liq = Math.round(Math.abs(chg) * vol * 0.0002);
-      var sc  = score44(chg, fund, oi, fundReal, false);
+      var sc  = score44(chg, fund, oi, fundReal, false, !spotMarket);
       pairs.push({
         s:     sym,
         id:    coin.id,
@@ -1115,7 +1235,9 @@ function doRefresh() {
         fundSrc:  fundReal ? 'Bitget' : 'est',
         oi:    oi,
         oiUSD: oiRaw,
-        liq:   liq,
+        liq:   spotMarket ? 0 : liq,
+        derivativesAvailable: !spotMarket,
+        marketExchange: 'bitget', marketType: spotMarket ? 'spot' : 'futures',
         sc:    sc,
         tier:  tier(sc),
         sig:   sig(chg, fund, oi),
@@ -1124,6 +1246,7 @@ function doRefresh() {
     });
 
       if(!pairs.length) throw new Error('No pairs built from Bitget');
+      applyMarketQualityScores(pairs);
     continueRefresh(pairs, fg, news);
 
     } catch(ethen) { sLog('Render error: ' + (ethen.message||ethen)); }
@@ -1142,19 +1265,23 @@ function buildPairsFromCG(mkts, fg, news) {
   if(!Array.isArray(mkts)||!mkts.length) throw new Error('CoinGecko also failed');
   var pairs = mkts.map(function(m, i) {
     var chg  = nn(m.price_change_percentage_24h);
-    // CoinGecko fallback has no derivatives fields. Keep them explicitly unknown.
+    // CoinGecko is an explicit Spot source. It must never be presented as a
+    // Futures feed with made-up funding/OI values.
     var fund = 0;
     var oi   = 0;
     var liq  = Math.round(Math.abs(chg) * nn(m.total_volume) * 0.002);
-    var sc   = score44(chg, fund, oi);
+    var sc   = score44(chg, fund, oi, false, false, false);
     return {
       s: m.symbol ? m.symbol.toUpperCase() : '?',
       id: m.id, price: nn(m.current_price), chg: chg,
-      vol: nn(m.total_volume), fund: fund, fundReal: false, fundSrc: 'est',
-      oi: oi, liq: liq, sc: sc, tier: tier(sc), sig: sig(chg, fund, oi),
+      vol: nn(m.total_volume), fund: fund, fundReal: false, fundSrc: 'N/A',
+      oi: oi, liq: 0, derivativesAvailable: false,
+      marketExchange: 'coingecko', marketType: 'spot',
+      sc: sc, tier: tier(sc), sig: sig(chg, fund, oi),
       layer: i < 20 ? 'L1' : 'L2'
     };
   });
+  applyMarketQualityScores(pairs);
   continueRefresh(pairs, fg, news);
 }
 
@@ -1164,6 +1291,10 @@ function continueRefresh(pairs, fg, news) {
 
     G.pairs = pairs;
     G.refreshing = false;
+    updateMarketControls();
+    var marketName = marketLabel();
+    var marketNote = document.getElementById('market-note');
+    if (marketNote) marketNote.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : 'Paper Bot VPS memakai Bitget Futures';
     document.getElementById('h-cnt').textContent = pairs.length;
     document.getElementById('c-l1').textContent = pairs.filter(function(p){return p.layer==='L1';}).length;
     document.getElementById('c-l2').textContent = pairs.filter(function(p){return p.layer==='L2';}).length;
@@ -1222,8 +1353,8 @@ function continueRefresh(pairs, fg, news) {
     loadOrderFlow(coinSymbolForId(G.coinId));
 
     document.getElementById('scan-ts').textContent = 'Last: ' + new Date().toLocaleTimeString('id-ID');
-    document.getElementById('scan-ts').title = 'Price/Vol/Funding: Bitget | OI: derivatives snapshot (live when available)';
-    setDot('ok'); setUpd('Bitget+BingX+Gate | ' + new Date().toLocaleTimeString('id-ID'));
+    document.getElementById('scan-ts').title = marketIsSpot() ? marketName + ' | Funding/OI derivatif tidak tersedia' : marketName + ' | Funding/OI: derivatives snapshot (live when available)';
+    setDot('ok'); setUpd(marketName + ' | ' + new Date().toLocaleTimeString('id-ID'));
     sLog('Refresh OK -- ' + pairs.length + ' pairs, ' + at.length + ' A-TIER');
     renderWL(); // sync watchlist with live data
     document.getElementById('wl-last-update') && (document.getElementById('wl-last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString('id-ID'));
@@ -1234,15 +1365,22 @@ function continueRefresh(pairs, fg, news) {
     // Update paper bot unrealized PnL on each refresh
     try { if(BOT.paperMode) { monitorActiveTrades(); updateActiveTradesPanel(); } } catch(e) {}
 
-    // Fetch real funding/OI from Bitget/BingX/Gate.io asynchronously
-    // Delay derivatives fetch 1.5s to let charts render first
-    var derivSyms = G.pairs.map(function(p){return p.s;});
-    setTimeout(function(){
-      fetchRealDerivatives(derivSyms).then(function() {
-        enrichPairsWithDerivatives();
-      }).catch(function(e){ sLog('Derivatives: ' + (e&&e.message||'unavailable')); })
-        .then(function(){ G.derivsLoading = false; });
-    }, 1500);
+    // Fetch real funding/OI only for Bitget Futures. A Spot selection must
+    // never inherit a stale derivatives snapshot from the previous view.
+    if (marketIsBitget() && !marketIsSpot()) {
+      var derivSyms = G.pairs.map(function(p){return p.s;});
+      setTimeout(function(){
+        fetchRealDerivatives(derivSyms).then(function() {
+          enrichPairsWithDerivatives();
+        }).catch(function(e){ sLog('Derivatives: ' + (e&&e.message||'unavailable')); })
+          .then(function(){ G.derivsLoading = false; });
+      }, 1500);
+    } else {
+      G.derivs = {};
+      G.derivsLoading = false;
+      var derivSrc = document.getElementById('deriv-src');
+      if (derivSrc) derivSrc.textContent = 'N/A — Spot';
+    }
     } catch(ethen) { G.derivsLoading = false; sLog('Render error: ' + (ethen.message||ethen)); }
 }
 
@@ -1340,8 +1478,8 @@ function renderTable() {
     if (G.filt==='a' && p.tier!=='A') return false;
     if (G.filt==='b' && p.tier!=='B') return false;
     if (G.filt==='sig' && p.sig==='NEU') return false;
-    if (G.filt==='fund' && p.fund>=0.005) return false;
-    if (G.filt==='oi' && p.oi<=0) return false;
+    if (G.filt==='fund' && (!hasDerivatives(p) || p.fund>=0.005)) return false;
+    if (G.filt==='oi' && (!hasDerivatives(p) || p.oi<=0)) return false;
     if (G.filt==='long' && p.chg<0) return false;
     if (G.filt==='short' && p.chg>=0) return false;
     if (G.filt==='pump' && p.chg<=3) return false;
@@ -1366,9 +1504,9 @@ function renderTable() {
   data.slice(0, 150).forEach(function(p) {
     try {
     var cc = p.chg >= 0 ? 'up' : 'dn';
-    var oc = p.oi >= 0 ? 'up' : 'dn';
-    var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
-    var fundSrc = p.fundReal ? ' <span style="color:#3fb950;font-size:8px;">' + (p.fundSrc||'Live') + '</span>' : ' <span style="color:#484f58;font-size:8px;">est</span>';
+    var oc = !hasDerivatives(p) || p.oi == null ? 'nu' : p.oi >= 0 ? 'up' : 'dn';
+    var fc = !hasDerivatives(p) ? 'color:#484f58;' : p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
+    var fundSrc = !hasDerivatives(p) ? ' <span style="color:#484f58;font-size:8px;">Spot</span>' : p.fundReal ? ' <span style="color:#3fb950;font-size:8px;">' + (p.fundSrc||'Live') + '</span>' : ' <span style="color:#484f58;font-size:8px;">est</span>';
     var pct = Math.round(p.sc / 12 * 100);
     var tc = p.tier==='A' ? 'ba' : p.tier==='B' ? 'bb' : 'bn';
     var trc = p.tier==='A' ? 'tl-a' : p.tier==='B' ? 'tl-b' : '';
@@ -1378,11 +1516,11 @@ function renderTable() {
     row += '<td>' + fP(p.price) + '</td>';
     row += '<td class="' + cc + '">' + fC(p.chg) + '</td>';
     row += '<td>' + fV(p.vol) + '</td>';
-    row += '<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%' + fundSrc + '</td>';
-    row += '<td class="' + oc + '">' + (p.oi >= 0 ? 'up' : 'dn') + Math.abs(p.oi).toFixed(1) + '%</td>';
+    row += '<td style="' + fc + '">' + fundingText(p, 4) + fundSrc + '</td>';
+    row += '<td class="' + oc + '">' + oiText(p, 1) + '</td>';
     row += '<td class="' + (p.liq>1e6?'up':'nu') + '">' + fV(p.liq) + '</td>';
     var scColor = p.sc >= 8 ? '#3fb950' : p.sc >= 6.5 ? '#58a6ff' : '#484f58';
-    var realTag = p.fundReal ? '<span style="color:#3fb950;font-size:8px;">R</span>' : '<span style="color:#484f58;font-size:8px;">e</span>';
+    var realTag = !hasDerivatives(p) ? '<span style="color:#484f58;font-size:8px;">S</span>' : p.fundReal ? '<span style="color:#3fb950;font-size:8px;">R</span>' : '<span style="color:#484f58;font-size:8px;">e</span>';
     row += '<td><b style="color:' + scColor + ';">' + p.sc + '</b>' + realTag + '<div class="sb"><div class="sf" style="width:' + pct + '%;background:' + scColor + ';"></div></div></td>';
     row += '<td><span class="badge ' + tc + '">' + p.tier + '-T</span></td>';
     // Check if paper trade active for this coin
@@ -1445,11 +1583,19 @@ function loadOrderFlow(sym) {
   var tradeStatus = document.getElementById('trades-status');
   if(bookStatus) bookStatus.textContent = 'Loading...';
   if(tradeStatus) tradeStatus.textContent = 'Loading...';
-  var qs = '?symbol=' + encodeURIComponent(sym + 'USDT') + '&productType=USDT-FUTURES&limit=20';
-  var bookReq = fetch(BITGET_API + '/orderbook' + qs, {cache:'no-store'})
+  if (!marketIsBitget()) {
+    renderOrderBook(null, sym, 'Order book hanya tersedia dari exchange Bitget');
+    renderRecentTrades(null, sym, 'Recent trades hanya tersedia dari exchange Bitget');
+    return;
+  }
+  var api = marketIsSpot() ? BITGET_SPOT_API : BITGET_API;
+  var qs = marketIsSpot()
+    ? '?symbol=' + encodeURIComponent(sym + 'USDT') + '&category=SPOT&limit=20'
+    : '?symbol=' + encodeURIComponent(sym + 'USDT') + '&productType=USDT-FUTURES&limit=20';
+  var bookReq = fetch(api + '/orderbook' + qs, {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .catch(function(){ return null; });
-  var fillsReq = fetch(BITGET_API + '/fills' + qs, {cache:'no-store'})
+  var fillsReq = fetch(api + '/fills' + qs, {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .catch(function(){ return null; });
 
@@ -1457,17 +1603,17 @@ function loadOrderFlow(sym) {
   fillsReq.then(function(payload){ renderRecentTrades(payload, sym); });
 }
 
-function renderOrderBook(payload, sym) {
+function renderOrderBook(payload, sym, unavailableMessage) {
   var body = document.getElementById('orderbook-body');
   var status = document.getElementById('book-status');
   var data = payload && payload.data ? payload.data : null;
-  var asks = data && Array.isArray(data.asks) ? data.asks : [];
-  var bids = data && Array.isArray(data.bids) ? data.bids : [];
+  var asks = data && Array.isArray(data.asks) ? data.asks : (data && Array.isArray(data.a) ? data.a : []);
+  var bids = data && Array.isArray(data.bids) ? data.bids : (data && Array.isArray(data.b) ? data.b : []);
   var valid = function(row){ return Array.isArray(row) && Number(row[0]) > 0 && Number(row[1]) >= 0; };
   asks = asks.filter(valid).slice(0, 8);
   bids = bids.filter(valid).slice(0, 8);
   if(!asks.length && !bids.length) {
-    if(body) body.innerHTML = '<div class="ld" style="padding:18px;">Order book unavailable</div>';
+     if(body) body.innerHTML = '<div class="ld" style="padding:18px;">' + (unavailableMessage || 'Order book unavailable') + '</div>';
     if(status) { status.textContent = 'Unavailable'; status.style.color = '#f85149'; }
     return;
   }
@@ -1492,7 +1638,7 @@ function renderOrderBook(payload, sym) {
   if(status) { status.textContent = 'LIVE · ' + new Date().toLocaleTimeString('id-ID'); status.style.color = '#3fb950'; }
 }
 
-function renderRecentTrades(payload, sym) {
+function renderRecentTrades(payload, sym, unavailableMessage) {
   var body = document.getElementById('recent-trades-body');
   var status = document.getElementById('trades-status');
   var rows = payload && Array.isArray(payload.data) ? payload.data : [];
@@ -1503,7 +1649,7 @@ function renderRecentTrades(payload, sym) {
     return {price:price, size:size, side:side};
   }).filter(function(row){ return row.price > 0 && row.size >= 0; }).slice(0, 10);
   if(!parsed.length) {
-    if(body) body.innerHTML = '<div class="ld" style="padding:18px;">Recent trades unavailable</div>';
+     if(body) body.innerHTML = '<div class="ld" style="padding:18px;">' + (unavailableMessage || 'Recent trades unavailable') + '</div>';
     if(status) { status.textContent = 'Unavailable'; status.style.color = '#f85149'; }
     return;
   }
@@ -1547,6 +1693,13 @@ function renderSigs(pairs) {
 }
 
 function renderFund(pairs) {
+  if (!pairs.some(hasDerivatives)) {
+    var fundChart = document.getElementById('c-fund');
+    if (fundChart) fundChart.innerHTML = '<div class="ld" style="padding:60px 10px;">Funding hanya tersedia pada market Futures</div>';
+    var fundHeader = document.getElementById('fund-header');
+    if (fundHeader) fundHeader.textContent = 'Funding Ladder — Futures only';
+    return;
+  }
   var top = pairs.slice().sort(function(a,b){return Math.abs(b.fund)-Math.abs(a.fund);}).slice(0,20);
   var cd = [], cats = [];
   for (var i=0; i<top.length; i++) cd.push([i%5, Math.floor(i/5), top[i].fund]);
@@ -1568,6 +1721,11 @@ function renderFund(pairs) {
 }
 
 function renderOI(pairs) {
+  if (!pairs.some(hasDerivatives)) {
+    var oiChart = document.getElementById('c-oi');
+    if (oiChart) oiChart.innerHTML = '<div class="ld" style="padding:60px 10px;">Open Interest hanya tersedia pada market Futures</div>';
+    return;
+  }
   var top = pairs.slice().sort(function(a,b){return Math.abs(b.oi)-Math.abs(a.oi);}).slice(0,15);
   hcChart('c-oi', {
     chart:{type:'bar',backgroundColor:'transparent',margin:[10,10,20,55],style:{fontFamily:'inherit'}},title:{text:null},
@@ -1713,13 +1871,13 @@ function renderPump() {
   function gemRow(p, rank) {
     return '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.03);">'
       + '<div><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">L2</span><br>'
-      + '<span style="font-size:9px;color:#3fb950;">F: ' + (p.fund*100).toFixed(4) + '%</span> '
-      + '<span style="font-size:9px;color:#58a6ff;">OI: +' + p.oi.toFixed(1) + '%</span></div>'
+      + '<span style="font-size:9px;color:#3fb950;">F: ' + fundingText(p, 4) + '</span> '
+      + '<span style="font-size:9px;color:#58a6ff;">OI: ' + oiText(p, 1) + '</span></div>'
       + '<b style="color:#58a6ff;">' + p.sc + '/12</b></div>';
   }
   var pumps = sorted.filter(function(p){return p.chg>0;}).slice(0,10);
   var dumps = sorted.filter(function(p){return p.chg<0;}).reverse().slice(0,10);
-  var gems = pairs.filter(function(p){return p.layer==='L2'&&p.fund<0&&p.oi>0;}).sort(function(a,b){return b.sc-a.sc;}).slice(0,10);
+  var gems = pairs.filter(function(p){return hasDerivatives(p)&&p.layer==='L2'&&p.fund<0&&p.oi>0;}).sort(function(a,b){return b.sc-a.sc;}).slice(0,10);
   document.getElementById('pump-l').innerHTML = pumps.map(function(p,i){return row(p,i+1);}).join('') || '<div class="ld"><span>None</span></div>';
   document.getElementById('dump-l').innerHTML = dumps.map(function(p,i){return row(p,i+1);}).join('') || '<div class="ld"><span>None</span></div>';
   document.getElementById('gems-l').innerHTML = gems.map(function(p,i){return gemRow(p,i+1);}).join('') || '<div class="ld"><span>Run scan</span></div>';
@@ -2337,14 +2495,15 @@ function renderOIFromDeriv() {
   pairs.slice(0, 25).forEach(function(p) {
     var sym = p.s + 'USDT';
     var d = G.derivs[p.s] || {};
-    var oiUSD = d.oi ? '$' + (d.oi / 1e9).toFixed(2) + 'B' : fV(p.vol * 0.8);
+    var oiUSD = d.oi ? '$' + (d.oi / 1e9).toFixed(2) + 'B' : 'N/A';
     var fundSrc = d.src ? ' <span style="font-size:8px;color:#3fb950;">' + d.src + '</span>' : '';
     var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
     rows.push('<tr>');
     rows.push('<td class="tl"><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">' + p.layer + '</span></td>');
     rows.push('<td>' + oiUSD + '</td>');
-    rows.push('<td class="' + (p.oi * 0.3 >= 0 ? 'up' : 'dn') + '">' + (p.oi * 0.3 >= 0 ? '+' : '') + (p.oi * 0.3).toFixed(2) + '%</td>');
-    rows.push('<td class="' + (p.oi >= 0 ? 'up' : 'dn') + '">' + (p.oi >= 0 ? '+' : '') + p.oi.toFixed(2) + '%</td>');
+    var oiKnown = p.oi != null;
+    rows.push('<td class="' + (oiKnown ? (p.oi >= 0 ? 'up' : 'dn') : 'nu') + '">' + (oiKnown ? oiText({derivativesAvailable:true,oi:p.oi * 0.3}, 2) : 'N/A') + '</td>');
+    rows.push('<td class="' + (oiKnown ? (p.oi >= 0 ? 'up' : 'dn') : 'nu') + '">' + (oiKnown ? oiText(p, 2) : 'N/A') + '</td>');
     rows.push('<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%' + fundSrc + '</td>');
     rows.push('<td class="' + (p.liq > 1e6 ? 'up' : 'nu') + '">' + fV(p.liq) + '</td>');
     rows.push('</tr>');
@@ -2373,6 +2532,15 @@ function renderOIFromDeriv() {
 }
 
 function fetchOI() {
+  if (marketIsSpot()) {
+    var oiBody = document.getElementById('oi-tb');
+    if (oiBody) oiBody.innerHTML = '<tr><td colspan="6"><div class="ld">Open Interest dan Funding tidak tersedia di market Spot.</div></td></tr>';
+    var ladder = document.getElementById('fund-ladder');
+    if (ladder) ladder.innerHTML = '<div class="ld" style="padding:25px 10px;">Pindah ke Bitget Futures untuk melihat Funding Ladder.</div>';
+    var source = document.getElementById('deriv-src');
+    if (source) source.textContent = 'N/A — Spot';
+    return;
+  }
   // If we have real Bybit OI data, use it
   if (G.derivs && Object.keys(G.derivs).length > 0) {
     renderOIFromDeriv();
@@ -2382,14 +2550,15 @@ function fetchOI() {
   if (!pairs || !pairs.length) { document.getElementById('oi-tb').innerHTML='<tr><td colspan="6"><div class="ld"><span>Run scan first</span></div></td></tr>'; return; }
   var rows = [];
   pairs.slice(0,25).forEach(function(p) {
-    var oi_usd = fV(p.vol * Math.abs(p.oi) * 0.05 + p.vol * 0.8);
+    var oi_usd = p.oiUSD > 0 ? fV(p.oiUSD) : 'N/A';
+    var oiKnown = p.oi != null;
     var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
     rows.push('<tr>');
     rows.push('<td class="tl"><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">' + p.layer + '</span></td>');
     rows.push('<td>' + oi_usd + '</td>');
-    rows.push('<td class="' + (p.oi*0.3>=0?'up':'dn') + '">' + (p.oi*0.3>=0?'+':'') + (p.oi*0.3).toFixed(2) + '%</td>');
-    rows.push('<td class="' + (p.oi>=0?'up':'dn') + '">' + (p.oi>=0?'+':'') + p.oi.toFixed(2) + '%</td>');
-    rows.push('<td style="' + fc + '">' + (p.fund>=0?'+':'') + (p.fund*100).toFixed(4) + '%</td>');
+    rows.push('<td class="' + (oiKnown ? (p.oi>=0?'up':'dn') : 'nu') + '">' + (oiKnown ? oiText({derivativesAvailable:true,oi:p.oi*0.3}, 2) : 'N/A') + '</td>');
+    rows.push('<td class="' + (oiKnown ? (p.oi>=0?'up':'dn') : 'nu') + '">' + (oiKnown ? oiText(p, 2) : 'N/A') + '</td>');
+    rows.push('<td style="' + fc + '">' + fundingText(p, 4) + '</td>');
     rows.push('<td class="' + (p.liq>1e6?'up':'nu') + '">' + fV(p.liq) + '</td>');
     rows.push('</tr>');
   });
@@ -2422,6 +2591,7 @@ function fetchOI() {
 // ============================================================
 
 var BITGET_API = PROXY_BASE ? PROXY_BASE + '/bitget/api/v2/mix/market' : 'https://api.bitget.com/api/v2/mix/market';
+var BITGET_SPOT_API = PROXY_BASE ? PROXY_BASE + '/bitget/api/v2/spot/market' : 'https://api.bitget.com/api/v2/spot/market';
 var BINGX_API  = PROXY_BASE ? PROXY_BASE + '/bingx/openApi/swap/v2/quote' : 'https://open-api.bingx.com/openApi/swap/v2/quote';
 var GATE_API   = (PROXY_BASE ? PROXY_BASE + '/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
 
@@ -2442,12 +2612,18 @@ function normaliseCandles(rows) {
   }).sort(function(a,b){ return a[0]-b[0]; });
 }
 function fetchBitgetCandles(sym, granularity, limit) {
-  var key = sym + ':' + granularity + ':' + limit;
+  if (!marketIsBitget()) return Promise.reject(new Error('MTF candles unavailable for ' + marketLabel()));
+  var spot = marketIsSpot();
+  var key = marketLabel() + ':' + sym + ':' + granularity + ':' + limit;
   var now = Date.now();
   var cached = BITGET_CANDLE_CACHE[key];
   if (cached && now - cached.ts < 60000) return Promise.resolve(cached.data);
-  var url = BITGET_API + '/candles?productType=USDT-FUTURES&symbol=' + encodeURIComponent(sym + 'USDT')
-    + '&granularity=' + encodeURIComponent(granularity) + '&limit=' + encodeURIComponent(limit || 100);
+  var api = spot ? BITGET_SPOT_API : BITGET_API;
+  var marketQuery = spot ? 'category=SPOT' : 'productType=USDT-FUTURES';
+  var spotGranularity = {'15m':'15min','1H':'1h','4H':'4h','1D':'1day'};
+  var apiGranularity = spot ? (spotGranularity[granularity] || granularity) : granularity;
+  var url = api + '/candles?' + marketQuery + '&symbol=' + encodeURIComponent(sym + 'USDT')
+    + '&granularity=' + encodeURIComponent(apiGranularity) + '&limit=' + encodeURIComponent(limit || 100);
   return fetch(url, {cache:'no-store'}).then(function(r) {
     if (!r.ok) throw new Error('Bitget candles HTTP ' + r.status);
     return r.json();
@@ -2488,18 +2664,19 @@ function normaliseOhlc(rows) {
 function fetchMarketHistory(coinId, sym, days) {
   var symbol = sym || coinSymbolForId(coinId);
   var wanted = Math.max(2, Math.min(1000, parseInt(days,10) || 30));
+  if (!marketIsBitget()) {
+    return apfCached(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + wanted, 300000).then(function(rows){
+      var data = normaliseOhlc(rows);
+      if (data.length < 2) throw new Error('CoinGecko history empty for '+coinId);
+      return {data:data, source:'CoinGecko Spot'};
+    });
+  }
   var primary = symbol ? fetchBitgetCandles(symbol, '1D', wanted).then(function(rows){
-    return {data:normaliseOhlc(rows), source:'Bitget'};
+    return {data:normaliseOhlc(rows), source:marketLabel()};
   }) : Promise.reject(new Error('Unknown symbol for '+coinId));
   return primary.then(function(result) {
     if (result.data.length < 2) throw new Error('Bitget history empty for '+symbol);
     return result;
-  }).catch(function() {
-    return apfCached(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + wanted, 300000).then(function(rows){
-      var data = normaliseOhlc(rows);
-      if (data.length < 2) throw new Error('CoinGecko history empty for '+coinId);
-      return {data:data, source:'CoinGecko'};
-    });
   });
 }
 
@@ -2640,7 +2817,7 @@ function fetchRealDerivatives(symbols) {
 
 // ---- Enrich G.pairs with real data + compute OI delta ----
 function enrichPairsWithDerivatives() {
-  if (!G.derivs || Object.keys(G.derivs).length === 0) return;
+  if (marketIsSpot() || !marketIsBitget() || !G.derivs || Object.keys(G.derivs).length === 0) return;
   var enriched = 0;
   var newAlerts = [];
 
@@ -2657,16 +2834,21 @@ function enrichPairsWithDerivatives() {
     if (d.oi && d.oi > 0) {
       p.oiUSD  = d.oi;
       p.oiReal = true;
-      var prevOI = G.oiSnap[p.s] || d.oi;
+      var prevOI = G.oiSnap[p.s] || 0;
       if (prevOI > 0) {
         p.oi = ((d.oi - prevOI) / prevOI) * 100; // real OI % change
         p.oiDeltaReal = true;
+      } else {
+        // The first snapshot is a baseline, not a 0% change. Keep it
+        // unavailable until the next observation so the score is not inflated.
+        p.oi = null;
+        p.oiDeltaReal = false;
       }
       G.oiSnap[p.s] = d.oi; // update snapshot
     }
 
     // Recalculate score with real data
-    p.sc   = score44(p.chg, p.fund, p.oi, p.fundReal, p.oiDeltaReal);
+    p.sc   = score44(p.chg, p.fund, p.oi, p.fundReal, p.oiDeltaReal, hasDerivatives(p), p.volRatio);
     p.tier = tier(p.sc);
     p.sig  = sig(p.chg, p.fund, p.oi);
     enriched++;
@@ -2959,7 +3141,8 @@ var MTF_CACHE = {};
 
 function fetchMTFFromBitget(sym) {
   var now = Date.now();
-  if(MTF_CACHE[sym] && now-MTF_CACHE[sym].ts<120000) return Promise.resolve(MTF_CACHE[sym]);
+  var cacheKey = marketLabel() + ':' + sym;
+  if(MTF_CACHE[cacheKey] && now-MTF_CACHE[cacheKey].ts<120000) return Promise.resolve(MTF_CACHE[cacheKey]);
 
   // Fetch completed 15M, 1H, 4H and 1D candles for the MTF percentage cards.
   return Promise.all([
@@ -2993,7 +3176,7 @@ function fetchMTFFromBitget(sym) {
       var lastClose=parseFloat(d1data[d1data.length-1][4]);
       result.p7d = (lastClose-firstOpen)/firstOpen*100;
     }
-    MTF_CACHE[sym] = result;
+    MTF_CACHE[cacheKey] = result;
     return result;
   }).catch(function(){return {ts:Date.now(),p1h:null,p4h:null,p7d:null};});
 }
@@ -3024,11 +3207,16 @@ function runAllUpgrades(pairs) {
 
   // OI history update
   pairs.forEach(function(p){
-    if(p.oiUSD&&p.oiUSD>0) updateOIHistory(p.s, p.oiUSD);
-    var oiDelta = getOIDelta(p.s);
-    if(oiDelta!==null){
-      p.oi = oiDelta;
-      p.oiHistReal = true;
+    if (hasDerivatives(p)) {
+      if(p.oiUSD&&p.oiUSD>0) updateOIHistory(p.s, p.oiUSD);
+      var oiDelta = getOIDelta(p.s);
+      if(oiDelta!==null){
+        p.oi = oiDelta;
+        p.oiHistReal = true;
+      }
+    } else {
+      p.oi = 0;
+      p.oiUSD = 0;
     }
     // Liquidation estimate
     p.liqEst = estimateLiquidation(p.vol, p.chg, p.price);
@@ -3039,15 +3227,16 @@ function runAllUpgrades(pairs) {
     fetchTopCandlePatterns();
   }, 2000);
 
-  // Multi-TF from Bitget (async, staggered)
+  // Multi-TF from the selected Bitget market (async, staggered). CoinGecko
+  // Spot has no equivalent intraday candle feed for this analysis.
   setTimeout(function(){
-    fetchTopMTF();
+    if (marketIsBitget()) fetchTopMTF();
     setTimeout(function(){
       // Re-render table after MTF data arrives
       if(G.pairs.some(function(p){return p.p1h!==undefined;})){
         renderTable();
         computeTop5(G.pairs);
-        sLog('MTF data loaded from Bitget (1H/4H/7D)');
+         sLog('MTF data loaded from ' + marketLabel() + ' (15M/1H/4H/7D)');
       }
     }, 8000);
   }, 4000);
@@ -3415,21 +3604,26 @@ function analyzeOrderFlow(pair) {
   var price  = p.price || 0;
   var volSpk = p.volSpike ? p.volSpike.ratio : 1;
   var candle = p.candle || null;
+  var derivatives = hasDerivatives(p);
 
   // 1. Buying/Selling Pressure Score (0-100)
   var buyScore = 50; // neutral baseline
 
   // Funding rate signal: negative = shorts paying longs = bullish pressure
-  if(fund < -0.010)     buyScore += 20; // very negative = strong buy pressure
-  else if(fund < 0)     buyScore += 10; // negative = buy pressure
-  else if(fund > 0.010) buyScore -= 20; // very positive = sell pressure
-  else if(fund > 0.005) buyScore -= 10;
+  if (derivatives) {
+    if(fund < -0.010)     buyScore += 20; // very negative = strong buy pressure
+    else if(fund < 0)     buyScore += 10; // negative = buy pressure
+    else if(fund > 0.010) buyScore -= 20; // very positive = sell pressure
+    else if(fund > 0.005) buyScore -= 10;
+  }
 
   // OI delta: rising OI with price = trend continuation
-  if(oi > 2 && chg > 0)       buyScore += 15; // longs opening
-  else if(oi > 2 && chg < 0)  buyScore -= 15; // shorts opening
-  else if(oi < -2 && chg > 0) buyScore += 10; // shorts closing (buy)
-  else if(oi < -2 && chg < 0) buyScore -= 10; // longs closing (sell)
+  if (derivatives) {
+    if(oi > 2 && chg > 0)       buyScore += 15; // longs opening
+    else if(oi > 2 && chg < 0)  buyScore -= 15; // shorts opening
+    else if(oi < -2 && chg > 0) buyScore += 10; // shorts closing (buy)
+    else if(oi < -2 && chg < 0) buyScore -= 10; // longs closing (sell)
+  }
 
   // Price action
   if(chg >= -2 && chg <= 0)   buyScore += 10; // pullback = contrarian buy
@@ -3453,7 +3647,9 @@ function analyzeOrderFlow(pair) {
   // Negative funding + rising OI = smart money opening longs = bullish
   var smartMoneySignal = 'NEUTRAL';
   var smartDetail = '';
-  if(fund < 0 && oi > 0) {
+  if(!derivatives) {
+    smartMoneySignal = 'N/A'; smartDetail = 'Funding dan OI tidak tersedia pada market Spot';
+  } else if(fund < 0 && oi > 0) {
     smartMoneySignal = 'SMART LONG'; smartDetail = 'Negative funding + OI rising: institutions opening longs while retail shorts';
   } else if(fund > 0.008 && oi > 2 && chg > 5) {
     smartMoneySignal = 'RETAIL FOMO'; smartDetail = 'High funding + vol spike + extended: retail chasing, smart money distributing';
@@ -3492,7 +3688,7 @@ function analyzeOrderFlow(pair) {
     bias:bias, biasColor:biasColor,
     smartMoney:smartMoneySignal, smartDetail:smartDetail,
     liqPool:liqPool,
-    fund:fund, oi:oi, chg:chg, volSpike:volSpk
+    fund:fund, oi:oi, derivativesAvailable:derivatives, chg:chg, volSpike:volSpk
   };
 }
 
@@ -3791,7 +3987,7 @@ function computeTop5(pairs) {
     // Base V4.4 score (0-12)
     totalScore += (p.sc || 0) * 0.4;
     // Funding bonus: negative = better
-    var fundBonus = p.fund < -0.010 ? 3 : p.fund < 0 ? 2 : p.fund < 0.002 ? 1 : 0;
+    var fundBonus = hasDerivatives(p) ? (p.fund <= -0.0005 ? 3 : p.fund < 0 ? 2 : p.fund <= 0.0005 ? 1 : 0) : 0;
     totalScore += fundBonus * 0.3;
     // Signal bonus
     var sigBonus = p.sig === 'BUY' ? 2 : p.sig === 'PUMP' ? 1.5 : 0;
@@ -3802,7 +3998,8 @@ function computeTop5(pairs) {
     var chgAbs = p.chg < 0 ? -p.chg : p.chg;
     if(chgAbs <= 2) totalScore += 0.5;
     // OI rising bonus
-    if(p.oi > 0) totalScore += 0.3;
+    if(hasDerivatives(p) && p.oi > 0) totalScore += 0.3;
+    if(p.volRatio != null) totalScore += (p.volRatio >= 2 ? 0.4 : p.volRatio >= 1.5 ? 0.25 : p.volRatio >= 1 ? 0.1 : 0);
     return { p: p, rank: totalScore };
   }).filter(function(r){ return r.p.tier !== 'C'; })
     .sort(function(a,b){ return b.rank - a.rank; })
@@ -3814,8 +4011,9 @@ function computeTop5(pairs) {
   var modeNames = { A:'S/D Bounce', B:'Breakout', C:'Continuity' };
   var html = ranked.map(function(r, i) {
     var p = r.p;
-    var fundCol = p.fund < 0 ? '#3fb950' : '#f85149';
-    var fundStr = (p.fund*100).toFixed(4) + '%';
+    var derivatives = hasDerivatives(p);
+    var fundCol = !derivatives ? '#484f58' : p.fund < 0 ? '#3fb950' : '#f85149';
+    var fundStr = derivatives ? fundingText(p, 4) : 'N/A (Spot)';
     var chgCol  = p.chg >= 0 ? '#3fb950' : '#f85149';
     var entryEst = p.price; // use current price as rough entry
     var setupDir = directionForPair(p);
@@ -3828,8 +4026,8 @@ function computeTop5(pairs) {
     if(p.p1h != null) mtfBits.push('1H ' + fC(p.p1h));
     if(p.p7d != null) mtfBits.push('7D ' + fC(p.p7d));
     var evidence = [];
-    if(p.fund < 0) evidence.push('Funding negatif');
-    if(p.oi > 0) evidence.push('OI naik');
+    if(derivatives && p.fund < 0) evidence.push('Funding negatif');
+    if(derivatives && p.oi > 0) evidence.push('OI naik');
     if(Math.abs(p.chg) <= 2) evidence.push('Belum extended');
     if(p.volSpike && p.volSpike.isSpike) evidence.push('Volume ' + p.volSpike.ratio + 'x');
     var medals   = ['#e3b341','#8b949e','#cd7f32','#484f58','#484f58'];
@@ -3850,15 +4048,15 @@ function computeTop5(pairs) {
       + '<span style="color:#484f58;">Price: </span><b>' + priceStr + '</b>'
       + '</div>'
       + '<div style="font-size:10px;margin-bottom:3px;">'
-      + '<span style="color:#484f58;">Fund: </span><b style="color:' + fundCol + ';">' + (p.fund>=0?'+':'') + fundStr + '</b>'
+       + '<span style="color:#484f58;">Fund: </span><b style="color:' + fundCol + ';">' + fundStr + '</b>'
       + ' &nbsp; <span style="color:#484f58;">24h: </span><b style="color:' + chgCol + ';">' + (p.chg>=0?'+':'') + p.chg.toFixed(2) + '%</b>'
       + '</div>'
       + '<div style="font-size:10px;margin-bottom:5px;">'
       + '<span style="color:#484f58;">Score: </span><b style="color:#58a6ff;">' + p.sc + '/12</b>'
-      + ' &nbsp; <span style="color:#484f58;">OI: </span><b style="color:' + (p.oi>=0?'#3fb950':'#f85149') + ';">' + (p.oi>=0?'+':'') + p.oi.toFixed(1) + '%</b>'
+       + ' &nbsp; <span style="color:#484f58;">OI: </span><b style="color:' + (derivatives ? (p.oi>=0?'#3fb950':'#f85149') : '#484f58') + ';">' + oiText(p, 1) + '</b>'
       + '</div>'
       + '<div style="font-size:9px;color:#8b949e;margin-bottom:4px;">'
-      + '<span style="color:#484f58;">MTF: </span>' + (mtfBits.length ? mtfBits.join(' · ') : 'loading...')
+      + '<span style="color:#484f58;">MTF: </span>' + (mtfBits.length ? mtfBits.join(' · ') : (marketIsBitget() ? 'loading...' : 'N/A for CoinGecko Spot'))
       + '</div>'
       + '<div style="font-size:9px;color:#3fb950;margin-bottom:5px;">'
       + (evidence.length ? evidence.join(' · ') : 'Evidence limited')
@@ -4166,6 +4364,11 @@ function queuePaperExecution(cycleKey) {
 
 // ---- Auto Execute Top 3 Setups ----
 function autoExecuteTopSetups(cycleKey) {
+  if (marketIsSpot() || !marketIsBitget()) {
+    toast('<b style="color:#e3b341;">Paper order diblokir</b> — Paper Bot hanya memakai Bitget Futures.', 'a');
+    sLog('BOT: auto-execute skipped because current market is ' + marketLabel());
+    return;
+  }
   if(!BOT.paperMode) return;
   if(!G.pairs || !G.pairs.length) { sLog('BOT: no pairs data, skip'); return; }
   var executionKey = cycleKey || ('manual-' + Date.now());
@@ -4186,17 +4389,18 @@ function autoExecuteTopSetups(cycleKey) {
   // Rank pairs same as Top5
   var ranked = G.pairs.map(function(p){
     var sc = (p.sc||0)*0.4;
-    var fb = p.fund<-0.010?3:p.fund<0?2:p.fund<0.002?1:0;
+    var fb = hasDerivatives(p) ? (p.fund<=-0.0005?3:p.fund<0?2:p.fund<=0.0005?1:0) : 0;
     sc += fb*0.3;
     sc += (p.sig==='BUY'?2:p.sig==='PUMP'?1.5:0)*0.2;
     sc += (p.tier==='A'?2:p.tier==='B'?1:0)*0.1;
     var ca = p.chg<0?-p.chg:p.chg;
     if(ca<=2) sc+=0.5;
     if(p.oi>0) sc+=0.3;
+    if(p.volRatio != null) sc += p.volRatio>=2?0.4:p.volRatio>=1.5?0.25:p.volRatio>=1?0.1:0;
     return {p:p, rank:sc};
   }).filter(function(r){
     // Must meet entry criteria
-    return r.p.tier!=='C' && r.p.fund<0.005 && Math.abs(r.p.chg)<=3.5 && r.p.sc>=7.0;
+    return r.p.tier!=='C' && hasDerivatives(r.p) && r.p.fund<0.005 && Math.abs(r.p.chg)<=3.5 && r.p.sc>=7.0;
   }).sort(function(a,b){return b.rank-a.rank;});
 
   if(!ranked.length) { sLog('BOT: no qualifying setups this scan'); return; }
@@ -4488,7 +4692,7 @@ function renderSourceHealth(sources) {
     if(display === 'LIVE') live++;
     if(display === 'DELAYED') stale++;
     if(display === 'ERROR') errors++;
-    var detail = display === 'LIVE' || display === 'STALE'
+    var detail = display === 'LIVE' || display === 'DELAYED'
       ? ((item.lastLatencyMs != null ? item.lastLatencyMs + ' ms' : 'reachable') + (lastOk ? ' · ' + lastOk.toLocaleTimeString('id-ID') : ''))
       : (item.lastError || 'Belum dipakai');
     return '<div class="kpi" title="' + sourceEsc(item.lastPath || '') + '">'
@@ -4530,6 +4734,17 @@ function requestNotifForBot() {
 
 function runConnectionTest() {
   var sum = document.getElementById('conn-summary');
+  if (marketIsSpot()) {
+    sum.textContent = 'N/A — Funding/OI hanya diuji pada Futures';
+    sum.style.color = '#e3b341';
+    ['bitget','bingx','gate'].forEach(function(name){
+      var value = document.getElementById('test-' + name);
+      var detail = document.getElementById('test-' + name + '-val');
+      if (value) { value.textContent = 'N/A'; value.style.color = '#e3b341'; }
+      if (detail) { detail.textContent = 'Spot market'; detail.style.color = '#e3b341'; }
+    });
+    return;
+  }
   sum.textContent = 'Testing...';
   sum.style.color = '#e3b341';
 
@@ -4722,9 +4937,9 @@ function runP2Analysis(sym, coinId, keepCurrentPage) {
   document.getElementById('p2-prox-val').style.color = proxColor;
   document.getElementById('p2-prox-lbl').textContent = proxStatus;
   document.getElementById('p2-sc').textContent = p.sc + '/12';
-  var fStr = p.fund < 0 ? 'Funding: ' + (p.fund*100).toFixed(4) + '% (NEGATIVE - good)' : 'Funding: ' + (p.fund*100).toFixed(4) + '%';
+  var fStr = !hasDerivatives(p) ? 'Funding: N/A (Spot market)' : p.fund < 0 ? 'Funding: ' + fundingText(p, 4) + ' (NEGATIVE - good)' : 'Funding: ' + fundingText(p, 4);
   document.getElementById('p2-funding').textContent = fStr;
-  document.getElementById('p2-funding').style.color = p.fund < 0 ? '#3fb950' : '#8b949e';
+  document.getElementById('p2-funding').style.color = !hasDerivatives(p) ? '#e3b341' : p.fund < 0 ? '#3fb950' : '#8b949e';
 
   // Proximity bar
   var barPct = Math.min(100, prox / 15 * 100);
@@ -4769,7 +4984,7 @@ function runP2Analysis(sym, coinId, keepCurrentPage) {
   // Final decision
   // Initial confluence is based only on the data already available in the scan.
   // The final MTF verdict is rendered separately after the candle requests finish.
-  var aligned = (p.sc >= 8 ? 1 : 0) + (Math.abs(p.chg) <= 3.5 ? 1 : 0) + (p.oi > 0 ? 1 : 0);
+  var aligned = (p.sc >= 8 ? 1 : 0) + (Math.abs(p.chg) <= 3.5 ? 1 : 0) + (hasDerivatives(p) && p.oi > 0 ? 1 : 0);
   var dec = proxStep === 2 && aligned >= 2 ? { t: 'ENTRY NOW', c: '#3fb950', bg: 'rgba(63,185,80,.1)' } :
             proxStep === 2 && aligned < 2  ? { t: 'PREPARE', c: '#f0883e', bg: 'rgba(240,136,62,.1)' } :
             proxStep === 3                  ? { t: 'WATCHLIST', c: '#f0883e', bg: 'rgba(240,136,62,.1)' } :
@@ -4903,7 +5118,16 @@ function runP2MTFAnalysis() {
   var mode = P2.data.mode || (P2.data.wl ? P2.data.wl.mode : 'A');
   var btn = document.getElementById('p2-run-mtf');
   if(btn) { btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Loading...'; }
-  document.getElementById('p2-mtf-full').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:20px;color:#484f58;"><div class="sp"></div> Fetching D1/H4/H1/M15 candles from Bitget...</div>';
+  if (!marketIsBitget()) {
+    document.getElementById('p2-mtf-full').innerHTML = '<div style="color:#e3b341;padding:14px;">MTF intraday (D1/H4/H1/M15) belum tersedia dari CoinGecko Spot. Pilih Bitget Futures atau Bitget Spot untuk analisis candle.</div>';
+    if(btn) { btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-rotate"></i> Retry'; }
+    var noData = {d1:analyzeD1([],dir,mode),h4:analyzeTF([], 'H4', dir),h1:analyzeTF([], 'H1', dir),m15:analyzeTF([], 'M15', dir),summary:{status:'DATA UNAVAILABLE',color:'#e3b341',goCount:0,abortCount:0,msg:'CoinGecko Spot tidak menyediakan candle MTF untuk checklist ini.',action:'Pilih Bitget untuk mengaktifkan MTF.'}};
+    P2.lastMTF = noData;
+    renderH4Checklist(noData);
+    renderP2DecisionFromMTF(noData);
+    return;
+  }
+  document.getElementById('p2-mtf-full').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:20px;color:#484f58;"><div class="sp"></div> Fetching D1/H4/H1/M15 candles from ' + marketLabel() + '...</div>';
 
   analyzeMTFCascade(coinId, sym, dir, mode)
     .then(function(mtf) {
@@ -4968,6 +5192,7 @@ if(_loaded) {
 }
 // Prefer the VPS Paper Bot. Browser timers are only a development fallback
 // when this HTML is opened locally or the VPS bot is unavailable.
+updateMarketControls();
 setPaperMode(false, true);
 detectPaperBot();
 pollSourceHealth();

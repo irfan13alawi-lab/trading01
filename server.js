@@ -274,14 +274,45 @@ function loadPaperState() {
       state._needsSave = true;
     }
     // Repair paper orders created by the first worker version, which had the
-    // stop side reversed for SHORT and LONG orders.
+    // stop side reversed for SHORT and LONG orders. Also repair tiny-price
+    // pending limits that were rounded to the wrong side of the market by the
+    // old decimal rules (notably SHIB-like symbols).
+    let repairedActive = false;
     state.activeTrades.forEach(trade => {
       const entry = paperNumber(trade.entryLimit);
       if (!entry || !trade.dir) return;
-      trade.sl = paperRoundPrice(entry * (trade.dir === 'LONG' ? 0.97 : 1.03));
-      trade.tp1 = paperRoundPrice(entry * (trade.dir === 'LONG' ? 1.06 : 0.94));
-      trade.tp2 = paperRoundPrice(entry * (trade.dir === 'LONG' ? 1.10 : 0.90));
+      let limitEntry = entry;
+      const referencePrice = paperNumber(trade.currentPrice);
+      if (trade.status === 'PENDING' && referencePrice > 0) {
+        const wrongSide = trade.dir === 'LONG'
+          ? limitEntry >= referencePrice
+          : limitEntry <= referencePrice;
+        if (wrongSide) {
+          limitEntry = paperRoundPrice(referencePrice *
+            (trade.dir === 'LONG' ? 0.997 : 1.003));
+          if (limitEntry !== trade.entryLimit) {
+            trade.entryLimit = limitEntry;
+            repairedActive = true;
+          }
+        }
+      }
+      const bracketEntry = trade.status === 'OPEN' && paperNumber(trade.entryActual) > 0
+        ? paperRoundPrice(trade.entryActual) : limitEntry;
+      if (trade.status === 'OPEN' && bracketEntry !== trade.entryActual) {
+        trade.entryActual = bracketEntry;
+        repairedActive = true;
+      }
+      const sl = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 0.97 : 1.03));
+      const tp1 = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 1.06 : 0.94));
+      const tp2 = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 1.10 : 0.90));
+      if (trade.sl !== sl || trade.tp1 !== tp1 || trade.tp2 !== tp2) {
+        trade.sl = sl;
+        trade.tp1 = tp1;
+        trade.tp2 = tp2;
+        repairedActive = true;
+      }
     });
+    if (repairedActive) state._needsSave = true;
     return state;
   } catch (_) {
     return defaultPaperState();
@@ -306,24 +337,29 @@ function savePaperState() {
   }
 }
 
-function paperScore(changePct, funding, oiDeltaPct, hasOi) {
-  const fundingScore = funding <= -0.010 ? 2.5
-    : funding < 0 ? 2.2
-    : funding < 0.002 ? 2.0
-    : funding < 0.004 ? 1.5
-    : funding < 0.006 ? 1.2
-    : funding < 0.008 ? 0.8
-    : funding < 0.010 ? 0.4 : 0;
-  const priceScore = changePct >= -2 && changePct <= 0 ? 2.5
-    : changePct > 0 && changePct <= 1 ? 2.0
-    : changePct > 1 && changePct <= 3 ? 1.5
-    : changePct > 3 && changePct <= 5 ? 1.0
-    : changePct > 5 && changePct <= 8 ? 0.5 : 0;
+function paperScore(changePct, funding, oiDeltaPct, hasOi, volumeRatio) {
+  // Small positive funding is neutral, not strong confirmation. This keeps
+  // the rank from giving almost every mildly red coin the same score.
+  const fundingScore = funding <= -0.0005 ? 2.5
+    : funding < 0 ? 1.8
+    : funding <= 0.0005 ? 1.0
+    : funding < 0.002 ? 0.7
+    : funding < 0.004 ? 0.4
+    : funding < 0.006 ? 0.2 : 0;
+  const priceScore = changePct >= -2 && changePct < -1 ? 2.5
+    : changePct >= -1 && changePct <= 0 ? 2.0
+    : changePct > 0 && changePct <= 1 ? 1.5
+    : changePct > 1 && changePct <= 3 ? 1.2
+    : changePct > 3 && changePct <= 5 ? 0.8
+    : changePct > 5 && changePct <= 8 ? 0.4 : 0;
   let oiScore = oiDeltaPct > 2 ? 2.0
     : oiDeltaPct > 0 ? 1.5
     : oiDeltaPct >= -1 ? 0.5 : 0;
   if (hasOi && oiDeltaPct > 1) oiScore = Math.min(2.0, oiScore + 0.3);
-  return Math.min(12, Number((fundingScore + priceScore + oiScore + 3).toFixed(1)));
+  const volumeScore = Number.isFinite(volumeRatio)
+    ? (volumeRatio >= 2 ? 1.0 : volumeRatio >= 1.5 ? 0.7 : volumeRatio >= 1 ? 0.3 : 0)
+    : 0;
+  return Math.min(12, Number((fundingScore + priceScore + oiScore + volumeScore + 3).toFixed(1)));
 }
 
 function paperTier(score) {
@@ -362,24 +398,37 @@ function buildPaperPairs(payload) {
     const pair = {
       sym, price, chg,
       volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
-      fund, oi, oiUSD: oiUsd, sc,
-      tier: paperTier(sc), sig: paperSignal(chg, oi, fund)
+      fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0, sc: 0,
+      tier: 'C', sig: paperSignal(chg, oi, fund)
     };
+    pairs[sym] = pair;
+  });
+  const volumes = Object.values(pairs).map(pair => pair.volume).filter(value => value > 0).sort((a, b) => a - b);
+  const medianVolume = volumes.length ? volumes[Math.floor(volumes.length / 2)] : 0;
+  return Object.values(pairs).map(pair => {
+    pair.volumeRatio = medianVolume > 0 && pair.volume > 0
+      ? Number((pair.volume / medianVolume).toFixed(2)) : null;
+    pair.sc = paperScore(pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
+    pair.tier = paperTier(pair.sc);
     if (pair.tier === 'C' || pair.fund >= 0.005 ||
-        Math.abs(pair.chg) > 3.5 || pair.sc < 7) return;
+        Math.abs(pair.chg) > 3.5 || pair.sc < 7) return null;
     let rank = pair.sc * 0.4;
-    const fundingBonus = pair.fund < -0.010 ? 3
+    const fundingBonus = pair.fund <= -0.0005 ? 3
       : pair.fund < 0 ? 2
-      : pair.fund < 0.002 ? 1 : 0;
+      : pair.fund <= 0.0005 ? 1 : 0;
     rank += fundingBonus * 0.3;
     rank += (pair.sig === 'BUY' ? 2 : pair.sig === 'PUMP' ? 1.5 : 0) * 0.2;
     rank += (pair.tier === 'A' ? 2 : pair.tier === 'B' ? 1 : 0) * 0.1;
     if (Math.abs(pair.chg) <= 2) rank += 0.5;
     if (pair.oi > 0) rank += 0.3;
+    if (pair.volumeRatio != null) {
+      rank += (pair.volumeRatio >= 2 ? 0.4
+        : pair.volumeRatio >= 1.5 ? 0.25
+        : pair.volumeRatio >= 1 ? 0.1 : 0);
+    }
     pair.rank = Number(rank.toFixed(3));
-    pairs[sym] = pair;
-  });
-  return Object.keys(pairs).map(sym => pairs[sym]).sort((a, b) => b.rank - a.rank);
+    return pair;
+  }).filter(Boolean).sort((a, b) => b.rank - a.rank);
 }
 
 function paperSetup(pair) {
@@ -445,7 +494,9 @@ function paperCandidateView(pair) {
   else if (pair.chg > 0) reasons.push('24H naik -> kandidat LONG pullback');
   if (pair.fund < 0) reasons.push('funding negatif');
   if (pair.oi > 0) reasons.push('OI meningkat ' + pair.oi.toFixed(2) + '%');
+  if (pair.oiUSD > 0 && !pair.oiReady) reasons.push('OI baseline tersimpan; delta menunggu scan berikutnya');
   if (Math.abs(pair.chg) <= 2) reasons.push('pergerakan belum terlalu extended');
+  if (pair.volumeRatio >= 1.5) reasons.push('volume ' + pair.volumeRatio.toFixed(2) + 'x median');
   if (pair.mtf) {
     ['H4', 'H1', 'M15'].forEach(tf => {
       const item = pair.mtf[tf];
@@ -454,6 +505,7 @@ function paperCandidateView(pair) {
   }
   return {
     sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
+    volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.chg < 0 ? 'SHORT' : 'LONG',
     mtf: pair.mtf || null, evidence: reasons
@@ -840,6 +892,11 @@ const server = http.createServer(async (req, res) => {
   const key = prefix + requestUrl.pathname + requestUrl.search;
   const hit = cache.get(key);
   if (hit && hit.expiresAt > Date.now()) {
+    markSourceHealth(prefix, {
+      status: hit.status,
+      latencyMs: 0,
+      path: upstreamPath
+    });
     send(res, hit.status, hit.body, hit.contentType);
     return;
   }
