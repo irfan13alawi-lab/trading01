@@ -414,14 +414,31 @@ async function fetchPaperCandles(sym, granularity) {
     encodeURIComponent(sym + 'USDT') + '&granularity=' +
     encodeURIComponent(granularity) + '&limit=3';
   const startedAt = Date.now();
-  const result = await requestUpstream(target);
-  markSourceHealth('/bitget', {
-    ...result, latencyMs: Date.now() - startedAt,
-    path: '/api/v2/mix/market/candles'
-  });
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/bitget', {
+      ...result, latencyMs: Date.now() - startedAt,
+      path: '/api/v2/mix/market/candles'
+    });
+  } catch (error) {
+    markSourceError('/bitget', error, '/api/v2/mix/market/candles');
+    throw error;
+  }
   if (result.status < 200 || result.status >= 300) throw new Error('Bitget candles HTTP ' + result.status);
-  const payload = JSON.parse(result.body);
-  if (!payload || payload.code !== '00000' || !Array.isArray(payload.data)) return [];
+  let payload;
+  try {
+    payload = JSON.parse(result.body);
+  } catch (_) {
+    const error = new Error('Bitget candles returned invalid JSON');
+    markSourceError('/bitget', error, '/api/v2/mix/market/candles');
+    throw error;
+  }
+  if (!payload || payload.code !== '00000' || !Array.isArray(payload.data)) {
+    const error = new Error((payload && payload.msg) || 'Bitget candles response invalid');
+    markSourceError('/bitget', error, '/api/v2/mix/market/candles');
+    throw error;
+  }
   return payload.data.map(row => ({
     ts: Number(row[0]), open: Number(row[1]), close: Number(row[4])
   })).filter(row => row.open > 0 && row.close > 0).sort((a, b) => a.ts - b.ts);
@@ -477,7 +494,18 @@ function closePaperTrade(trade, exitPrice, outcome, reason) {
 async function fetchPaperTickers() {
   const target = APIS['/bitget'] +
     '/api/v2/mix/market/tickers?productType=USDT-FUTURES';
-  const result = await requestUpstream(target);
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/bitget', {
+      ...result, latencyMs: Date.now() - startedAt,
+      path: '/api/v2/mix/market/tickers'
+    });
+  } catch (error) {
+    markSourceError('/bitget', error, '/api/v2/mix/market/tickers');
+    throw error;
+  }
   if (result.status < 200 || result.status >= 300) {
     throw new Error('Bitget tickers HTTP ' + result.status);
   }
@@ -485,10 +513,14 @@ async function fetchPaperTickers() {
   try {
     payload = JSON.parse(result.body);
   } catch (_) {
-    throw new Error('Bitget tickers returned invalid JSON');
+    const error = new Error('Bitget tickers returned invalid JSON');
+    markSourceError('/bitget', error, '/api/v2/mix/market/tickers');
+    throw error;
   }
   if (!payload || payload.code !== '00000' || !Array.isArray(payload.data)) {
-    throw new Error((payload && payload.msg) || 'Bitget tickers response invalid');
+    const error = new Error((payload && payload.msg) || 'Bitget tickers response invalid');
+    markSourceError('/bitget', error, '/api/v2/mix/market/tickers');
+    throw error;
   }
   return payload;
 }
