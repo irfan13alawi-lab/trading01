@@ -15,6 +15,9 @@ const PAPER_MAX_ACTIVE = 30;
 const PAPER_MAX_CLOSED_TRADES = 5000;
 const PAPER_MAX_RECENT_SCANS = 1000;
 const PAPER_STARTING_EQUITY = Number(process.env.PAPER_STARTING_EQUITY || 285);
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
+const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 let fetchFn = globalThis.fetch;
@@ -135,6 +138,53 @@ async function requestUpstream(url) {
     }
   }
   throw lastError || new Error('Upstream request failed');
+}
+
+async function sendTelegramMessage(text) {
+  if (!TELEGRAM_ALERTS_ENABLED || !text) return false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const target = 'https://api.telegram.org/bot' + TELEGRAM_BOT_TOKEN + '/sendMessage';
+  try {
+    const response = await fetchFn(target, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'User-Agent': 'NexoraPaperBot/1.0'},
+      body: JSON.stringify({chat_id: TELEGRAM_CHAT_ID, text}),
+      signal: controller.signal
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error('Telegram HTTP ' + response.status);
+    let payload;
+    try { payload = JSON.parse(body); } catch (_) { payload = null; }
+    if (!payload || payload.ok !== true) throw new Error('Telegram response invalid');
+    return true;
+  } catch (error) {
+    console.error('[paper] Telegram alert failed:', error.message);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function paperScanAlert(cycleKey, placed) {
+  return 'NEXORA PAPER SCAN ' + cycleKey + '\n' +
+    (placed.length ? placed.map(trade =>
+      trade.sym + ' ' + trade.dir + ' PENDING @ ' + trade.entryLimit +
+      ' | SL ' + trade.sl + ' | TP1 ' + trade.tp1
+    ).join('\n') : 'Tidak ada setup baru');
+}
+
+function paperFillAlert(trade) {
+  return 'NEXORA PAPER LIMIT FILLED\n' +
+    trade.sym + ' ' + trade.dir + ' @ ' + trade.entryActual +
+    '\nSL ' + trade.sl + ' | TP1 ' + trade.tp1;
+}
+
+function paperCloseAlert(trade) {
+  return 'NEXORA PAPER ' + (trade.outcome || 'CLOSED') + '\n' +
+    trade.sym + ' ' + trade.dir + ' exit @ ' + trade.exitPrice +
+    '\nR: ' + trade.r + ' | PnL: $' + trade.pnl +
+    '\n' + (trade.closeReason || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +539,7 @@ function closePaperTrade(trade, exitPrice, outcome, reason) {
   });
   paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
   console.log('[paper] closed', trade.sym, outcome, reason);
+  void sendTelegramMessage(paperCloseAlert(trade));
 }
 
 async function fetchPaperTickers() {
@@ -574,6 +625,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.recentScans = paperState.recentScans.slice(0, PAPER_MAX_RECENT_SCANS);
     savePaperState();
     console.log('[paper] scan complete', cycleKey, 'placed', placed.length);
+    if (placed.length) void sendTelegramMessage(paperScanAlert(cycleKey, placed));
   } catch (error) {
     paperState.lastError = error.message;
     savePaperState();
@@ -615,6 +667,10 @@ async function monitorPaperTrades() {
           });
           paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
           changed = true;
+          void sendTelegramMessage(paperCloseAlert({
+            ...paperTradeView(trade), exitPrice: trade.currentPrice,
+            outcome: 'CANCELLED', r: 0, pnl: 0, closeReason: trade.closeReason
+          }));
         } else {
           // Strict limit semantics: a buy limit fills only at or below its
           // entry; a sell limit fills only at or above its entry. The old
@@ -628,6 +684,7 @@ async function monitorPaperTrades() {
             trade.entryActual = price;
             trade.openedAt = new Date().toISOString();
             changed = true;
+            void sendTelegramMessage(paperFillAlert(trade));
           }
           retained.push(trade);
         }
@@ -686,6 +743,7 @@ function paperStatus() {
     realizedPnl: Number(realizedPnl.toFixed(2)),
     unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
     equity: Number(equity.toFixed(2)),
+    alerts: {telegram: TELEGRAM_ALERTS_ENABLED},
     lastScanAt: paperState.lastScanAt, lastCycleKey: paperState.lastCycleKey,
     nextScanAt: new Date(paperNextQuarter(Date.now())).toISOString(),
     lastMonitorAt: paperState.lastMonitorAt, lastPriceAt: paperState.lastPriceAt,
