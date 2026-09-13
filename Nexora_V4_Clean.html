@@ -3618,6 +3618,7 @@ var BOT = {
 function applyServerPaperStatus(status, announce) {
   if(!status || !status.ok) return;
   var wasServer = G.paperServer;
+  if(!wasServer && BOT.paperMode) stopBotTimers();
   G.paperServer = true;
   BOT.paperMode = false;
   BOT.activeTrades = Array.isArray(status.activeTrades) ? status.activeTrades : [];
@@ -3676,10 +3677,12 @@ function detectPaperBot() {
         setInterval(pollPaperBotStatus, 15000);
       } else {
         useBrowserPaperFallback('PAPER VPS belum aktif — memakai browser fallback');
+        setTimeout(detectPaperBot, 30000);
       }
     })
     .catch(function(){
       useBrowserPaperFallback('PAPER VPS belum dapat dihubungi — memakai browser fallback');
+      setTimeout(detectPaperBot, 30000);
     });
 }
 
