@@ -161,6 +161,7 @@ function loadPaperState() {
     };
     // Exclude historical trades from the first worker version. Their stop
     // side was reversed, so counting them would corrupt the one-week trial.
+    const invalidatedIds = new Set(state.invalidatedTrades.map(trade => trade.id));
     const invalid = state.closedTrades.filter(trade => {
       const entry = paperNumber(trade.entryLimit);
       const sl = paperNumber(trade.sl);
@@ -168,8 +169,10 @@ function loadPaperState() {
       return trade.dir === 'SHORT' ? sl <= entry : sl >= entry;
     });
     if (invalid.length) {
-      state.invalidatedTrades = invalid.concat(state.invalidatedTrades).slice(0, 100);
+      const newlyInvalid = invalid.filter(trade => !invalidatedIds.has(trade.id));
+      state.invalidatedTrades = newlyInvalid.concat(state.invalidatedTrades).slice(0, 100);
       state.closedTrades = state.closedTrades.filter(trade => invalid.indexOf(trade) < 0);
+      state._needsSave = true;
     }
     // Repair paper orders created by the first worker version, which had the
     // stop side reversed for SHORT and LONG orders.
@@ -189,6 +192,10 @@ function loadPaperState() {
 let paperState = loadPaperState();
 let paperBusy = false;
 let paperStarted = false;
+if (paperState._needsSave) {
+  delete paperState._needsSave;
+  savePaperState();
+}
 
 function savePaperState() {
   const tempFile = PAPER_STATE_FILE + '.tmp';
