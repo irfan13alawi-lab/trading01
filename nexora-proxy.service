@@ -8,7 +8,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/nexora-proxy
 Environment=PAPER_BOT_ENABLED=true
-ExecStart=/usr/bin/env node /home/ubuntu/nexora-proxy/server.js
+ExecStart=/home/ubuntu/.local/bin/node /home/ubuntu/nexora-proxy/server.js
 Restart=always
 RestartSec=5
 
