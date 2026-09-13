@@ -146,6 +146,7 @@ tr.tl-b{border-left:2px solid var(--orange);}
 /* Setup cards / top5 */
 .setup{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;}
 #top5-body{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px;}
+#top5-body.single-mode{display:block;}
 .lvls{display:flex;flex-direction:column;gap:3px;}
 .lvl{display:flex;justify-content:space-between;font-size:10px;padding:2px 0;}
 .lvl-l{color:var(--text3);}
@@ -327,6 +328,10 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="card" id="top5-panel">
     <div class="card-h">
       <div class="card-t"><i class="fa-solid fa-trophy"></i> Top 5 Setups</div>
+      <div style="display:flex;gap:5px;align-items:center;">
+        <span class="pill on" id="scan-view-grid" onclick="setScanView('grid',this)">Grid</span>
+        <span class="pill" id="scan-view-single" onclick="setScanView('single',this)">Single</span>
+      </div>
       <button class="btn btn-sm btn-green" onclick="autoExecuteTopSetups()"><i class="fa-solid fa-bolt"></i> Auto-Execute</button>
     </div>
     <div id="top5-body"><div class="ld">Run a scan to populate top setups</div></div>
@@ -352,6 +357,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <span class="pill" onclick="setF('a',this)">A-Tier</span>
       <span class="pill" onclick="setF('b',this)">B-Tier</span>
       <span class="pill" onclick="setF('sig',this)">Signals</span>
+      <span class="pill" onclick="setF('long',this)">LONG</span>
+      <span class="pill" onclick="setF('short',this)">SHORT</span>
       <span class="pill" onclick="setF('fund',this)">Neg Funding</span>
       <span class="pill" onclick="setF('oi',this)">OI Rising</span>
       <span class="pill" onclick="setF('pump',this)">Pumping</span>
@@ -808,6 +815,7 @@ var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
   refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [],
+  scanView: 'grid', scanFocus: 'BTC',
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
   cgKey: '',
@@ -1317,6 +1325,14 @@ function setF(f, btn) {
 }
 function onSrch() { G.srch = document.getElementById('srch').value.toLowerCase(); renderTable(); }
 function doSort(k) { if (G.sKey===k) G.sAsc=!G.sAsc; else {G.sKey=k;G.sAsc=false;} renderTable(); }
+function setScanView(mode, btn) {
+  G.scanView = mode === 'single' ? 'single' : 'grid';
+  document.querySelectorAll('#scan-view-grid,#scan-view-single').forEach(function(p){p.classList.remove('on');});
+  if(btn) btn.classList.add('on');
+  var top5 = document.getElementById('top5-body');
+  if(top5) top5.classList.toggle('single-mode', G.scanView === 'single');
+  renderTable();
+}
 
 function renderTable() {
   var data = G.pairs.filter(function(p) {
@@ -1326,6 +1342,8 @@ function renderTable() {
     if (G.filt==='sig' && p.sig==='NEU') return false;
     if (G.filt==='fund' && p.fund>=0.005) return false;
     if (G.filt==='oi' && p.oi<=0) return false;
+    if (G.filt==='long' && p.chg<0) return false;
+    if (G.filt==='short' && p.chg>=0) return false;
     if (G.filt==='pump' && p.chg<=3) return false;
     if (G.filt==='dump' && p.chg>=-3) return false;
     if (G.filt==='l2' && p.layer!=='L2') return false;
@@ -1336,6 +1354,10 @@ function renderTable() {
   if (G.filt==='top10' || G.filt==='top25') {
     data.sort(function(a,b){ return (b.sc||0)-(a.sc||0); });
     data = data.slice(0, G.filt==='top10' ? 10 : 25);
+  }
+  if (G.scanView === 'single') {
+    var focused = data.find(function(p){ return p.s === G.scanFocus; });
+    data = focused ? [focused] : data.slice(0, 1);
   }
   document.getElementById('pcnt').textContent = data.length + ' coins';
 
@@ -1394,6 +1416,7 @@ function renderTable() {
 function openGC(s) { window.open('https://gocharting.com/?ticker=BINANCE:' + s + 'USDT', '_blank'); }
 function switchCoin(id, s) {
   G.coinId = id;
+  G.scanFocus = s;
   document.getElementById('cl').textContent = s;
   document.getElementById('ind-l').textContent = s;
   var bookSym = document.getElementById('book-sym');
@@ -2027,13 +2050,10 @@ function renderEquity() {
   var allTrades = useVpsEquity ? G.vpsClosed : G.trades;
   populateJournalFilters(allTrades);
   var trades = journalFilteredTrades(allTrades);
-  var data;
-  if(useVpsEquity) {
-    var filteredCum = 0;
-    data = trades.length ? trades.map(function(t){ filteredCum += Number(t.r || 0); return filteredCum; }) : [0];
-  } else {
-    data = G.eq.length ? G.eq : [0];
-  }
+  var filteredCum = 0;
+  var data = trades.length
+    ? trades.map(function(t){ filteredCum += Number(t.r || 0); return filteredCum; })
+    : [0];
 
   // Stats
   var wins = trades.filter(function(t){return t.r>0;}).length;
@@ -4415,10 +4435,10 @@ function renderSourceHealth(sources) {
     var state = item.status || 'UNKNOWN';
     var lastOk = item.lastOkAt ? new Date(item.lastOkAt) : null;
     var age = lastOk && !isNaN(lastOk.getTime()) ? (Date.now() - lastOk.getTime()) / 1000 : Infinity;
-    var display = state === 'LIVE' && age > 180 ? 'STALE' : state;
-    var color = display === 'LIVE' ? '#3fb950' : display === 'ERROR' ? '#f85149' : display === 'STALE' ? '#f0883e' : '#e3b341';
+    var display = state === 'LIVE' && age > 180 ? 'DELAYED' : state;
+    var color = display === 'LIVE' ? '#3fb950' : display === 'ERROR' ? '#f85149' : display === 'DELAYED' ? '#f0883e' : '#e3b341';
     if(display === 'LIVE') live++;
-    if(display === 'STALE') stale++;
+    if(display === 'DELAYED') stale++;
     if(display === 'ERROR') errors++;
     var detail = display === 'LIVE' || display === 'STALE'
       ? ((item.lastLatencyMs != null ? item.lastLatencyMs + ' ms' : 'reachable') + (lastOk ? ' · ' + lastOk.toLocaleTimeString('id-ID') : ''))
@@ -4432,7 +4452,7 @@ function renderSourceHealth(sources) {
   if(grid) grid.innerHTML = html;
   var summary = document.getElementById('source-health-summary');
   if(summary) {
-    summary.textContent = live + '/' + names.length + ' LIVE' + (stale ? ' · ' + stale + ' stale' : '') + (errors ? ' · ' + errors + ' error' : '');
+    summary.textContent = live + '/' + names.length + ' LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' error' : '');
     summary.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
   }
 }
