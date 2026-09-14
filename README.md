@@ -83,11 +83,18 @@ tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supa
 riwayat paper trading tetap satu sumber.
 History mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
 
+Untuk rotasi journal, pasang `nexora-journald.conf` ke
+`/etc/systemd/journald.conf.d/nexora.conf`, reload `systemd-journald`, lalu jalankan
+`journalctl --vacuum-size=300M` satu kali.
+
 ## Struktur File
 
 ```
 Nexora_V4_Clean.html    # Dashboard utama (single file, semua built-in)
 server.js               # Proxy API HTTP untuk VPS port 18085
+nexora-watchdog.sh      # Watchdog status VPS/Telegram
+nexora-watchdog.service
+nexora-journald.conf    # Batas journal dan retention
 README.md               # Dokumentasi ini
 .gitignore              # Git ignore file
 ```

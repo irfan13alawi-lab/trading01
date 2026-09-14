@@ -333,8 +333,20 @@ function defaultPaperState() {
 }
 
 function loadPaperState() {
+  let parsed;
+  let usedBackup = false;
   try {
-    const parsed = JSON.parse(fs.readFileSync(PAPER_STATE_FILE, 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(PAPER_STATE_FILE, 'utf8'));
+  } catch (_) {
+    try {
+      parsed = JSON.parse(fs.readFileSync(PAPER_STATE_BACKUP_FILE, 'utf8'));
+      usedBackup = true;
+      console.error('[paper] main state unreadable; recovered from backup');
+    } catch (_) {
+      return defaultPaperState();
+    }
+  }
+  try {
     const state = {
       ...defaultPaperState(),
       ...parsed,
@@ -345,6 +357,7 @@ function loadPaperState() {
       recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : [],
       schemaVersion: PAPER_SCHEMA_VERSION
     };
+    if (usedBackup) state._needsSave = true;
     // Exclude historical trades from the first worker version. Their stop
     // side was reversed, so counting them would corrupt the one-week trial.
     const invalidatedIds = new Set(state.invalidatedTrades.map(trade => trade.id));
@@ -487,6 +500,7 @@ function paperTickerSymbol(row) {
 
 function buildPaperPairs(payload) {
   const rows = Array.isArray(payload && payload.data) ? payload.data : [];
+  const dataAt = payload && payload._nexoraFetchedAt || new Date().toISOString();
   const pairs = {};
   rows.forEach(row => {
     const sym = paperTickerSymbol(row);
@@ -507,7 +521,8 @@ function buildPaperPairs(payload) {
       sym, price, chg,
       volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
       fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0, sc: 0,
-      tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL'
+      tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL',
+      dataAt, source: 'Bitget Futures'
     };
     pairs[sym] = pair;
   });
@@ -607,20 +622,21 @@ function paperLegacyActiveCount() {
     (t.status === 'PENDING' || t.status === 'OPEN') && !isStrictPaperTrade(t)).length;
 }
 
-function paperRealizedPnl() {
-  return paperState.closedTrades.reduce((sum, trade) =>
-    sum + paperNumber(trade.pnl), 0);
+function paperRealizedPnl(includeLegacy) {
+  return paperState.closedTrades
+    .filter(trade => includeLegacy || isStrictPaperTrade(trade))
+    .reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
 }
 
-function paperUnrealizedPnl() {
+function paperUnrealizedPnl(includeLegacy) {
   return paperState.activeTrades
-    .filter(trade => trade.status === 'OPEN')
+    .filter(trade => trade.status === 'OPEN' && (includeLegacy || isStrictPaperTrade(trade)))
     .reduce((sum, trade) => sum + paperNumber(trade.unrealPnl), 0);
 }
 
-function paperEquity() {
+function paperEquity(includeLegacy) {
   return paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
-    paperRealizedPnl() + paperUnrealizedPnl();
+    paperRealizedPnl(includeLegacy) + paperUnrealizedPnl(includeLegacy);
 }
 
 function paperTradeRiskDollar(trade) {
@@ -656,6 +672,8 @@ function paperTradeView(trade) {
     executionClass: isStrictPaperTrade(trade) ? 'STRICT' : 'LEGACY',
     timeframe: trade.timeframe || trade.tf || '15M',
     tf: trade.tf || trade.timeframe || '15M',
+    dataAt: trade.dataAt || null,
+    source: trade.source || 'Bitget Futures',
     dataQuality: trade.dataQuality || null,
     signalReasons: Array.isArray(trade.signalReasons) ? trade.signalReasons : [],
     scoreBreakdown: trade.scoreBreakdown || null,
@@ -686,6 +704,7 @@ function paperCandidateView(pair) {
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.chg < 0 ? 'SHORT' : 'LONG',
+    dataAt: pair.dataAt || null, source: pair.source || 'Bitget Futures',
     mtf: pair.mtf || null, dataQuality: pair.dataQuality || 'PARTIAL',
     scoreBreakdown: pair.scoreBreakdown || null, mtfAvailable: pair.mtfAvailable || 0,
     mtfStatus: pair.mtfStatus || 'UNAVAILABLE',
@@ -812,6 +831,7 @@ async function fetchPaperTickers() {
     markSourceError('/bitget', error, '/api/v2/mix/market/tickers');
     throw error;
   }
+  payload._nexoraFetchedAt = new Date().toISOString();
   return payload;
 }
 
@@ -866,6 +886,7 @@ async function runPaperScan(reason, requestedCycleKey) {
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, mtf: pair.mtf,
         timeframe: '15M', tf: '15M', dataQuality: pair.dataQuality,
+        dataAt: pair.dataAt, source: pair.source,
         signalReasons: candidate.evidence, scoreBreakdown: candidate.scoreBreakdown,
         setupValidation: item.setupValidation,
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
@@ -1023,8 +1044,13 @@ function paperStatus() {
   const wins = closed.filter(t => t.outcome === 'WIN').length;
   const losses = closed.filter(t => t.outcome === 'LOSS').length;
   const netR = closed.reduce((sum, t) => sum + paperNumber(t.r), 0);
+  // The new bot's risk and sizing must not be changed by the first worker's
+  // legacy trades. Those trades remain visible and auditable below, but the
+  // default equity/risk figures are strict-bot-only.
   const realizedPnl = paperRealizedPnl();
   const unrealizedPnl = paperUnrealizedPnl();
+  const totalRealizedPnl = paperRealizedPnl(true);
+  const totalUnrealizedPnl = paperUnrealizedPnl(true);
   const equity = paperEquity();
   const strictActiveCount = paperActiveCount();
   const legacyActiveCount = paperLegacyActiveCount();
@@ -1046,6 +1072,10 @@ function paperStatus() {
     realizedPnl: Number(realizedPnl.toFixed(2)),
     unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
     equity: Number(equity.toFixed(2)),
+    legacyRealizedPnl: Number((totalRealizedPnl - realizedPnl).toFixed(2)),
+    legacyUnrealizedPnl: Number((totalUnrealizedPnl - unrealizedPnl).toFixed(2)),
+    totalEquity: Number((paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
+      totalRealizedPnl + totalUnrealizedPnl).toFixed(2)),
     riskPct: PAPER_RISK_PCT,
     maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
     activeRisk: Number(activeRisk.toFixed(2)),
@@ -1190,11 +1220,9 @@ const server = http.createServer(async (req, res) => {
   const key = prefix + requestUrl.pathname + requestUrl.search;
   const hit = cache.get(key);
   if (hit && hit.expiresAt > Date.now()) {
-    markSourceHealth(prefix, {
-      status: hit.status,
-      latencyMs: 0,
-      path: upstreamPath
-    });
+    // A cache hit is not a new upstream observation. Keep the source health
+    // timestamp tied to the last real upstream response so old data is never
+    // presented as freshly fetched.
     send(res, hit.status, hit.body, hit.contentType);
     return;
   }
