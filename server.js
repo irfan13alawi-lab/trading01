@@ -9,7 +9,19 @@ const PAPER_SCAN_CHECK_MS = 15000;
 const PAPER_MONITOR_MS = 30000;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_PER_SCAN = 3;
-const PAPER_MAX_ACTIVE = 30;
+const PAPER_MAX_ACTIVE = Math.max(3, Math.min(100,
+  Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE))
+    ? Number(process.env.PAPER_MAX_ACTIVE) : 30));
+const PAPER_MAX_PER_SYMBOL = Math.max(1, Math.min(3,
+  Number.isFinite(Number(process.env.PAPER_MAX_PER_SYMBOL))
+    ? Number(process.env.PAPER_MAX_PER_SYMBOL) : 1));
+const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
+  Number.isFinite(Number(process.env.PAPER_MIN_ENTRY_OFFSET_PCT))
+    ? Number(process.env.PAPER_MIN_ENTRY_OFFSET_PCT) : 0.1));
+const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
+  Number.isFinite(Number(process.env.PAPER_MIN_RR))
+    ? Number(process.env.PAPER_MIN_RR) : 2));
+const PAPER_SCHEMA_VERSION = 2;
 // Keep the one-week paper sample from becoming a highly leveraged simulation:
 // each new order risks 0.5% of current equity and all active orders together
 // may reserve at most 15%. Existing legacy trades keep their recorded sizing.
@@ -29,6 +41,7 @@ const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
+const PAPER_STATE_BACKUP_FILE = PAPER_STATE_FILE + '.bak';
 let fetchFn = globalThis.fetch;
 try {
   // The VPS already uses node-fetch; prefer it when present because some
@@ -54,6 +67,15 @@ Object.keys(APIS).forEach(prefix => {
     lastPath: null, lastError: null
   };
 });
+
+const telegramState = {
+  sent: 0,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastErrorAt: null,
+  lastError: null
+};
+const alertCooldowns = new Map();
 
 const cache = new Map();
 const prefixes = Object.keys(APIS).sort((a, b) => b.length - a.length);
@@ -102,7 +124,18 @@ function markSourceError(prefix, error, pathName) {
 }
 
 function sourceHealthView() {
-  return Object.fromEntries(Object.entries(sourceHealth).map(([name, item]) => [name, {...item}]));
+  const now = Date.now();
+  return Object.fromEntries(Object.entries(sourceHealth).map(([name, item]) => {
+    const lastOkMs = item.lastOkAt ? Date.parse(item.lastOkAt) : NaN;
+    const ageSec = Number.isFinite(lastOkMs)
+      ? Math.max(0, Math.round((now - lastOkMs) / 1000)) : null;
+    return [name, {
+      ...item,
+      ageSec,
+      displayStatus: item.status === 'LIVE' && ageSec != null && ageSec > 180
+        ? 'DELAYED' : item.status
+    }];
+  }));
 }
 
 function cacheTtl(prefix, pathname) {
@@ -151,6 +184,7 @@ async function requestUpstream(url) {
 
 async function sendTelegramMessage(text) {
   if (!TELEGRAM_ALERTS_ENABLED || !text) return false;
+  telegramState.lastAttemptAt = new Date().toISOString();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const target = 'https://api.telegram.org/bot' + TELEGRAM_BOT_TOKEN + '/sendMessage';
@@ -166,13 +200,26 @@ async function sendTelegramMessage(text) {
     let payload;
     try { payload = JSON.parse(body); } catch (_) { payload = null; }
     if (!payload || payload.ok !== true) throw new Error('Telegram response invalid');
+    telegramState.sent += 1;
+    telegramState.lastSuccessAt = new Date().toISOString();
+    telegramState.lastError = null;
     return true;
   } catch (error) {
+    telegramState.lastErrorAt = new Date().toISOString();
+    telegramState.lastError = error.message;
     console.error('[paper] Telegram alert failed:', error.message);
     return false;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sendRateLimitedAlert(key, text, cooldownMs) {
+  const now = Date.now();
+  const last = alertCooldowns.get(key) || 0;
+  if (now - last < cooldownMs) return;
+  alertCooldowns.set(key, now);
+  void sendTelegramMessage(text);
 }
 
 function paperScanAlert(cycleKey, placed) {
@@ -196,6 +243,14 @@ function paperCloseAlert(trade) {
     '\n' + (trade.closeReason || '');
 }
 
+function paperCapacityAlert(status) {
+  return 'NEXORA PAPER BOT GUARD\n' +
+    'Order baru ditahan: ' + (status.blockReason || 'capacity/risk guard') + '\n' +
+    'Strict active: ' + status.strictActiveCount + '/' + status.maxConcurrent +
+    ' | Legacy active: ' + status.legacyActiveCount + '\n' +
+    'Risk: $' + status.activeRisk + ' / $' + status.riskBudget;
+}
+
 // ---------------------------------------------------------------------------
 // VPS PAPER BOT
 // This is simulation only: it never calls an exchange order endpoint.
@@ -212,6 +267,25 @@ const PAPER_SYMBOLS = [
 function paperNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function paperExecutionModel(trade) {
+  return trade && trade.executionModel === 'LIMIT_STRICT'
+    ? 'LIMIT_STRICT' : 'LEGACY_TOLERANCE';
+}
+
+function isStrictPaperTrade(trade) {
+  return paperExecutionModel(trade) === 'LIMIT_STRICT';
+}
+
+function normalisePaperTrade(trade) {
+  const next = {...trade};
+  next.executionModel = paperExecutionModel(next);
+  next.executionClass = isStrictPaperTrade(next) ? 'STRICT' : 'LEGACY';
+  next.timeframe = next.timeframe || next.tf || '15M';
+  next.tf = next.tf || next.timeframe;
+  if (!Array.isArray(next.signalReasons)) next.signalReasons = [];
+  return next;
 }
 
 function paperCycleKey(timestamp) {
@@ -238,6 +312,7 @@ function paperRoundPrice(value) {
 
 function defaultPaperState() {
   return {
+    schemaVersion: PAPER_SCHEMA_VERSION,
     enabled: true,
     startingEquity: PAPER_STARTING_EQUITY,
     startedAt: new Date().toISOString(),
@@ -246,6 +321,8 @@ function defaultPaperState() {
     lastMonitorAt: null,
     lastPriceAt: null,
     lastError: null,
+    lastBlockReason: null,
+    lastSavedAt: null,
     nextId: 0,
     oiSnapshot: {},
     activeTrades: [],
@@ -262,10 +339,11 @@ function loadPaperState() {
       ...defaultPaperState(),
       ...parsed,
       oiSnapshot: parsed.oiSnapshot || {},
-      activeTrades: Array.isArray(parsed.activeTrades) ? parsed.activeTrades : [],
-      closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [],
+      activeTrades: Array.isArray(parsed.activeTrades) ? parsed.activeTrades.map(normalisePaperTrade) : [],
+      closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades.map(normalisePaperTrade) : [],
       invalidatedTrades: Array.isArray(parsed.invalidatedTrades) ? parsed.invalidatedTrades : [],
-      recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : []
+      recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : [],
+      schemaVersion: PAPER_SCHEMA_VERSION
     };
     // Exclude historical trades from the first worker version. Their stop
     // side was reversed, so counting them would corrupt the one-week trial.
@@ -339,14 +417,24 @@ if (paperState._needsSave) {
 function savePaperState() {
   const tempFile = PAPER_STATE_FILE + '.tmp';
   try {
-    fs.writeFileSync(tempFile, JSON.stringify(paperState, null, 2));
+    const nextState = {
+      ...paperState,
+      schemaVersion: PAPER_SCHEMA_VERSION,
+      lastSavedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(tempFile, JSON.stringify(nextState, null, 2));
+    if (fs.existsSync(PAPER_STATE_FILE)) {
+      try { fs.copyFileSync(PAPER_STATE_FILE, PAPER_STATE_BACKUP_FILE); } catch (_) {}
+    }
     fs.renameSync(tempFile, PAPER_STATE_FILE);
+    paperState.lastSavedAt = nextState.lastSavedAt;
   } catch (error) {
     console.error('[paper] state save failed:', error.message);
+    try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (_) {}
   }
 }
 
-function paperScore(changePct, funding, oiDeltaPct, hasOi, volumeRatio) {
+function paperScoreDetails(changePct, funding, oiDeltaPct, hasOi, volumeRatio) {
   // Small positive funding is neutral, not strong confirmation. This keeps
   // the rank from giving almost every mildly red coin the same score.
   const fundingScore = funding <= -0.0005 ? 2.5
@@ -368,7 +456,18 @@ function paperScore(changePct, funding, oiDeltaPct, hasOi, volumeRatio) {
   const volumeScore = Number.isFinite(volumeRatio)
     ? (volumeRatio >= 2 ? 1.0 : volumeRatio >= 1.5 ? 0.7 : volumeRatio >= 1 ? 0.3 : 0)
     : 0;
-  return Math.min(12, Number((fundingScore + priceScore + oiScore + volumeScore + 3).toFixed(1)));
+  return {
+    base: 3,
+    funding: fundingScore,
+    price: priceScore,
+    oi: oiScore,
+    volume: volumeScore,
+    total: Math.min(12, Number((fundingScore + priceScore + oiScore + volumeScore + 3).toFixed(1)))
+  };
+}
+
+function paperScore(changePct, funding, oiDeltaPct, hasOi, volumeRatio) {
+  return paperScoreDetails(changePct, funding, oiDeltaPct, hasOi, volumeRatio).total;
 }
 
 function paperTier(score) {
@@ -408,7 +507,7 @@ function buildPaperPairs(payload) {
       sym, price, chg,
       volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
       fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0, sc: 0,
-      tier: 'C', sig: paperSignal(chg, oi, fund)
+      tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL'
     };
     pairs[sym] = pair;
   });
@@ -417,10 +516,11 @@ function buildPaperPairs(payload) {
   return Object.values(pairs).map(pair => {
     pair.volumeRatio = medianVolume > 0 && pair.volume > 0
       ? Number((pair.volume / medianVolume).toFixed(2)) : null;
-    pair.sc = paperScore(pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
+    pair.scoreBreakdown = paperScoreDetails(pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
+    pair.sc = pair.scoreBreakdown.total;
     pair.tier = paperTier(pair.sc);
     if (pair.tier === 'C' || pair.fund >= 0.005 ||
-        Math.abs(pair.chg) > 3.5 || pair.sc < 7) return null;
+        Math.abs(pair.chg) > 3.5 || pair.sc < 7 || pair.volume <= 0 || pair.price <= 0) return null;
     let rank = pair.sc * 0.4;
     const fundingBonus = pair.fund <= -0.0005 ? 3
       : pair.fund < 0 ? 2
@@ -442,19 +542,16 @@ function buildPaperPairs(payload) {
 
 function paperSetup(pair) {
   const dir = pair.chg < 0 ? 'SHORT' : 'LONG';
-  const entry = pair.price * (dir === 'LONG' ? 0.997 : 1.003);
-  const sl = entry * (dir === 'LONG' ? 0.97 : 1.03);
-  const tp1 = entry * (dir === 'LONG' ? 1.06 : 0.94);
-  const tp2 = entry * (dir === 'LONG' ? 1.10 : 0.90);
-  const riskDollar = paperEquity() * PAPER_RISK_PCT / 100;
+  const entry = paperRoundPrice(pair.price * (dir === 'LONG' ? 0.997 : 1.003));
+  const sl = paperRoundPrice(entry * (dir === 'LONG' ? 0.97 : 1.03));
+  const tp1 = paperRoundPrice(entry * (dir === 'LONG' ? 1.06 : 0.94));
+  const tp2 = paperRoundPrice(entry * (dir === 'LONG' ? 1.10 : 0.90));
+  const riskDollar = Math.max(0, paperEquity() * PAPER_RISK_PCT / 100);
   const stopDistance = Math.abs(entry - sl);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
-    entry: paperRoundPrice(entry),
-    sl: paperRoundPrice(sl),
-    tp1: paperRoundPrice(tp1),
-    tp2: paperRoundPrice(tp2),
+    entry, sl, tp1, tp2,
     contracts: Number(contracts.toFixed(6)),
     size: Number((contracts * entry).toFixed(2)),
     riskPct: PAPER_RISK_PCT,
@@ -462,9 +559,52 @@ function paperSetup(pair) {
   };
 }
 
-function paperActiveCount() {
+function validatePaperSetup(pair, setup) {
+  const reasons = [];
+  const price = paperNumber(pair && pair.price);
+  const entry = paperNumber(setup && setup.entry);
+  const sl = paperNumber(setup && setup.sl);
+  const tp1 = paperNumber(setup && setup.tp1);
+  const tp2 = paperNumber(setup && setup.tp2);
+  if (!price || !entry || !sl || !tp1 || !tp2) reasons.push('harga setup tidak valid');
+  if (setup.dir === 'LONG') {
+    if (!(entry < price)) reasons.push('LONG limit harus di bawah harga sekarang');
+    if (!(sl < entry && tp1 > entry && tp2 > tp1)) reasons.push('urutan LONG entry/SL/TP tidak valid');
+  } else if (setup.dir === 'SHORT') {
+    if (!(entry > price)) reasons.push('SHORT limit harus di atas harga sekarang');
+    if (!(sl > entry && tp1 < entry && tp2 < tp1)) reasons.push('urutan SHORT entry/SL/TP tidak valid');
+  } else {
+    reasons.push('arah trade tidak dikenal');
+  }
+  const entryOffsetPct = price > 0 ? Math.abs(entry - price) / price * 100 : 0;
+  const stopPct = entry > 0 ? Math.abs(entry - sl) / entry * 100 : 0;
+  const rewardPct = entry > 0 ? Math.abs(entry - tp1) / entry * 100 : 0;
+  const rr = stopPct > 0 ? rewardPct / stopPct : 0;
+  if (entryOffsetPct < PAPER_MIN_ENTRY_OFFSET_PCT) reasons.push('entry terlalu dekat dengan harga sekarang');
+  if (stopPct <= 0.25) reasons.push('jarak SL terlalu kecil');
+  if (rr < PAPER_MIN_RR) reasons.push('risk/reward di bawah batas minimum');
+  if (!Number.isFinite(setup.contracts) || setup.contracts <= 0 || !Number.isFinite(setup.size) || setup.size <= 0) {
+    reasons.push('ukuran posisi tidak valid');
+  }
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    entryOffsetPct: Number(entryOffsetPct.toFixed(3)),
+    stopPct: Number(stopPct.toFixed(3)),
+    rewardPct: Number(rewardPct.toFixed(3)),
+    rr: Number(rr.toFixed(2))
+  };
+}
+
+function paperActiveCount(includeLegacy) {
   return paperState.activeTrades.filter(t =>
-    t.status === 'PENDING' || t.status === 'OPEN').length;
+    (t.status === 'PENDING' || t.status === 'OPEN') &&
+    (includeLegacy || isStrictPaperTrade(t))).length;
+}
+
+function paperLegacyActiveCount() {
+  return paperState.activeTrades.filter(t =>
+    (t.status === 'PENDING' || t.status === 'OPEN') && !isStrictPaperTrade(t)).length;
 }
 
 function paperRealizedPnl() {
@@ -491,9 +631,10 @@ function paperTradeRiskDollar(trade) {
   return Math.abs(entry - stop) / entry * size;
 }
 
-function paperActiveRiskDollar() {
+function paperActiveRiskDollar(includeLegacy) {
   return paperState.activeTrades
-    .filter(trade => trade.status === 'PENDING' || trade.status === 'OPEN')
+    .filter(trade => (trade.status === 'PENDING' || trade.status === 'OPEN') &&
+      (includeLegacy || isStrictPaperTrade(trade)))
     .reduce((sum, trade) => sum + paperTradeRiskDollar(trade), 0);
 }
 
@@ -511,7 +652,15 @@ function paperTradeView(trade) {
     maePnl: Number((trade.maePnl || 0).toFixed(2)),
     riskPct: trade.riskPct || null,
     riskDollar: Number(paperTradeRiskDollar(trade).toFixed(2)),
-    executionModel: trade.executionModel || 'LEGACY_TOLERANCE', reason: trade.reason
+    executionModel: paperExecutionModel(trade),
+    executionClass: isStrictPaperTrade(trade) ? 'STRICT' : 'LEGACY',
+    timeframe: trade.timeframe || trade.tf || '15M',
+    tf: trade.tf || trade.timeframe || '15M',
+    dataQuality: trade.dataQuality || null,
+    signalReasons: Array.isArray(trade.signalReasons) ? trade.signalReasons : [],
+    scoreBreakdown: trade.scoreBreakdown || null,
+    setupValidation: trade.setupValidation || null,
+    reason: trade.reason
   };
 }
 
@@ -524,6 +673,8 @@ function paperCandidateView(pair) {
   if (pair.oiUSD > 0 && !pair.oiReady) reasons.push('OI baseline tersimpan; delta menunggu scan berikutnya');
   if (Math.abs(pair.chg) <= 2) reasons.push('pergerakan belum terlalu extended');
   if (pair.volumeRatio >= 1.5) reasons.push('volume ' + pair.volumeRatio.toFixed(2) + 'x median');
+  if (pair.volumeRatio != null && pair.volumeRatio < 1) reasons.push('volume di bawah median');
+  if (!pair.oiReady) reasons.push('OI belum punya baseline pembanding');
   if (pair.mtf) {
     ['H4', 'H1', 'M15'].forEach(tf => {
       const item = pair.mtf[tf];
@@ -535,7 +686,10 @@ function paperCandidateView(pair) {
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.chg < 0 ? 'SHORT' : 'LONG',
-    mtf: pair.mtf || null, evidence: reasons
+    mtf: pair.mtf || null, dataQuality: pair.dataQuality || 'PARTIAL',
+    scoreBreakdown: pair.scoreBreakdown || null, mtfAvailable: pair.mtfAvailable || 0,
+    mtfStatus: pair.mtfStatus || 'UNAVAILABLE',
+    evidence: reasons
   };
 }
 
@@ -581,7 +735,9 @@ function paperCandleEvidence(rows) {
   const change = (last.close - last.open) / last.open * 100;
   return {
     change: Number(change.toFixed(3)),
-    direction: change > 0.05 ? 'LONG' : change < -0.05 ? 'SHORT' : 'NEUTRAL'
+    direction: change > 0.05 ? 'LONG' : change < -0.05 ? 'SHORT' : 'NEUTRAL',
+    candleAt: Number.isFinite(last.ts) ? new Date(last.ts).toISOString() : null,
+    candles: rows.length
   };
 }
 
@@ -597,6 +753,8 @@ async function enrichPaperMtf(pair) {
     H1: paperCandleEvidence(rows[1]),
     M15: paperCandleEvidence(rows[2])
   };
+  pair.mtfAvailable = Object.values(pair.mtf).filter(Boolean).length;
+  pair.mtfStatus = pair.mtfAvailable === 3 ? 'FULL' : pair.mtfAvailable ? 'PARTIAL' : 'UNAVAILABLE';
   return pair;
 }
 
@@ -665,9 +823,10 @@ async function runPaperScan(reason, requestedCycleKey) {
   try {
     const payload = await fetchPaperTickers();
     const ranked = buildPaperPairs(payload);
-    const activeSymbols = new Set(paperState.activeTrades
+    const activeSymbols = new Map();
+    paperState.activeTrades
       .filter(t => t.status === 'PENDING' || t.status === 'OPEN')
-      .map(t => t.sym));
+      .forEach(t => activeSymbols.set(t.sym, (activeSymbols.get(t.sym) || 0) + 1));
     const equity = paperEquity();
     const activeRisk = paperActiveRiskDollar();
     const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
@@ -678,16 +837,26 @@ async function runPaperScan(reason, requestedCycleKey) {
     const capacity = Math.min(
       Math.max(0, PAPER_MAX_ACTIVE - paperActiveCount()), riskSlots);
     const selected = [];
+    const rejected = [];
+    const targetCount = Math.min(PAPER_PER_SCAN, capacity);
     for (const pair of ranked) {
-      if (selected.length >= Math.min(PAPER_PER_SCAN, capacity)) break;
-      if (activeSymbols.has(pair.sym)) continue;
-      selected.push(pair);
-      activeSymbols.add(pair.sym);
-    }
-    await Promise.all(selected.map(enrichPaperMtf));
-    const placed = selected.map(pair => {
+      if (selected.length >= targetCount) break;
+      if ((activeSymbols.get(pair.sym) || 0) >= PAPER_MAX_PER_SYMBOL) continue;
       const setup = paperSetup(pair);
+      const setupValidation = validatePaperSetup(pair, setup);
+      if (!setupValidation.ok) {
+        rejected.push({sym: pair.sym, reasons: setupValidation.reasons});
+        continue;
+      }
+      selected.push({pair, setup, setupValidation});
+      activeSymbols.set(pair.sym, (activeSymbols.get(pair.sym) || 0) + 1);
+    }
+    await Promise.all(selected.map(item => enrichPaperMtf(item.pair)));
+    const placed = selected.map(item => {
+      const pair = item.pair;
+      const setup = item.setup;
       const id = 'VPS-' + String(++paperState.nextId).padStart(6, '0');
+      const candidate = paperCandidateView(pair);
       const trade = {
         id, sym: pair.sym, dir: setup.dir, entryLimit: setup.entry,
         currentPrice: pair.price, sl: setup.sl, tp1: setup.tp1, tp2: setup.tp2,
@@ -696,9 +865,13 @@ async function runPaperScan(reason, requestedCycleKey) {
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, mtf: pair.mtf,
+        timeframe: '15M', tf: '15M', dataQuality: pair.dataQuality,
+        signalReasons: candidate.evidence, scoreBreakdown: candidate.scoreBreakdown,
+        setupValidation: item.setupValidation,
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
         executionModel: 'LIMIT_STRICT',
-        reason: 'Auto VPS: 15M scan'
+        executionClass: 'STRICT', legacy: false,
+        reason: 'Auto VPS: 15M scan | ' + candidate.evidence.join('; ')
       };
       paperState.activeTrades.push(trade);
       console.log('[paper] placed', id, pair.sym, setup.dir, '@', setup.entry);
@@ -707,20 +880,40 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.lastCycleKey = cycleKey;
     paperState.lastScanAt = new Date().toISOString();
     paperState.lastError = null;
+    const strictActiveCount = paperActiveCount();
+    const blockReason = !capacity
+      ? (paperActiveCount() >= PAPER_MAX_ACTIVE ? 'MAX_ACTIVE_REACHED'
+        : activeRisk >= riskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
+      : (!placed.length ? 'NO_VALID_UNALLOCATED_SETUP' :
+        placed.length < PAPER_PER_SCAN ? 'PARTIAL_CAPACITY' : null);
+    paperState.lastBlockReason = blockReason;
     paperState.recentScans.unshift({
       cycleKey, at: paperState.lastScanAt, reason: reason || '15M close',
       candidates: ranked.length,
       selected: ranked.slice(0, 10).map(paperCandidateView),
-      placed
+      placed,
+      rejected: rejected.slice(0, 20),
+      capacity: {
+        requested: PAPER_PER_SCAN, placed: placed.length,
+        availableSlots: Math.max(0, PAPER_MAX_ACTIVE - strictActiveCount),
+        availableRisk: Number(Math.max(0, riskBudget - activeRisk).toFixed(2)),
+        blockReason
+      }
     });
     paperState.recentScans = paperState.recentScans.slice(0, PAPER_MAX_RECENT_SCANS);
     savePaperState();
     console.log('[paper] scan complete', cycleKey, 'placed', placed.length);
     if (placed.length) void sendTelegramMessage(paperScanAlert(cycleKey, placed));
+    if (blockReason && !placed.length) void sendTelegramMessage(paperCapacityAlert(paperStatus()));
   } catch (error) {
     paperState.lastError = error.message;
     savePaperState();
     console.error('[paper] scan failed:', error.message);
+    sendRateLimitedAlert(
+      'paper-scan:' + error.message,
+      'NEXORA PAPER SCAN ERROR\n' + error.message + '\nCycle retry tetap aktif.',
+      15 * 60 * 1000
+    );
   } finally {
     paperBusy = false;
   }
@@ -812,6 +1005,11 @@ async function monitorPaperTrades() {
     paperState.lastError = error.message;
     savePaperState();
     console.error('[paper] monitor failed:', error.message);
+    sendRateLimitedAlert(
+      'paper-monitor:' + error.message,
+      'NEXORA PAPER MONITOR ERROR\n' + error.message,
+      15 * 60 * 1000
+    );
   } finally {
     paperBusy = false;
   }
@@ -828,19 +1026,45 @@ function paperStatus() {
   const realizedPnl = paperRealizedPnl();
   const unrealizedPnl = paperUnrealizedPnl();
   const equity = paperEquity();
+  const strictActiveCount = paperActiveCount();
+  const legacyActiveCount = paperLegacyActiveCount();
+  const activeRisk = paperActiveRiskDollar();
+  const legacyActiveRisk = paperActiveRiskDollar(true) - activeRisk;
+  const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
+  const availableSlots = Math.max(0, PAPER_MAX_ACTIVE - strictActiveCount);
+  const availableRisk = Math.max(0, riskBudget - activeRisk);
+  const blockReason = paperState.lastBlockReason ||
+    (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * PAPER_RISK_PCT / 100
+      ? 'RISK_BUDGET_REACHED' : null);
   return {
     ok: true, service: 'nexora-paper-bot', enabled: paperState.enabled,
     running: paperStarted, interval: '15M', perScan: PAPER_PER_SCAN,
     pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: PAPER_MAX_ACTIVE,
+    maxPerSymbol: PAPER_MAX_PER_SYMBOL,
+    strictActiveCount, legacyActiveCount, availableSlots,
     startingEquity: paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY),
     realizedPnl: Number(realizedPnl.toFixed(2)),
     unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
     equity: Number(equity.toFixed(2)),
     riskPct: PAPER_RISK_PCT,
     maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
-    activeRisk: Number(paperActiveRiskDollar().toFixed(2)),
-    riskBudget: Number((equity * PAPER_MAX_ACTIVE_RISK_PCT / 100).toFixed(2)),
-    alerts: {telegram: TELEGRAM_ALERTS_ENABLED},
+    activeRisk: Number(activeRisk.toFixed(2)),
+    legacyActiveRisk: Number(Math.max(0, legacyActiveRisk).toFixed(2)),
+    riskBudget: Number(riskBudget.toFixed(2)),
+    availableRisk: Number(availableRisk.toFixed(2)),
+    blockReason,
+    alerts: {
+      telegram: TELEGRAM_ALERTS_ENABLED,
+      sent: telegramState.sent,
+      lastAttemptAt: telegramState.lastAttemptAt,
+      lastSuccessAt: telegramState.lastSuccessAt,
+      lastError: telegramState.lastError
+    },
+    state: {
+      schemaVersion: PAPER_SCHEMA_VERSION,
+      savedAt: paperState.lastSavedAt,
+      backupFile: path.basename(PAPER_STATE_BACKUP_FILE)
+    },
     lastScanAt: paperState.lastScanAt, lastCycleKey: paperState.lastCycleKey,
     nextScanAt: new Date(paperNextQuarter(Date.now())).toISOString(),
     lastMonitorAt: paperState.lastMonitorAt, lastPriceAt: paperState.lastPriceAt,
@@ -857,11 +1081,29 @@ function paperStatus() {
   };
 }
 
-function paperHistory() {
+function paperHistory(query) {
+  const params = query || new URLSearchParams();
+  const symbol = String(params.get('symbol') || params.get('sym') || '').trim().toUpperCase();
+  const timeframe = String(params.get('timeframe') || params.get('tf') || '').trim().toUpperCase();
+  const outcome = String(params.get('outcome') || '').trim().toUpperCase();
+  const from = String(params.get('from') || '').trim();
+  const to = String(params.get('to') || '').trim();
+  const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
+  const closedTrades = all.filter(trade => {
+    if (symbol && String(trade.sym || '').toUpperCase() !== symbol) return false;
+    if (timeframe && String(trade.timeframe || trade.tf || '').toUpperCase() !== timeframe) return false;
+    if (outcome && String(trade.outcome || '').toUpperCase() !== outcome) return false;
+    const date = String(trade.closedAt || trade.createdAt || '').slice(0, 10);
+    if (from && (!date || date < from)) return false;
+    if (to && (!date || date > to)) return false;
+    return true;
+  });
   return {
     ok: true,
-    closedTrades: paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES),
-    invalidatedTrades: paperState.invalidatedTrades.slice(0, 100)
+    closedTrades,
+    invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
+    filters: {symbol: symbol || 'all', timeframe: timeframe || 'all', outcome: outcome || 'all', from, to},
+    total: closedTrades.length
   };
 }
 
@@ -869,12 +1111,13 @@ function startPaperBot() {
   if (process.env.PAPER_BOT_ENABLED === 'false') return;
   paperStarted = true;
   console.log('[paper] VPS Paper Bot ON: scan every 15M, top 3, pending expiry 120m');
+  void sendTelegramMessage('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
   setTimeout(() => runPaperScan('startup', paperCycleKey(Date.now())), 5000);
   setInterval(() => {
-    const now = new Date();
-    if (now.getUTCMinutes() % 15 === 0 && now.getUTCSeconds() < 30) {
-      runPaperScan('15M close', paperCycleKey(now.getTime()));
-    }
+    // Do not depend on a 30-second wall-clock window: a busy event loop or a
+    // temporary upstream retry must not silently skip a quarter-hour scan.
+    const cycleKey = paperCycleKey(Date.now());
+    if (paperState.lastCycleKey !== cycleKey) runPaperScan('15M close', cycleKey);
   }, PAPER_SCAN_CHECK_MS);
   setInterval(monitorPaperTrades, PAPER_MONITOR_MS);
 }
@@ -906,12 +1149,27 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, JSON.stringify(paperStatus()));
     return;
   }
+  if (requestUrl.pathname === '/paper/alerts/status') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    send(res, 200, JSON.stringify({
+      ok: true,
+      enabled: TELEGRAM_ALERTS_ENABLED,
+      sent: telegramState.sent,
+      lastAttemptAt: telegramState.lastAttemptAt,
+      lastSuccessAt: telegramState.lastSuccessAt,
+      lastError: telegramState.lastError
+    }));
+    return;
+  }
   if (requestUrl.pathname === '/paper/history') {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       send(res, 405, JSON.stringify({error: 'Method not allowed'}));
       return;
     }
-    send(res, 200, JSON.stringify(paperHistory()));
+    send(res, 200, JSON.stringify(paperHistory(requestUrl.searchParams)));
     return;
   }
 
@@ -947,6 +1205,13 @@ const server = http.createServer(async (req, res) => {
     result.latencyMs = Date.now() - startedAt;
     result.path = upstreamPath;
     markSourceHealth(prefix, result);
+    if (result.status >= 400) {
+      sendRateLimitedAlert(
+        'api:' + prefix + ':' + result.status,
+        'NEXORA API ERROR\n' + prefix + upstreamPath + '\nHTTP ' + result.status,
+        10 * 60 * 1000
+      );
+    }
     if (result.status >= 200 && result.status < 300) {
       cache.set(key, {...result, expiresAt: Date.now() + cacheTtl(prefix, requestUrl.pathname)});
     }
@@ -954,6 +1219,11 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     markSourceError(prefix, error, upstreamPath);
     console.error('[proxy]', prefix, upstreamPath, error.message);
+    sendRateLimitedAlert(
+      'api:' + prefix + ':network',
+      'NEXORA API ERROR\n' + prefix + upstreamPath + '\n' + error.message,
+      10 * 60 * 1000
+    );
     send(res, 502, JSON.stringify({error: 'Upstream unavailable', detail: error.message}));
   }
 });

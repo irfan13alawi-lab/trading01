@@ -10,8 +10,8 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 - **Phase 2 Analysis** — MTF D1→H4→H1→M15, order flow, best setup
 - **Backtest Engine** — single pair + multi 10 pairs dari market yang dipilih
 - **Trading Journal** — equity curve, lesson wall, Kelly Criterion
-- **Telegram Alert** — notifikasi ke HP saat entry signal / SL / TP
-- **Persistence** — state Paper Bot tersimpan di VPS; jurnal browser punya export JSON backup
+- **Telegram Alert** — notifikasi server-side ke HP saat scan, limit fill, posisi ditutup, dan guard aktif
+- **Persistence** — state Paper Bot tersimpan atomik di VPS dengan backup `.bak`; jurnal browser punya export JSON/CSV
 - **Health & evidence** — status sumber `LIVE`/`DELAYED`/`ERROR`, timestamp, alasan sinyal, volume ratio, dan MTF
 
 ## Data Sources
@@ -60,7 +60,28 @@ market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
 Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 `paper-bot-state.json`. Restart normal tidak menghapus trade aktif maupun riwayat.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
-dibatasi 15%; posisi legacy tidak dihapus atau diubah sizing-nya.
+dibatasi 15%; posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak
+mengambil slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak
+menambah exposure yang tidak disengaja. Setup dengan entry/SL/TP invalid tidak
+akan dibuat menjadi paper order.
+
+Konfigurasi alert dilakukan hanya pada service VPS, bukan di browser:
+
+```bash
+sudo systemctl edit nexora-proxy
+# tambahkan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID pada [Service]
+sudo systemctl daemon-reload && sudo systemctl restart nexora-proxy
+```
+
+Status server dapat dicek melalui `/paper/status` dan `/paper/alerts/status`.
+
+Untuk menerima peringatan ketika proses atau VPS Paper Bot berhenti, pasang juga
+`nexora-watchdog.service`. Buat `/etc/nexora/nexora.env` di VPS dengan permission
+`640` dan isi `TELEGRAM_BOT_TOKEN=...` serta `TELEGRAM_CHAT_ID=...`, lalu salin
+kedua file service/script ke `/etc/systemd/system` dan aktifkan watchdog. Dashboard
+tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supaya
+riwayat paper trading tetap satu sumber.
+History mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
 
 ## Struktur File
 

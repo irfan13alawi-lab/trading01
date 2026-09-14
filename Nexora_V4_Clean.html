@@ -239,6 +239,9 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">Equity</span><span class="v" id="bot-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
   <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">30</span></div>
+  <div class="hstat"><span class="l">New Slots</span><span class="v" id="bot-new-slots">--</span></div>
+  <div class="hstat"><span class="l">Risk Guard</span><span class="v" id="bot-risk-guard">--</span></div>
+  <div id="bot-guard" class="muted" style="flex:1 1 100%;color:#e3b341;">Checking capacity guard...</div>
   <div id="bot-trades-list" style="flex:1 1 100%;display:flex;gap:8px;flex-wrap:wrap;"></div>
 </div>
 
@@ -605,13 +608,14 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <!-- Telegram config -->
   <div class="card">
     <div class="card-t"><i class="fa-brands fa-telegram" style="color:#58a6ff;"></i> Telegram Alerts
-      <span class="muted">Status: <b id="tg-status" style="color:#484f58;">Not connected</b></span>
+      <span class="muted">Status: <b id="tg-status" style="color:#484f58;">Checking server...</b></span>
     </div>
-    <div class="frow" style="grid-template-columns:2fr 1fr auto;">
-      <div class="fg"><label>Bot Token</label><input id="tg-token" placeholder="123456:ABC-DEF..."></div>
-      <div class="fg"><label>Chat ID</label><input id="tg-chatid" placeholder="-1001234567890"></div>
-      <div class="fg" style="display:flex;align-items:flex-end;"><button class="btn btn-sm btn-blue" onclick="tgSave()"><i class="fa-solid fa-check"></i> Save &amp; Test</button></div>
+    <div class="muted" style="margin-top:8px;line-height:1.6;">
+      Alert dikirim oleh VPS, bukan browser. Token tidak disimpan di localStorage.
+      Untuk mengaktifkan, administrator VPS harus mengatur <code>TELEGRAM_BOT_TOKEN</code>
+      dan <code>TELEGRAM_CHAT_ID</code> pada service, lalu restart service.
     </div>
+    <button class="btn btn-sm btn-blue" onclick="pollTelegramStatus()" style="margin-top:8px;"><i class="fa-solid fa-rotate"></i> Refresh status</button>
     <div class="fg" style="margin-top:6px;">
       <label>CoinGecko API Key (optional)</label>
       <input id="cg-key" placeholder="CG-xxxx (optional)">
@@ -4136,9 +4140,13 @@ function applyServerClosedTrades(closedTrades) {
       exit: Number(t.exitPrice || 0),
       size: Number(t.size || 0),
       mode: 'AUTO VPS',
-      tf: '15M',
+       tf: t.timeframe || t.tf || '15M',
+       timeframe: t.timeframe || t.tf || '15M',
       dateKey: t.closedAt || '',
-      executionModel: t.executionModel || 'LEGACY_TOLERANCE',
+       executionModel: t.executionModel || 'LEGACY_TOLERANCE',
+       executionClass: t.executionClass || (t.executionModel === 'LIMIT_STRICT' ? 'STRICT' : 'LEGACY'),
+       signalReasons: Array.isArray(t.signalReasons) ? t.signalReasons : [],
+       scoreBreakdown: t.scoreBreakdown || null,
       openedAt: t.openedAt || '',
       closedAt: t.closedAt || '',
       durationMs: t.openedAt && t.closedAt ? Math.max(0, new Date(t.closedAt) - new Date(t.openedAt)) : 0,
@@ -4158,6 +4166,7 @@ function applyServerClosedTrades(closedTrades) {
 function applyServerPaperStatus(status, announce) {
   if(!status || !status.ok) return;
   var wasServer = G.paperServer;
+  var serverRunning = status.running !== false;
   if(!wasServer && BOT.paperMode) stopBotTimers();
   G.paperServer = true;
   BOT.paperMode = false;
@@ -4167,20 +4176,53 @@ function applyServerPaperStatus(status, announce) {
   var lbl = document.getElementById('paper-mode-lbl');
   var panel = document.getElementById('active-trades-panel');
   if(btn) {
-    btn.style.background = 'rgba(63,185,80,.2)';
-    btn.style.borderColor = 'rgba(63,185,80,.5)';
-    btn.style.color = '#3fb950';
-    btn.title = 'Paper Bot berjalan di VPS — browser boleh ditutup';
+    btn.style.background = serverRunning ? 'rgba(63,185,80,.2)' : 'rgba(248,81,73,.12)';
+    btn.style.borderColor = serverRunning ? 'rgba(63,185,80,.5)' : 'rgba(248,81,73,.45)';
+    btn.style.color = serverRunning ? '#3fb950' : '#f85149';
+    btn.title = serverRunning
+      ? 'Paper Bot berjalan di VPS — browser boleh ditutup'
+      : 'Paper Bot VPS tidak berjalan — browser fallback tidak digunakan';
   }
   if(lbl) {
-    lbl.textContent = 'PAPER VPS ON';
-    lbl.style.color = '#3fb950';
+    lbl.textContent = serverRunning ? 'PAPER VPS ON' : 'PAPER VPS STOPPED';
+    lbl.style.color = serverRunning ? '#3fb950' : '#f85149';
   }
   if(panel) panel.style.display = 'flex';
   var perScan = document.getElementById('bot-per-scan');
   if(perScan) perScan.textContent = status.perScan || 3;
   var maxConc = document.getElementById('bot-max-conc');
   if(maxConc) maxConc.textContent = status.maxConcurrent || 30;
+  var slots = document.getElementById('bot-new-slots');
+  if(slots) {
+    slots.textContent = (status.availableSlots != null ? status.availableSlots : '--');
+    slots.title = 'Slot bot baru; posisi LEGACY tidak memakai batas global ini';
+  }
+  var riskGuard = document.getElementById('bot-risk-guard');
+  if(riskGuard) {
+    var riskNow = Number(status.activeRisk || 0);
+    var riskMax = Number(status.riskBudget || 0);
+    riskGuard.textContent = '$' + riskNow.toFixed(2) + ' / $' + riskMax.toFixed(2);
+    riskGuard.style.color = riskNow <= riskMax ? '#3fb950' : '#f85149';
+    riskGuard.title = 'Risk strict aktif; legacy: $' + Number(status.legacyActiveRisk || 0).toFixed(2);
+  }
+  var guard = document.getElementById('bot-guard');
+  if(guard) {
+    var strictCount = Number(status.strictActiveCount || 0);
+    var legacyCount = Number(status.legacyActiveCount || 0);
+    var reasonMap = {
+      MAX_ACTIVE_REACHED: 'batas posisi bot baru tercapai',
+      RISK_BUDGET_REACHED: 'risk budget bot baru tercapai',
+      NO_CAPACITY: 'kapasitas belum tersedia',
+      NO_VALID_UNALLOCATED_SETUP: 'tidak ada setup baru yang valid',
+      PARTIAL_CAPACITY: 'sebagian slot tersedia'
+    };
+    var guardReason = !serverRunning ? 'service VPS berhenti'
+      : (status.blockReason ? (reasonMap[status.blockReason] || status.blockReason) : 'siap menerima setup baru');
+    guard.textContent = 'Guard: ' + guardReason + ' · Strict ' + strictCount + '/' + (status.maxConcurrent || 30)
+      + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1);
+    guard.style.color = !serverRunning ? '#f85149' : (status.blockReason ? '#e3b341' : '#3fb950');
+    if(status.lastError) guard.title = 'Last error: ' + status.lastError;
+  }
   if(status.equity != null) {
     var equity = Number(status.equity);
     G.vpsEquity = equity;
@@ -4205,8 +4247,32 @@ function applyServerPaperStatus(status, announce) {
     try { renderEquity(); } catch(e) {}
   }
   if(announce && !wasServer) {
-    sLog('PAPER BOT VPS CONNECTED — scan 15M, top 3, pending expiry 120m');
-    toast('<b style="color:#3fb950;">PAPER VPS ON</b> — browser boleh ditutup, bot tetap berjalan', 'a');
+    if(serverRunning) {
+      sLog('PAPER BOT VPS CONNECTED — scan 15M, top 3, pending expiry 120m');
+      toast('<b style="color:#3fb950;">PAPER VPS ON</b> — browser boleh ditutup, bot tetap berjalan', 'a');
+    } else {
+      sLog('PAPER VPS TERHUBUNG, tetapi service bot berhenti');
+      toast('<b style="color:#f85149;">PAPER VPS STOPPED</b> — cek systemd service di VPS', 'e');
+    }
+  }
+}
+
+function markPaperServerUnavailable(message) {
+  var btn = document.getElementById('paper-toggle');
+  var lbl = document.getElementById('paper-mode-lbl');
+  var panel = document.getElementById('active-trades-panel');
+  var guard = document.getElementById('bot-guard');
+  if(btn) {
+    btn.style.background = 'rgba(248,81,73,.12)';
+    btn.style.borderColor = 'rgba(248,81,73,.45)';
+    btn.style.color = '#f85149';
+    btn.title = 'VPS Paper Bot tidak dapat dihubungi';
+  }
+  if(lbl) { lbl.textContent = 'PAPER VPS OFFLINE'; lbl.style.color = '#f85149'; }
+  if(panel) panel.style.display = 'flex';
+  if(guard) {
+    guard.textContent = 'Guard: VPS tidak dapat dihubungi — browser fallback dimatikan · ' + (message || 'cek service');
+    guard.style.color = '#f85149';
   }
 }
 
@@ -4221,9 +4287,10 @@ function pollPaperBotStatus() {
   fetch(PAPER_API + '/status', {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(status){
-      if(status && status.ok && status.running) applyServerPaperStatus(status, false);
+      if(status && status.ok) applyServerPaperStatus(status, false);
+      else markPaperServerUnavailable('status endpoint error');
     })
-    .catch(function(){ /* keep the last known VPS state during a brief outage */ });
+    .catch(function(){ markPaperServerUnavailable('network error'); });
 }
 
 function pollPaperHistory() {
@@ -4242,6 +4309,35 @@ function pollPaperHistory() {
     .catch(function(){ /* history is auxiliary; keep the last known view */ });
 }
 
+function pollTelegramStatus() {
+  var status = document.getElementById('tg-status');
+  if(!status) return;
+  if(!PAPER_API) {
+    status.textContent = 'Server VPS tidak tersedia';
+    status.style.color = '#e3b341';
+    return;
+  }
+  status.textContent = 'Checking server...';
+  status.style.color = '#e3b341';
+  fetch(PAPER_API + '/alerts/status', {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data){
+      if(!data || !data.ok) throw new Error('status unavailable');
+      if(data.enabled) {
+        status.textContent = 'Server ON · ' + (data.sent || 0) + ' sent';
+        status.style.color = '#3fb950';
+      } else {
+        status.textContent = 'Server OFF · belum dikonfigurasi';
+        status.style.color = '#e3b341';
+      }
+      status.title = data.lastError || 'Telegram credentials stay on the VPS';
+    })
+    .catch(function(){
+      status.textContent = 'VPS alert status unavailable';
+      status.style.color = '#f85149';
+    });
+}
+
 function detectPaperBot() {
   if(!PAPER_API) {
     useBrowserPaperFallback('PAPER VPS tidak tersedia pada file lokal — memakai browser fallback');
@@ -4250,18 +4346,20 @@ function detectPaperBot() {
   fetch(PAPER_API + '/status', {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(status){
-      if(status && status.ok && status.running) {
+      if(status && status.ok) {
         applyServerPaperStatus(status, true);
         if(!paperBotStatusTimer) paperBotStatusTimer = setInterval(pollPaperBotStatus, 15000);
         pollPaperHistory();
         if(!paperHistoryTimer) paperHistoryTimer = setInterval(pollPaperHistory, 60000);
       } else {
-        useBrowserPaperFallback('PAPER VPS belum aktif — memakai browser fallback');
+        markPaperServerUnavailable('status endpoint error');
+        sLog('PAPER VPS belum aktif — browser fallback dimatikan agar sumber data tetap tunggal');
         setTimeout(detectPaperBot, 30000);
       }
     })
     .catch(function(){
-      useBrowserPaperFallback('PAPER VPS belum dapat dihubungi — memakai browser fallback');
+      markPaperServerUnavailable('network error');
+      sLog('PAPER VPS belum dapat dihubungi — browser fallback dimatikan agar tidak membuat data terpisah');
       setTimeout(detectPaperBot, 30000);
     });
 }
@@ -5167,16 +5265,8 @@ try {
 } catch(e) {}
 // Load saved data from previous session
 var _loaded = loadFromStorage();
-// Restore Telegram settings
-try {
-  var _tgt = localStorage.getItem('tg_token');
-  var _tgc = localStorage.getItem('tg_chatid');
-  if(_tgt && _tgc) {
-    TG.token = _tgt; TG.chatId = _tgc; TG.enabled = true;
-    var tgEl = document.getElementById('tg-status');
-    if(tgEl) { tgEl.textContent = 'Connected'; tgEl.style.color = '#3fb950'; }
-  }
-} catch(e) {}
+// Telegram configuration stays server-side; never restore a bot token into the browser.
+pollTelegramStatus();
 try { renderWL(); } catch(e) { console.error('renderWL boot error:', e); }
 if(_loaded) {
   try { renderEquity(); } catch(e) {}
@@ -5625,45 +5715,21 @@ function exportBacktestCSV() {
 
 
 // ============================================================
-// TELEGRAM ALERT SYSTEM
-// Setup: create bot via @BotFather, get token + chat_id
+// TELEGRAM ALERT VIEWER
+// Alerts are sent by the VPS service. The browser intentionally never
+// receives or stores the bot token/chat id and never calls Telegram directly.
 // ============================================================
-var TG = { token: '', chatId: '', enabled: false };
+var TG = { enabled: false };
 
 function tgSave() {
-  var t = document.getElementById('tg-token').value.trim();
-  var c = document.getElementById('tg-chatid').value.trim();
-  if(!t || !c) { toast('Enter both token and chat ID'); return; }
-  TG.token   = t;
-  TG.chatId  = c;
-  TG.enabled = true;
-  try { localStorage.setItem('tg_token', t); localStorage.setItem('tg_chatid', c); } catch(e) {}
-  // Test message
-  tgSend('NEXORA V4 Connected! Bot alert is working. Paper trading signals will be sent here.').then(function(ok) {
-    if(ok) {
-      document.getElementById('tg-status').textContent = 'Connected';
-      document.getElementById('tg-status').style.color = '#3fb950';
-      toast('<i class="fa-brands fa-telegram" style="color:#2ca5e0;"></i> Telegram connected!', 'a');
-      sLog('Telegram bot connected: chat ' + c);
-    } else {
-      document.getElementById('tg-status').textContent = 'Failed -- check token/ID';
-      document.getElementById('tg-status').style.color = '#f85149';
-    }
-  });
+  pollTelegramStatus();
+  toast('Telegram dikonfigurasi di service VPS, bukan di browser.');
 }
 
-function tgSend(msg) {
-  if(!TG.enabled || !TG.token || !TG.chatId) return Promise.resolve(false);
-  var url = 'https://api.telegram.org/bot' + TG.token + '/sendMessage';
-  return fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      chat_id: TG.chatId,
-      text:    msg,
-      parse_mode: 'HTML'
-    })
-  }).then(function(r){ return r.ok; }).catch(function(){ return false; });
+function tgSend() {
+  // Kept as a compatibility no-op for the local fallback code. Production
+  // alerts are emitted by server.js so they continue after the tab is closed.
+  return Promise.resolve(false);
 }
 
 function tgAlert(type, pair, data) {

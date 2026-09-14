@@ -12,6 +12,10 @@ desktop.ini
 # Logs
 *.log
 
+# VPS runtime state (never commit live paper data or its backup)
+paper-bot-state.json*
+.nexora-watchdog-state
+
 # Backup files
 *.bak
 *_backup.*

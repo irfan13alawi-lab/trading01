@@ -8,9 +8,15 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/nexora-proxy
 Environment=PAPER_BOT_ENABLED=true
+EnvironmentFile=-/etc/nexora/nexora.env
 ExecStart=/home/ubuntu/.local/bin/node /home/ubuntu/nexora-proxy/server.js
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexora-paper-bot
+UMask=0077
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
