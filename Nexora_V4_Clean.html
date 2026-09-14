@@ -836,7 +836,7 @@ function toast(msg, type) {
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
-  refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [],
+  refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [], vpsCancelled: [], vpsStats: null,
   scanView: 'grid', scanFocus: 'BTC', marketExchange: 'bitget', marketType: 'futures',
   charts: {btEq: null, btMon: null},
   eq: [], trades: [],
@@ -878,6 +878,7 @@ var CP_API = PROXY_BASE ? PROXY_BASE + '/coinpaprika' : 'https://api.coinpaprika
 var PAPER_API = PROXY_BASE ? PROXY_BASE + '/paper' : '';
 var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
+var paperStatsTimer = null;
 
 // Persist only the user's market view; paper execution remains server-side
 // Bitget Futures and never follows a Spot selection in the browser.
@@ -2245,6 +2246,62 @@ function renderEquity() {
   var avgDurationMs = tracked.length ? tracked.reduce(function(s,t){return s+t.durationMs;},0)/tracked.length : 0;
   var avgMfe = trades.length ? trades.reduce(function(s,t){return s+Number(t.mfePnl||0);},0)/trades.length : 0;
   var avgMae = trades.length ? trades.reduce(function(s,t){return s+Number(t.maePnl||0);},0)/trades.length : 0;
+  var filteredOrders = useVpsEquity
+    ? journalFilteredTrades((G.vpsClosed || []).concat(G.vpsCancelled || [])) : trades;
+  var filledOrders = useVpsEquity ? filteredOrders.filter(function(t){return !!t.openedAt;}) : [];
+  var expiredOrders = useVpsEquity ? filteredOrders.filter(function(t){
+    return t.outcome === 'CANCELLED' && String(t.closeReason || '').toLowerCase().indexOf('expired') >= 0;
+  }) : [];
+  var grossWinR = trades.filter(function(t){return Number(t.r||0)>0;})
+    .reduce(function(s,t){return s+Number(t.r||0);},0);
+  var grossLossR = trades.filter(function(t){return Number(t.r||0)<0;})
+    .reduce(function(s,t){return s+Number(t.r||0);},0);
+  var profitFactor = grossLossR < 0 ? grossWinR / Math.abs(grossLossR) : null;
+  var avgFillMs = filledOrders.map(function(t){
+    var a = t.createdAt ? new Date(t.createdAt).getTime() : 0;
+    var b = t.openedAt ? new Date(t.openedAt).getTime() : 0;
+    return a && b ? Math.max(0,b-a) : 0;
+  }).filter(function(v){return v>0;});
+  avgFillMs = avgFillMs.length ? avgFillMs.reduce(function(s,v){return s+v;},0)/avgFillMs.length : 0;
+  function groupSummary(items, keyFn) {
+    var map = {};
+    items.forEach(function(t){
+      var key = keyFn(t) || 'UNKNOWN';
+      if(!map[key]) map[key] = {n:0,w:0,r:0};
+      map[key].n++; if(Number(t.r||0)>0) map[key].w++; map[key].r += Number(t.r||0);
+    });
+    return Object.keys(map).sort(function(a,b){return map[b].r-map[a].r;}).slice(0,8).map(function(k){
+      return {key:k,n:map[k].n,w:map[k].w,r:map[k].r};
+    });
+  }
+  var byDir = groupSummary(trades, function(t){return t.dir;});
+  var byTf = groupSummary(trades, function(t){return t.tf || t.timeframe;});
+  var byScore = groupSummary(trades, function(t){
+    var s = Number(t.score || 0); return s >= 8 ? '8-12' : s >= 6.5 ? '6.5-7.9' : '<6.5';
+  });
+  var displayOrderCount = filteredOrders.length;
+  var displayFilledCount = filledOrders.length;
+  var displayExpiredCount = expiredOrders.length;
+  var serverStats = useVpsEquity && G.vpsStats && G.vpsStats.metrics ? G.vpsStats : null;
+  var noJournalFilter = TJ_SYMBOL === 'all' && TJ_TF === 'all' && TJ_OUTCOME === 'all' && !TJ_FROM && !TJ_TO;
+  if(serverStats && noJournalFilter) {
+    var sm = serverStats.metrics || {};
+    var ss = serverStats.sample || {};
+    if(sm.profitFactor != null || sm.profitFactor === null) profitFactor = sm.profitFactor;
+    if(sm.averageTimeToFillMs != null) avgFillMs = Number(sm.averageTimeToFillMs) || 0;
+    if(sm.averageDurationMs != null) avgDurationMs = Number(sm.averageDurationMs) || 0;
+    displayOrderCount = Number(ss.orders || displayOrderCount);
+    displayFilledCount = Number(ss.filled || displayFilledCount);
+    displayExpiredCount = Number(ss.pendingExpired || displayExpiredCount);
+    function serverGroups(items) {
+      return Array.isArray(items) ? items.slice(0,8).map(function(st){
+        return {key:st.key || 'UNKNOWN', n:Number(st.trades || 0), w:Number(st.wins || 0), r:Number(st.netR || 0)};
+      }) : [];
+    }
+    byDir = serverGroups(serverStats.byDirection).length ? serverGroups(serverStats.byDirection) : byDir;
+    byTf = serverGroups(serverStats.byTimeframe).length ? serverGroups(serverStats.byTimeframe) : byTf;
+    byScore = serverGroups(serverStats.byScore).length ? serverGroups(serverStats.byScore) : byScore;
+  }
   var bySymbol = {};
   trades.forEach(function(t){
     if(!bySymbol[t.sym]) bySymbol[t.sym] = {count:0,wins:0,r:0,pnl:0};
@@ -2327,6 +2384,13 @@ function renderEquity() {
      + '<div><span style="color:#484f58;">Avg Win / Loss</span><br><b style="color:#3fb950;">+' + avgWin.toFixed(2) + 'R</b> / <b style="color:#f85149;">' + (avgLoss>=0?'+':'') + avgLoss.toFixed(2) + 'R</b></div>'
      + '<div><span style="color:#484f58;">Avg Duration</span><br><b style="color:#58a6ff;">' + durationLabel(avgDurationMs) + '</b></div>'
      + '<div><span style="color:#484f58;">Avg MFE / MAE</span><br><b style="color:#3fb950;">+$' + avgMfe.toFixed(2) + '</b> / <b style="color:#f85149;">$' + avgMae.toFixed(2) + '</b></div>'
+     + (useVpsEquity ? '<div><span style="color:#484f58;">Profit Factor</span><br><b style="color:' + (profitFactor != null && profitFactor >= 1 ? '#3fb950' : '#f0883e') + ';">' + (profitFactor == null ? '--' : profitFactor.toFixed(2)) + '</b></div>' : '')
+     + (useVpsEquity ? '<div><span style="color:#484f58;">Fill Rate</span><br><b style="color:#58a6ff;">' + (displayOrderCount ? Math.round(displayFilledCount/displayOrderCount*100) : 0) + '%</b> <span style="color:#484f58;">(' + displayFilledCount + '/' + displayOrderCount + ')</span></div>' : '')
+     + (useVpsEquity ? '<div><span style="color:#484f58;">Pending Expired</span><br><b style="color:#e3b341;">' + displayExpiredCount + '</b></div>' : '')
+     + (useVpsEquity ? '<div><span style="color:#484f58;">Avg Time to Fill</span><br><b style="color:#58a6ff;">' + durationLabel(avgFillMs) + '</b></div>' : '')
+     + (useVpsEquity && byDir.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By direction</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byDir.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
+     + (useVpsEquity && byTf.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By timeframe</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byTf.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
+     + (useVpsEquity && byScore.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By score</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byScore.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (symbolRows.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By symbol</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + symbolRows.map(function(sym){var st=bySymbol[sym];return '<span class="badge ' + (st.r>=0?'ba':'br') + '" title="' + sourceEsc(sym) + '">' + sourceEsc(sym) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.wins/st.count*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + '</div>';
 
@@ -4152,8 +4216,14 @@ var BOT = {
 // The browser only polls this endpoint, so closing the tab does not stop paper
 // scans. Local-file mode keeps the browser fallback for development.
 function applyServerClosedTrades(closedTrades) {
-  var rawClosed = Array.isArray(closedTrades) ? closedTrades
-    .filter(function(t){ return t.outcome !== 'CANCELLED'; }) : [];
+  var rawAll = Array.isArray(closedTrades) ? closedTrades : [];
+  G.vpsCancelled = rawAll.filter(function(t){ return t.outcome === 'CANCELLED'; }).map(function(t){
+    return {sym:t.sym || '?', dir:t.dir || 'LONG', tf:t.timeframe || t.tf || '15M',
+      timeframe:t.timeframe || t.tf || '15M', outcome:'CANCELLED',
+      closeReason:t.closeReason || '', dateKey:t.closedAt || t.createdAt || '',
+      createdAt:t.createdAt || 0, closedAt:t.closedAt || '', openedAt:t.openedAt || ''};
+  });
+  var rawClosed = rawAll.filter(function(t){ return t.outcome !== 'CANCELLED'; });
   var cum = 0;
   G.vpsClosed = rawClosed.slice().sort(function(a,b){
     return String(a.closedAt || '').localeCompare(String(b.closedAt || ''));
@@ -4174,6 +4244,8 @@ function applyServerClosedTrades(closedTrades) {
       dateKey: t.closedAt || '',
        executionModel: t.executionModel || 'LEGACY_TOLERANCE',
        executionClass: t.executionClass || (t.executionModel === 'LIMIT_STRICT' ? 'STRICT' : 'LEGACY'),
+       dataQuality: t.dataQuality || '',
+       dataQualityReason: t.dataQualityReason || '',
        signalReasons: Array.isArray(t.signalReasons) ? t.signalReasons : [],
        scoreBreakdown: t.scoreBreakdown || null,
       openedAt: t.openedAt || '',
@@ -4229,6 +4301,7 @@ function applyServerPaperStatus(status, announce) {
   G.paperServer = true;
   BOT.paperMode = false;
   BOT.activeTrades = Array.isArray(status.activeTrades) ? status.activeTrades : [];
+  if(status.stats) G.vpsStats = {metrics: status.stats, sample: status.statsSample || null};
 
   var btn = document.getElementById('paper-toggle');
   var lbl = document.getElementById('paper-mode-lbl');
@@ -4273,6 +4346,7 @@ function applyServerPaperStatus(status, announce) {
       NO_CAPACITY: 'kapasitas belum tersedia',
       NO_VALID_UNALLOCATED_SETUP: 'tidak ada setup baru yang valid',
       NO_VALID_MTF_SETUP: 'tidak ada setup MTF yang memenuhi syarat',
+      STALE_DATA: 'data candle sudah stale',
       PARTIAL_CAPACITY: 'sebagian slot tersedia'
     };
     var guardReason = !serverRunning ? 'service VPS berhenti'
@@ -4369,6 +4443,22 @@ function pollPaperHistory() {
     .catch(function(){ /* history is auxiliary; keep the last known view */ });
 }
 
+function pollPaperStats() {
+  if(!PAPER_API || !G.paperServer) return;
+  fetch(PAPER_API + '/stats', {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data){
+      if(data && data.ok) {
+        G.vpsStats = data;
+        var eqPage = document.getElementById('p-eq');
+        if(eqPage && eqPage.classList.contains('on')) {
+          try { renderEquity(); } catch(e) {}
+        }
+      }
+    })
+    .catch(function(){ /* statistics are auxiliary; keep the last known view */ });
+}
+
 function pollTelegramStatus() {
   var status = document.getElementById('tg-status');
   if(!status) return;
@@ -4410,7 +4500,9 @@ function detectPaperBot() {
         applyServerPaperStatus(status, true);
         if(!paperBotStatusTimer) paperBotStatusTimer = setInterval(pollPaperBotStatus, 15000);
         pollPaperHistory();
+        pollPaperStats();
         if(!paperHistoryTimer) paperHistoryTimer = setInterval(pollPaperHistory, 60000);
+        if(!paperStatsTimer) paperStatsTimer = setInterval(pollPaperStats, 60000);
       } else {
         markPaperServerUnavailable('status endpoint error');
         sLog('PAPER VPS belum aktif — browser fallback dimatikan agar sumber data tetap tunggal');

@@ -55,6 +55,12 @@ const PAPER_MAX_ACTIVE_RISK_PCT = Math.max(5, Math.min(50,
 const PAPER_MAX_CLOSED_TRADES = 5000;
 const PAPER_MAX_RECENT_SCANS = 1000;
 const PAPER_STARTING_EQUITY = Number(process.env.PAPER_STARTING_EQUITY || 285);
+const PAPER_TIMEFRAME_MAX_AGE_MS = {
+  H4: 12 * 60 * 60 * 1000,
+  H1: 3 * 60 * 60 * 1000,
+  M30: 90 * 60 * 1000,
+  M15: 45 * 60 * 1000
+};
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
@@ -287,6 +293,17 @@ const PAPER_SYMBOLS = [
 function paperNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function paperFieldPresent(value) {
+  return value !== undefined && value !== null && value !== '' &&
+    Number.isFinite(Number(value));
+}
+
+function paperTimestamp(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed < 100000000000 ? parsed * 1000 : parsed;
 }
 
 function paperExecutionModel(trade) {
@@ -692,7 +709,12 @@ function buildPaperPairs(payload) {
     const pair = {
       sym, price, chg,
       volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
-      fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0, sc: 0,
+      fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0,
+      fundingAvailable: paperFieldPresent(row.fundingRate) || paperFieldPresent(row.fundingRate24h),
+      oiAvailable: paperFieldPresent(row.holdingAmount) || paperFieldPresent(row.openInterest),
+      volumeAvailable: paperFieldPresent(row.quoteVolume) || paperFieldPresent(row.usdtVolume) ||
+        paperFieldPresent(row.quoteVolume24h),
+      sc: 0,
       tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL',
       dataAt, source: 'Bitget Futures'
     };
@@ -879,6 +901,7 @@ function paperTradeView(trade) {
     dataAt: trade.dataAt || null,
     source: trade.source || 'Bitget Futures',
     dataQuality: trade.dataQuality || null,
+    dataQualityReason: trade.dataQualityReason || null,
     confluencePct: trade.confluencePct == null ? null : trade.confluencePct,
     mtfDirection: trade.mtfDirection || null,
     mtfAlignment: trade.mtfAlignment || 0,
@@ -927,6 +950,8 @@ function paperCandidateView(pair) {
   return {
     sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
+    fundingAvailable: !!pair.fundingAvailable, oiAvailable: !!pair.oiAvailable,
+    volumeAvailable: !!pair.volumeAvailable,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.mtfDirection || 'NEUTRAL',
     dataAt: pair.dataAt || null, source: pair.source || 'Bitget Futures',
@@ -936,6 +961,7 @@ function paperCandidateView(pair) {
     mtfAlignment: pair.mtfAlignment || 0, confluencePct: pair.confluencePct || 0,
     mtfSummary: pair.mtfSummary || null, support: pair.support || null,
     resistance: pair.resistance || null, atr: pair.atr || null,
+    dataQualityReason: pair.dataQualityReason || null,
     evidence: reasons
   };
 }
@@ -971,36 +997,50 @@ async function fetchPaperCandles(sym, granularity) {
     markSourceError('/bitget', error, '/api/v2/mix/market/candles');
     throw error;
   }
-  return payload.data.map(row => ({
-    ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
+  const rows = payload.data.map(row => ({
+    ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]),
     low: Number(row[3]), close: Number(row[4]),
     volume: Number(row[6] || row[5] || 0)
   })).filter(row => row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
     .sort((a, b) => a.ts - b.ts);
+  rows._nexoraFetchedAt = new Date().toISOString();
+  return rows;
 }
 
 function paperTimeframeEvidence(rows, timeframe) {
   const indicators = paperIndicatorSnapshot(rows);
   if (!indicators) {
     return {
-      timeframe, direction: 'NEUTRAL', verdict: 'NO_DATA', status: 'UNAVAILABLE',
-      sampleSize: Array.isArray(rows) ? rows.length : 0, indicators: null
+      timeframe, direction: 'NEUTRAL', verdict: 'NO_DATA',
+      status: Array.isArray(rows) && rows.length ? 'PARTIAL' : 'UNAVAILABLE',
+      sampleSize: Array.isArray(rows) ? rows.length : 0, indicators: null,
+      fetchedAt: rows && rows._nexoraFetchedAt || null
     };
   }
+  const last = rows[rows.length - 1];
+  const ageMs = last && last.ts ? Math.max(0, Date.now() - last.ts) : null;
+  const maxAgeMs = PAPER_TIMEFRAME_MAX_AGE_MS[timeframe] || 60 * 60 * 1000;
+  const stale = ageMs != null && ageMs > maxAgeMs;
   return {
     timeframe, direction: indicators.direction,
-    verdict: indicators.direction === 'NEUTRAL' ? 'WAIT' : 'CONFIRM',
-    status: 'FULL', sampleSize: indicators.sampleSize,
+    verdict: stale ? 'STALE' : indicators.direction === 'NEUTRAL' ? 'WAIT' : 'CONFIRM',
+    status: stale ? 'STALE' : 'FULL', sampleSize: indicators.sampleSize,
     strengthPct: indicators.strengthPct, change: indicators.change,
     candleAt: indicators.candleAt, support: indicators.support,
     resistance: indicators.resistance, atr: indicators.atr, atrPct: indicators.atrPct,
-    volumeRatio: indicators.volumeRatio, indicators: indicators.indicators
+    volumeRatio: indicators.volumeRatio, indicators: indicators.indicators,
+    fetchedAt: rows._nexoraFetchedAt || null,
+    ageSec: ageMs == null ? null : Math.round(ageMs / 1000),
+    maxAgeSec: Math.round(maxAgeMs / 1000),
+    freshness: stale ? 'STALE' : 'FRESH'
   };
 }
 
 function paperMtfSummary(mtf) {
   const names = ['H4', 'H1', 'M30', 'M15'];
   const available = names.map(name => mtf[name]).filter(item => item && item.status === 'FULL');
+  const staleCount = names.filter(name => mtf[name] && mtf[name].status === 'STALE').length;
+  const partialCount = names.filter(name => mtf[name] && mtf[name].status === 'PARTIAL').length;
   const longCount = available.filter(item => item.direction === 'LONG').length;
   const shortCount = available.filter(item => item.direction === 'SHORT').length;
   const alignmentCount = Math.max(longCount, shortCount);
@@ -1020,7 +1060,9 @@ function paperMtfSummary(mtf) {
     direction, available: available.length, alignmentCount,
     longCount, shortCount, confluencePct,
     higherAligned, triggerAligned,
-    status: available.length === names.length ? 'FULL' : available.length ? 'PARTIAL' : 'UNAVAILABLE'
+    staleCount, partialCount,
+    status: available.length === names.length ? 'FULL' : staleCount ? 'STALE'
+      : available.length ? 'PARTIAL' : 'UNAVAILABLE'
   };
 }
 
@@ -1032,8 +1074,17 @@ function applyPaperMtf(pair) {
   pair.mtfAlignment = summary.alignmentCount;
   pair.confluencePct = summary.confluencePct;
   pair.mtfSummary = summary;
-  pair.dataQuality = summary.status === 'FULL' && pair.oiReady && pair.volume > 0
-    ? 'FULL' : summary.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'PARTIAL';
+  const qualityReasons = [];
+  if (summary.status !== 'FULL') qualityReasons.push('MTF ' + summary.status);
+  if (!pair.oiAvailable) qualityReasons.push('OI tidak tersedia');
+  else if (!pair.oiReady) qualityReasons.push('menunggu baseline OI');
+  if (!pair.fundingAvailable) qualityReasons.push('funding tidak tersedia');
+  if (!pair.volumeAvailable || pair.volume <= 0) qualityReasons.push('volume tidak tersedia');
+  pair.dataQuality = summary.status === 'FULL' && pair.oiReady && pair.oiAvailable &&
+    pair.fundingAvailable && pair.volumeAvailable && pair.volume > 0
+    ? 'FULL' : summary.status === 'STALE' ? 'STALE'
+      : summary.status === 'UNAVAILABLE' ? 'REJECTED' : 'PARTIAL';
+  pair.dataQualityReason = qualityReasons.join('; ') || null;
   const context = pair.contextScoreBreakdown || paperScoreDetails(
     pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
   const mtfScore = summary.confluencePct / 100 * 12;
@@ -1228,6 +1279,7 @@ async function runPaperScan(reason, requestedCycleKey) {
         dataAt: pair.dataAt, source: pair.source,
         confluencePct: pair.confluencePct, mtfDirection: pair.mtfDirection,
         mtfAlignment: pair.mtfAlignment, mtfSummary: pair.mtfSummary,
+        dataQualityReason: pair.dataQualityReason || null,
         indicators: pair.mtf && pair.mtf.M15 ? pair.mtf.M15.indicators : null,
         support: pair.support, resistance: pair.resistance, atr: pair.atr,
         signalReasons: candidate.evidence, scoreBreakdown: candidate.scoreBreakdown,
@@ -1410,6 +1462,7 @@ function paperStatus() {
   const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
   const availableSlots = Math.max(0, PAPER_MAX_ACTIVE - strictActiveCount);
   const availableRisk = Math.max(0, riskBudget - activeRisk);
+  const stats = paperStats();
   const blockReason = paperState.lastBlockReason ||
     (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * PAPER_RISK_PCT / 100
       ? 'RISK_BUDGET_REACHED' : null);
@@ -1456,6 +1509,8 @@ function paperStatus() {
     recentScans: paperState.recentScans.slice(0, 20),
     closedTrades: closed.slice(0, 100),
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
+    stats: stats.metrics,
+    statsSample: stats.sample,
     summary: {
       open, pending, closed: closed.length, wins, losses,
       invalidated: paperState.invalidatedTrades.length,
@@ -1465,28 +1520,132 @@ function paperStatus() {
   };
 }
 
-function paperHistory(query) {
+function paperHistoryFilters(query) {
   const params = query || new URLSearchParams();
-  const symbol = String(params.get('symbol') || params.get('sym') || '').trim().toUpperCase();
-  const timeframe = String(params.get('timeframe') || params.get('tf') || '').trim().toUpperCase();
-  const outcome = String(params.get('outcome') || '').trim().toUpperCase();
-  const from = String(params.get('from') || '').trim();
-  const to = String(params.get('to') || '').trim();
-  const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
-  const closedTrades = all.filter(trade => {
-    if (symbol && String(trade.sym || '').toUpperCase() !== symbol) return false;
-    if (timeframe && String(trade.timeframe || trade.tf || '').toUpperCase() !== timeframe) return false;
-    if (outcome && String(trade.outcome || '').toUpperCase() !== outcome) return false;
-    const date = String(trade.closedAt || trade.createdAt || '').slice(0, 10);
-    if (from && (!date || date < from)) return false;
-    if (to && (!date || date > to)) return false;
-    return true;
+  return {
+    symbol: String(params.get('symbol') || params.get('sym') || '').trim().toUpperCase(),
+    timeframe: String(params.get('timeframe') || params.get('tf') || '').trim().toUpperCase(),
+    outcome: String(params.get('outcome') || '').trim().toUpperCase(),
+    from: String(params.get('from') || '').trim(),
+    to: String(params.get('to') || '').trim()
+  };
+}
+
+function paperHistoryMatches(trade, filters) {
+  if (filters.symbol && String(trade.sym || '').toUpperCase() !== filters.symbol) return false;
+  if (filters.timeframe && String(trade.timeframe || trade.tf || '').toUpperCase() !== filters.timeframe) return false;
+  if (filters.outcome && String(trade.outcome || '').toUpperCase() !== filters.outcome) return false;
+  const rawDate = trade.closedAt || trade.createdAt || '';
+  const date = typeof rawDate === 'number' || /^\d+$/.test(String(rawDate))
+    ? new Date(Number(rawDate)).toISOString().slice(0, 10)
+    : String(rawDate).slice(0, 10);
+  if (filters.from && (!date || date < filters.from)) return false;
+  if (filters.to && (!date || date > filters.to)) return false;
+  return true;
+}
+
+function paperGroupStats(trades, keyFn) {
+  const groups = {};
+  trades.forEach(trade => {
+    const key = keyFn(trade) || 'UNKNOWN';
+    if (!groups[key]) groups[key] = {key, trades: 0, wins: 0, losses: 0, netR: 0, pnl: 0};
+    const group = groups[key];
+    group.trades += 1;
+    if (trade.outcome === 'WIN') group.wins += 1;
+    if (trade.outcome === 'LOSS') group.losses += 1;
+    group.netR += paperNumber(trade.r);
+    group.pnl += paperNumber(trade.pnl);
   });
+  return Object.values(groups).map(group => ({
+    ...group,
+    netR: Number(group.netR.toFixed(2)),
+    pnl: Number(group.pnl.toFixed(2)),
+    winRate: group.trades ? Number((group.wins / group.trades * 100).toFixed(1)) : 0
+  })).sort((a, b) => b.netR - a.netR);
+}
+
+function paperStats(query) {
+  const filters = paperHistoryFilters(query);
+  const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES)
+    .filter(trade => paperHistoryMatches(trade, filters));
+  const cancelled = all.filter(trade => trade.outcome === 'CANCELLED');
+  const expired = cancelled.filter(trade => String(trade.closeReason || '').toLowerCase().includes('expired'));
+  const closed = all.filter(trade => trade.outcome !== 'CANCELLED');
+  const chronological = closed.slice().sort((a, b) => {
+    const at = Date.parse(a.closedAt || '') || Number(a.createdAt) || 0;
+    const bt = Date.parse(b.closedAt || '') || Number(b.createdAt) || 0;
+    return at - bt;
+  });
+  const wins = closed.filter(trade => paperNumber(trade.r) > 0);
+  const losses = closed.filter(trade => paperNumber(trade.r) < 0);
+  const grossProfitR = wins.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  const grossLossR = losses.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  const netR = closed.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  let cumulative = 0;
+  let peak = 0;
+  let maxDrawdownR = 0;
+  chronological.forEach(trade => {
+    cumulative += paperNumber(trade.r);
+    peak = Math.max(peak, cumulative);
+    maxDrawdownR = Math.max(maxDrawdownR, peak - cumulative);
+  });
+  const filled = closed.filter(trade => trade.openedAt);
+  const fillTimes = filled.map(trade => Math.max(0,
+    (Date.parse(trade.openedAt) || 0) - (Number(trade.createdAt) || Date.parse(trade.createdAt) || 0)))
+    .filter(value => value > 0);
+  const durations = closed.map(trade => {
+    const start = Date.parse(trade.openedAt || '');
+    const end = Date.parse(trade.closedAt || '');
+    return start && end ? Math.max(0, end - start) : 0;
+  }).filter(value => value > 0);
+  const average = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const profitFactor = grossLossR < 0 ? grossProfitR / Math.abs(grossLossR) : null;
+  return {
+    ok: true,
+    asOf: new Date().toISOString(),
+    filters: {...filters, symbol: filters.symbol || 'all', timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all'},
+    sample: {
+      orders: all.length, closed: closed.length, filled: filled.length,
+      pendingExpired: expired.length, cancelled: cancelled.length,
+      wins: wins.length, losses: losses.length,
+      breakeven: closed.filter(trade => paperNumber(trade.r) === 0).length
+    },
+    metrics: {
+      winRate: closed.length ? Number((wins.length / closed.length * 100).toFixed(1)) : 0,
+      netR: Number(netR.toFixed(2)),
+      expectancyR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
+      profitFactor: profitFactor == null ? null : Number(profitFactor.toFixed(2)),
+      maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
+      grossProfitR: Number(grossProfitR.toFixed(2)),
+      grossLossR: Number(grossLossR.toFixed(2)),
+      pnl: Number(closed.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0).toFixed(2)),
+      fillRate: all.length ? Number((filled.length / all.length * 100).toFixed(1)) : 0,
+      averageTimeToFillMs: Math.round(average(fillTimes)),
+      averageDurationMs: Math.round(average(durations)),
+      averageMfePnl: Number(average(closed.map(trade => paperNumber(trade.mfePnl))).toFixed(2)),
+      averageMaePnl: Number(average(closed.map(trade => paperNumber(trade.maePnl))).toFixed(2))
+    },
+    bySymbol: paperGroupStats(closed, trade => trade.sym),
+    byDirection: paperGroupStats(closed, trade => trade.dir),
+    byTimeframe: paperGroupStats(closed, trade => trade.timeframe || trade.tf),
+    byScore: paperGroupStats(closed, trade => {
+      const score = paperNumber(trade.score);
+      return score >= 8 ? '8-12' : score >= 6.5 ? '6.5-7.9' : '<6.5';
+    }),
+    closeReasons: paperGroupStats(closed, trade => trade.closeReason || 'UNKNOWN')
+  };
+}
+
+function paperHistory(query) {
+  const filters = paperHistoryFilters(query);
+  const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
+  const closedTrades = all.filter(trade => paperHistoryMatches(trade, filters));
   return {
     ok: true,
     closedTrades,
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
-    filters: {symbol: symbol || 'all', timeframe: timeframe || 'all', outcome: outcome || 'all', from, to},
+    filters: {symbol: filters.symbol || 'all', timeframe: filters.timeframe || 'all',
+      outcome: filters.outcome || 'all', from: filters.from, to: filters.to},
     total: closedTrades.length
   };
 }
@@ -1555,6 +1714,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperHistory(requestUrl.searchParams)));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/stats') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    send(res, 200, JSON.stringify(paperStats(requestUrl.searchParams)));
     return;
   }
 

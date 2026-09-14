@@ -13,6 +13,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 - **Telegram Alert** — notifikasi server-side ke HP saat scan, limit fill, posisi ditutup, dan guard aktif
 - **Persistence** — state Paper Bot tersimpan atomik di VPS dengan backup `.bak`; jurnal browser punya export JSON/CSV
 - **Health & evidence** — status sumber `LIVE`/`DELAYED`/`ERROR`, timestamp, alasan sinyal, volume ratio, dan MTF
+- **Paper analytics** — profit factor, expectancy, drawdown, fill rate, pending expired, waktu fill, MFE/MAE, serta breakdown symbol/arah/timeframe/score
 
 ## Data Sources
 
@@ -65,7 +66,9 @@ Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 Sebelum order dibuat, kandidat wajib memiliki candle MTF 4H/1H/30M/15M lengkap,
 minimal 3 dari 4 timeframe searah, dan confluence default minimal 60%. Arah order
 ditentukan oleh MTF, bukan hanya perubahan 24 jam. Server menyimpan indikator,
-support/resistance, ATR, kualitas data, dan alasan sinyal pada trade.
+support/resistance, ATR, kualitas data (`FULL`, `PARTIAL`, `STALE`, atau `REJECTED`),
+dan alasan sinyal pada trade. Candle yang melewati batas freshness per timeframe
+ditolak dari auto-order agar data basi tidak ikut dieksekusi.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
 dibatasi 15%; posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak
 mengambil slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak
@@ -84,6 +87,8 @@ PAPER_MTF_CONCURRENCY=6
 
 Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
 `mtfAlignment`, `confluencePct`, `dataQuality`, dan detail indikator per kandidat.
+Endpoint `/paper/stats` menyajikan statistik paper lengkap dari state VPS; endpoint
+ini tidak mengubah state dan aman dipakai dashboard untuk monitoring.
 
 Konfigurasi alert dilakukan hanya pada service VPS, bukan di browser:
 
@@ -103,7 +108,7 @@ tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supa
 riwayat paper trading tetap satu sumber.
 Jika ingin ringkasan Telegram untuk setiap scan 15 menit, tambahkan
 `TELEGRAM_SCAN_SUMMARY=true` ke file environment VPS; default-nya `false`.
-History mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
+History dan statistik mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
 
 Untuk rotasi journal, pasang `nexora-journald.conf` ke
 `/etc/systemd/journald.conf.d/nexora.conf`, reload `systemd-journald`, lalu jalankan
