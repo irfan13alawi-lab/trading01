@@ -23,7 +23,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 | Harga Spot | Bitget API v2 Spot atau CoinGecko Spot | Real-time/cached |
 | Funding backup | BingX + Gate.io | Real-time |
 | Fear & Greed | Alternative.me | Harian |
-| MTF klines + indikator | Bitget futures candles 120 bar, EMA/RSI/MACD/Supertrend/ATR | Real-time |
+| MTF klines + indikator | Bitget futures candles 120 bar, EMA/RSI/MACD/Stoch RSI/Supertrend/ATR, candle pattern | Real-time |
 | OHLC chart + RSI/MACD | Bitget futures candles | Cached 1 menit |
 | OHLC Spot | Bitget Spot candles atau CoinGecko Spot OHLC | Sesuai market yang dipilih |
 
@@ -81,12 +81,16 @@ Parameter MTF dapat disesuaikan melalui environment service bila diperlukan:
 PAPER_CANDLE_LIMIT=120
 PAPER_MTF_MIN_ALIGNMENT=3
 PAPER_MIN_CONFLUENCE=60
+PAPER_SIGNAL_MODE=WEIGHTED
 PAPER_MTF_MAX_CANDIDATES=24
 PAPER_MTF_CONCURRENCY=6
 ```
 
 Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
 `mtfAlignment`, `confluencePct`, `dataQuality`, dan detail indikator per kandidat.
+`PAPER_SIGNAL_MODE=WEIGHTED` memberi bobot trigger 15M dan timeframe besar pada
+konfluensi; `CLASSIC` memakai pembobotan alignment yang lebih sederhana. Mode
+yang dipakai disimpan pada setiap trade agar hasilnya bisa dibandingkan.
 Endpoint `/paper/stats` menyajikan statistik paper lengkap dari state VPS; endpoint
 ini tidak mengubah state dan aman dipakai dashboard untuk monitoring.
 

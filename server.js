@@ -22,6 +22,8 @@ const PAPER_MTF_MIN_ALIGNMENT = Math.max(3, Math.min(4,
 const PAPER_MIN_CONFLUENCE = Math.max(50, Math.min(95,
   Number.isFinite(Number(process.env.PAPER_MIN_CONFLUENCE))
     ? Number(process.env.PAPER_MIN_CONFLUENCE) : 60));
+const PAPER_SIGNAL_MODE = String(process.env.PAPER_SIGNAL_MODE || 'WEIGHTED').toUpperCase() === 'CLASSIC'
+  ? 'CLASSIC' : 'WEIGHTED';
 const PAPER_MTF_CONCURRENCY = Math.max(2, Math.min(12,
   Number.isFinite(Number(process.env.PAPER_MTF_CONCURRENCY))
     ? Number(process.env.PAPER_MTF_CONCURRENCY) : 6));
@@ -319,6 +321,8 @@ function normalisePaperTrade(trade) {
   const next = {...trade};
   next.executionModel = paperExecutionModel(next);
   next.executionClass = isStrictPaperTrade(next) ? 'STRICT' : 'LEGACY';
+  next.signalMode = next.signalMode || (isStrictPaperTrade(next) ? 'WEIGHTED' : 'LEGACY');
+  next.mode = next.mode || next.signalMode;
   next.timeframe = next.timeframe || next.tf || '15M';
   next.tf = next.tf || next.timeframe;
   if (!Array.isArray(next.signalReasons)) next.signalReasons = [];
@@ -578,6 +582,61 @@ function paperRsiSeries(values, period) {
   return result;
 }
 
+function paperStochRsiSeries(rsi, period, smooth) {
+  const raw = Array(rsi.length).fill(null);
+  const k = Array(rsi.length).fill(null);
+  const d = Array(rsi.length).fill(null);
+  for (let index = period - 1; index < rsi.length; index++) {
+    const window = rsi.slice(index - period + 1, index + 1).filter(value => value != null);
+    if (window.length < period) continue;
+    const low = Math.min(...window);
+    const high = Math.max(...window);
+    raw[index] = high === low ? 50 : ((rsi[index] - low) / (high - low)) * 100;
+    const kWindow = raw.slice(Math.max(0, index - smooth + 1), index + 1)
+      .filter(value => value != null);
+    if (kWindow.length === smooth) k[index] = paperMean(kWindow);
+    const dWindow = k.slice(Math.max(0, index - smooth + 1), index + 1)
+      .filter(value => value != null);
+    if (dWindow.length === smooth) d[index] = paperMean(dWindow);
+  }
+  return {k, d};
+}
+
+function paperCandlePattern(rows) {
+  if (!Array.isArray(rows) || rows.length < 2) {
+    return {name: 'NONE', direction: 'NEUTRAL'};
+  }
+  const current = rows[rows.length - 1];
+  const previous = rows[rows.length - 2];
+  const currentBody = Math.abs(current.close - current.open);
+  const previousBody = Math.abs(previous.close - previous.open);
+  const currentRange = Math.max(current.high - current.low, 0.0000000001);
+  const currentUpper = current.high - Math.max(current.open, current.close);
+  const currentLower = Math.min(current.open, current.close) - current.low;
+  const currentBull = current.close > current.open;
+  const currentBear = current.close < current.open;
+  const previousBull = previous.close > previous.open;
+  const previousBear = previous.close < previous.open;
+  if (previousBear && currentBull && current.open <= previous.close && current.close >= previous.open) {
+    return {name: 'BULLISH_ENGULFING', direction: 'LONG'};
+  }
+  if (previousBull && currentBear && current.open >= previous.close && current.close <= previous.open) {
+    return {name: 'BEARISH_ENGULFING', direction: 'SHORT'};
+  }
+  if (currentLower >= currentBody * 2 && currentUpper <= currentBody &&
+      current.close >= current.low + currentRange * 0.55) {
+    return {name: 'HAMMER', direction: 'LONG'};
+  }
+  if (currentUpper >= currentBody * 2 && currentLower <= currentBody &&
+      current.close <= current.low + currentRange * 0.45) {
+    return {name: 'SHOOTING_STAR', direction: 'SHORT'};
+  }
+  if (currentBody <= currentRange * 0.1) return {name: 'DOJI', direction: 'NEUTRAL'};
+  if (currentBull) return {name: 'BULLISH_CLOSE', direction: 'LONG'};
+  if (currentBear) return {name: 'BEARISH_CLOSE', direction: 'SHORT'};
+  return {name: 'NONE', direction: 'NEUTRAL'};
+}
+
 function paperAtrSeries(rows, period) {
   const trueRanges = rows.map((row, index) => {
     if (index === 0) return row.high - row.low;
@@ -629,12 +688,14 @@ function paperIndicatorSnapshot(rows) {
   const ema21 = paperEmaSeries(closes, 21);
   const ema50 = paperEmaSeries(closes, 50);
   const rsi = paperRsiSeries(closes, 14);
+  const stochRsi = paperStochRsiSeries(rsi, 14, 3);
   const ema12 = paperEmaSeries(closes, 12);
   const ema26 = paperEmaSeries(closes, 26);
   const macdSeries = closes.map((_, index) => ema12[index] - ema26[index]);
   const macdSignal = paperEmaSeries(macdSeries, 9);
   const atrSeries = paperAtrSeries(rows, 14);
   const supertrend = paperSupertrend(rows, atrSeries, 10, 3);
+  const candlePattern = paperCandlePattern(rows);
   const lastIndex = rows.length - 1;
   const last = rows[lastIndex];
   const previous = rows.slice(Math.max(0, lastIndex - 20), lastIndex);
@@ -647,18 +708,24 @@ function paperIndicatorSnapshot(rows) {
     last.close > ema21[lastIndex],
     macdSeries[lastIndex] > macdSignal[lastIndex],
     rsi[lastIndex] != null && rsi[lastIndex] >= 50 && rsi[lastIndex] <= 75,
-    supertrend === 'LONG'
+    supertrend === 'LONG',
+    stochRsi.k[lastIndex] != null && stochRsi.d[lastIndex] != null &&
+      stochRsi.k[lastIndex] >= stochRsi.d[lastIndex] && stochRsi.k[lastIndex] <= 80,
+    candlePattern.direction === 'LONG'
   ].filter(Boolean).length;
   const shortVotes = [
     ema9[lastIndex] < ema21[lastIndex] && ema21[lastIndex] < ema50[lastIndex],
     last.close < ema21[lastIndex],
     macdSeries[lastIndex] < macdSignal[lastIndex],
     rsi[lastIndex] != null && rsi[lastIndex] >= 25 && rsi[lastIndex] < 50,
-    supertrend === 'SHORT'
+    supertrend === 'SHORT',
+    stochRsi.k[lastIndex] != null && stochRsi.d[lastIndex] != null &&
+      stochRsi.k[lastIndex] <= stochRsi.d[lastIndex] && stochRsi.k[lastIndex] >= 20,
+    candlePattern.direction === 'SHORT'
   ].filter(Boolean).length;
   const direction = longVotes >= 3 && longVotes > shortVotes ? 'LONG'
     : shortVotes >= 3 && shortVotes > longVotes ? 'SHORT' : 'NEUTRAL';
-  const strengthPct = Math.round(Math.max(longVotes, shortVotes) / 5 * 100);
+  const strengthPct = Math.round(Math.max(longVotes, shortVotes) / 7 * 100);
   return {
     direction,
     strengthPct,
@@ -676,10 +743,15 @@ function paperIndicatorSnapshot(rows) {
       ema21: paperRoundPrice(ema21[lastIndex]),
       ema50: paperRoundPrice(ema50[lastIndex]),
       rsi: rsi[lastIndex] == null ? null : Number(rsi[lastIndex].toFixed(1)),
+      stochRsiK: stochRsi.k[lastIndex] == null ? null : Number(stochRsi.k[lastIndex].toFixed(1)),
+      stochRsiD: stochRsi.d[lastIndex] == null ? null : Number(stochRsi.d[lastIndex].toFixed(1)),
       macd: Number(macdSeries[lastIndex].toFixed(6)),
       macdSignal: Number(macdSignal[lastIndex].toFixed(6)),
-      supertrend
-    }
+      supertrend,
+      candlePattern: candlePattern.name,
+      candleDirection: candlePattern.direction
+    },
+    candlePattern
   };
 }
 
@@ -755,6 +827,7 @@ function buildPaperPairs(payload) {
 function paperSetup(pair) {
   const dir = pair.mtfDirection || (pair.chg < 0 ? 'SHORT' : 'LONG');
   const m15 = pair.mtf && pair.mtf.M15;
+  const m30 = pair.mtf && pair.mtf.M30;
   const h1 = pair.mtf && pair.mtf.H1;
   const snapshot = m15 || h1 || null;
   const indicators = snapshot && snapshot.indicators || {};
@@ -765,8 +838,12 @@ function paperSetup(pair) {
     price * 0.005
   );
   const minimumOffset = Math.max(price * 0.001, atr * 0.25);
-  const support = paperNumber(snapshot && snapshot.support);
-  const resistance = paperNumber(snapshot && snapshot.resistance);
+  const supports = [m15, m30, h1].map(item => paperNumber(item && item.support))
+    .filter(level => level > 0 && level < price);
+  const resistances = [m15, m30, h1].map(item => paperNumber(item && item.resistance))
+    .filter(level => level > price);
+  const support = supports.length ? Math.max(...supports) : 0;
+  const resistance = resistances.length ? Math.min(...resistances) : 0;
   const ema21 = paperNumber(indicators.ema21);
   const pullbackLevel = dir === 'LONG'
     ? [support, ema21].filter(level => level > 0 && level < price).sort((a, b) => b - a)[0]
@@ -775,7 +852,12 @@ function paperSetup(pair) {
   const entry = paperRoundPrice(dir === 'LONG'
     ? (pullbackLevel && pullbackLevel <= entryBase ? pullbackLevel : entryBase)
     : (pullbackLevel && pullbackLevel >= entryBase ? pullbackLevel : entryBase));
-  const stopDistance = Math.min(price * 0.06, Math.max(atr * 1.5, price * 0.005));
+  const structureStopDistance = dir === 'LONG' && support > 0
+    ? entry - (support - atr * 0.15)
+    : dir === 'SHORT' && resistance > 0
+      ? (resistance + atr * 0.15) - entry : 0;
+  const stopDistance = Math.min(price * 0.06,
+    Math.max(atr * 1.5, structureStopDistance, price * 0.005));
   const sl = paperRoundPrice(dir === 'LONG' ? entry - stopDistance : entry + stopDistance);
   const riskDistance = Math.abs(entry - sl);
   const tp1Level = dir === 'LONG'
@@ -785,14 +867,20 @@ function paperSetup(pair) {
   const tp1 = paperRoundPrice(dir === 'LONG'
     ? Math.max(minimumTp1, tp1Level || 0)
     : Math.min(minimumTp1, tp1Level || Number.POSITIVE_INFINITY));
+  const nextTarget = dir === 'LONG'
+    ? resistances.filter(level => level > tp1).sort((a, b) => a - b)[0]
+    : supports.filter(level => level < tp1).sort((a, b) => b - a)[0];
   const tp2 = paperRoundPrice(dir === 'LONG'
-    ? Math.max(entry + riskDistance * 3, tp1 * 1.01)
-    : Math.min(entry - riskDistance * 3, tp1 * 0.99));
+    ? Math.max(entry + riskDistance * 3, tp1 * 1.01, nextTarget || 0)
+    : Math.min(entry - riskDistance * 3, tp1 * 0.99, nextTarget || Number.POSITIVE_INFINITY));
   const riskDollar = Math.max(0, paperEquity() * PAPER_RISK_PCT / 100);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
     entry, sl, tp1, tp2,
+    structureSupport: support || null,
+    structureResistance: resistance || null,
+    atr: Number(atr.toFixed(8)),
     contracts: Number(contracts.toFixed(6)),
     size: Number((contracts * entry).toFixed(2)),
     riskPct: PAPER_RISK_PCT,
@@ -894,6 +982,8 @@ function paperTradeView(trade) {
     maePnl: Number((trade.maePnl || 0).toFixed(2)),
     riskPct: trade.riskPct || null,
     riskDollar: Number(paperTradeRiskDollar(trade).toFixed(2)),
+    mode: trade.mode || trade.signalMode || null,
+    signalMode: trade.signalMode || trade.mode || null,
     executionModel: paperExecutionModel(trade),
     executionClass: isStrictPaperTrade(trade) ? 'STRICT' : 'LEGACY',
     timeframe: trade.timeframe || trade.tf || '15M',
@@ -907,8 +997,12 @@ function paperTradeView(trade) {
     mtfAlignment: trade.mtfAlignment || 0,
     mtfSummary: trade.mtfSummary || null,
     indicators: trade.indicators || null,
+    candlePattern: trade.candlePattern || null,
+    signalScores: trade.signalScores || null,
     support: trade.support || null,
     resistance: trade.resistance || null,
+    structureSupport: trade.structureSupport || null,
+    structureResistance: trade.structureResistance || null,
     atr: trade.atr || null,
     signalReasons: Array.isArray(trade.signalReasons) ? trade.signalReasons : [],
     scoreBreakdown: trade.scoreBreakdown || null,
@@ -945,7 +1039,13 @@ function paperCandidateView(pair) {
   if (pair.mtf && pair.mtf.M15 && pair.mtf.M15.indicators) {
     const m15 = pair.mtf.M15.indicators;
     if (m15.rsi != null) reasons.push('RSI 15M ' + m15.rsi);
+    if (m15.stochRsiK != null && m15.stochRsiD != null) {
+      reasons.push('Stoch RSI K/D ' + m15.stochRsiK + '/' + m15.stochRsiD);
+    }
     if (m15.supertrend) reasons.push('Supertrend 15M ' + m15.supertrend);
+    if (m15.candlePattern && m15.candlePattern !== 'NONE') {
+      reasons.push('candle ' + m15.candlePattern);
+    }
   }
   return {
     sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
@@ -954,6 +1054,8 @@ function paperCandidateView(pair) {
     volumeAvailable: !!pair.volumeAvailable,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.mtfDirection || 'NEUTRAL',
+    signalMode: pair.signalMode || PAPER_SIGNAL_MODE,
+    signalScores: pair.signalScores || null,
     dataAt: pair.dataAt || null, source: pair.source || 'Bitget Futures',
     mtf: pair.mtf || null, dataQuality: pair.dataQuality || 'PARTIAL',
     scoreBreakdown: pair.scoreBreakdown || null, mtfAvailable: pair.mtfAvailable || 0,
@@ -1054,15 +1156,38 @@ function paperMtfSummary(mtf) {
   const averageStrength = available.length
     ? paperMean(available.map(item => item.strengthPct || 0)) : 0;
   const confluencePct = Math.round(paperClamp(
-    alignmentPct * 0.7 + (triggerAligned ? 10 : 0) + (higherAligned ? 8 : 0) +
-      averageStrength * 0.1, 0, 100));
+    PAPER_SIGNAL_MODE === 'CLASSIC'
+      ? alignmentPct * 0.8 + averageStrength * 0.2
+      : alignmentPct * 0.7 + (triggerAligned ? 10 : 0) + (higherAligned ? 8 : 0) +
+        averageStrength * 0.1, 0, 100));
   return {
     direction, available: available.length, alignmentCount,
     longCount, shortCount, confluencePct,
     higherAligned, triggerAligned,
     staleCount, partialCount,
+    mode: PAPER_SIGNAL_MODE,
     status: available.length === names.length ? 'FULL' : staleCount ? 'STALE'
       : available.length ? 'PARTIAL' : 'UNAVAILABLE'
+  };
+}
+
+function paperSignalScores(pair, summary) {
+  const trigger = pair.mtf && pair.mtf.M15;
+  const trend = Math.round(paperClamp(summary.alignmentCount * 5 +
+    (summary.higherAligned ? 10 : 0), 0, 30));
+  const momentum = Math.round(paperClamp(
+    ((trigger && trigger.strengthPct) || 0) * 0.25, 0, 25));
+  const fundingAligned = pair.mtfDirection === 'LONG' ? pair.fund <= 0
+    : pair.mtfDirection === 'SHORT' ? pair.fund >= 0 : false;
+  const derivatives = Math.round(paperClamp(
+    (pair.fundingAvailable ? (fundingAligned ? 15 : 8) : 0) +
+      (pair.oiAvailable ? (pair.oi > 0 ? 5 : 2) : 0), 0, 20));
+  const volume = Math.round(paperClamp((pair.volumeRatio || 0) / 2 * 15, 0, 15));
+  const risk = pair.dataQuality === 'FULL' ? 8 : 0;
+  return {
+    trend, momentum, derivatives, volume, risk,
+    total: trend + momentum + derivatives + volume + risk,
+    max: {trend: 30, momentum: 25, derivatives: 20, volume: 15, risk: 10, total: 100}
   };
 }
 
@@ -1074,6 +1199,7 @@ function applyPaperMtf(pair) {
   pair.mtfAlignment = summary.alignmentCount;
   pair.confluencePct = summary.confluencePct;
   pair.mtfSummary = summary;
+  pair.signalMode = PAPER_SIGNAL_MODE;
   const qualityReasons = [];
   if (summary.status !== 'FULL') qualityReasons.push('MTF ' + summary.status);
   if (!pair.oiAvailable) qualityReasons.push('OI tidak tersedia');
@@ -1085,6 +1211,7 @@ function applyPaperMtf(pair) {
     ? 'FULL' : summary.status === 'STALE' ? 'STALE'
       : summary.status === 'UNAVAILABLE' ? 'REJECTED' : 'PARTIAL';
   pair.dataQualityReason = qualityReasons.join('; ') || null;
+  pair.signalScores = paperSignalScores(pair, summary);
   const context = pair.contextScoreBreakdown || paperScoreDetails(
     pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
   const mtfScore = summary.confluencePct / 100 * 12;
@@ -1094,6 +1221,7 @@ function applyPaperMtf(pair) {
     mtf: Number(mtfScore.toFixed(1)),
     confluencePct: summary.confluencePct,
     mtfAlignment: summary.alignmentCount,
+    signalScores: pair.signalScores,
     dataQuality: pair.dataQuality,
     total: Math.min(12, total)
   };
@@ -1275,13 +1403,17 @@ async function runPaperScan(reason, requestedCycleKey) {
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, mtf: pair.mtf,
-        timeframe: '15M', tf: '15M', dataQuality: pair.dataQuality,
+        timeframe: '15M', tf: '15M', mode: PAPER_SIGNAL_MODE,
+        signalMode: PAPER_SIGNAL_MODE, dataQuality: pair.dataQuality,
         dataAt: pair.dataAt, source: pair.source,
         confluencePct: pair.confluencePct, mtfDirection: pair.mtfDirection,
         mtfAlignment: pair.mtfAlignment, mtfSummary: pair.mtfSummary,
         dataQualityReason: pair.dataQualityReason || null,
         indicators: pair.mtf && pair.mtf.M15 ? pair.mtf.M15.indicators : null,
-        support: pair.support, resistance: pair.resistance, atr: pair.atr,
+        candlePattern: pair.mtf && pair.mtf.M15 ? pair.mtf.M15.indicators && pair.mtf.M15.indicators.candlePattern : null,
+        signalScores: pair.signalScores || null,
+        support: pair.support, resistance: pair.resistance, structureSupport: setup.structureSupport,
+        structureResistance: setup.structureResistance, atr: setup.atr || pair.atr,
         signalReasons: candidate.evidence, scoreBreakdown: candidate.scoreBreakdown,
         setupValidation: item.setupValidation,
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
@@ -1472,7 +1604,10 @@ function paperStatus() {
     pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: PAPER_MAX_ACTIVE,
     maxPerSymbol: PAPER_MAX_PER_SYMBOL,
     candleLimit: PAPER_CANDLE_LIMIT, mtfMinAlignment: PAPER_MTF_MIN_ALIGNMENT,
-    minConfluence: PAPER_MIN_CONFLUENCE, mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
+    minConfluence: PAPER_MIN_CONFLUENCE, signalMode: PAPER_SIGNAL_MODE,
+    mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
+    freshnessMaxAgeSec: Object.fromEntries(Object.entries(PAPER_TIMEFRAME_MAX_AGE_MS)
+      .map(([tf, ms]) => [tf, Math.round(ms / 1000)])),
     strictActiveCount, legacyActiveCount, availableSlots,
     startingEquity: paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY),
     realizedPnl: Number(realizedPnl.toFixed(2)),
@@ -1628,6 +1763,7 @@ function paperStats(query) {
     bySymbol: paperGroupStats(closed, trade => trade.sym),
     byDirection: paperGroupStats(closed, trade => trade.dir),
     byTimeframe: paperGroupStats(closed, trade => trade.timeframe || trade.tf),
+    byMode: paperGroupStats(closed, trade => trade.signalMode || trade.mode),
     byScore: paperGroupStats(closed, trade => {
       const score = paperNumber(trade.score);
       return score >= 8 ? '8-12' : score >= 6.5 ? '6.5-7.9' : '<6.5';

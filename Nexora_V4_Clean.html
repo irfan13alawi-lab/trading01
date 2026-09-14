@@ -2279,6 +2279,7 @@ function renderEquity() {
   var byScore = groupSummary(trades, function(t){
     var s = Number(t.score || 0); return s >= 8 ? '8-12' : s >= 6.5 ? '6.5-7.9' : '<6.5';
   });
+  var byMode = groupSummary(trades, function(t){return t.mode || t.signalMode;});
   var displayOrderCount = filteredOrders.length;
   var displayFilledCount = filledOrders.length;
   var displayExpiredCount = expiredOrders.length;
@@ -2300,6 +2301,7 @@ function renderEquity() {
     }
     byDir = serverGroups(serverStats.byDirection).length ? serverGroups(serverStats.byDirection) : byDir;
     byTf = serverGroups(serverStats.byTimeframe).length ? serverGroups(serverStats.byTimeframe) : byTf;
+    byMode = serverGroups(serverStats.byMode).length ? serverGroups(serverStats.byMode) : byMode;
     byScore = serverGroups(serverStats.byScore).length ? serverGroups(serverStats.byScore) : byScore;
   }
   var bySymbol = {};
@@ -2390,6 +2392,7 @@ function renderEquity() {
      + (useVpsEquity ? '<div><span style="color:#484f58;">Avg Time to Fill</span><br><b style="color:#58a6ff;">' + durationLabel(avgFillMs) + '</b></div>' : '')
      + (useVpsEquity && byDir.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By direction</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byDir.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (useVpsEquity && byTf.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By timeframe</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byTf.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
+     + (useVpsEquity && byMode.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By mode</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byMode.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (useVpsEquity && byScore.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By score</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byScore.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (symbolRows.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By symbol</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + symbolRows.map(function(sym){var st=bySymbol[sym];return '<span class="badge ' + (st.r>=0?'ba':'br') + '" title="' + sourceEsc(sym) + '">' + sourceEsc(sym) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.wins/st.count*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + '</div>';
@@ -4238,7 +4241,7 @@ function applyServerClosedTrades(closedTrades) {
       entry: Number(t.entryActual || t.entryLimit || 0),
       exit: Number(t.exitPrice || 0),
       size: Number(t.size || 0),
-      mode: 'AUTO VPS',
+      mode: t.signalMode || t.mode || 'AUTO VPS',
        tf: t.timeframe || t.tf || '15M',
        timeframe: t.timeframe || t.tf || '15M',
       dateKey: t.closedAt || '',
@@ -4274,18 +4277,28 @@ function renderServerPaperScan(status) {
   }
   var at = scan.at ? new Date(scan.at).toLocaleTimeString('id-ID') : '--';
   var candidates = Array.isArray(scan.selected) ? scan.selected.slice(0, 3) : [];
-  var cards = candidates.map(function(c) {
-    var dir = c.direction || c.mtfDirection || 'NEUTRAL';
+  var placedCandidates = Array.isArray(scan.placed) ? scan.placed.slice(0, 3) : [];
+  var cards = (placedCandidates.length ? placedCandidates : candidates).map(function(c) {
+    var dir = c.direction || c.mtfDirection || c.dir || 'NEUTRAL';
     var dirColor = dir === 'LONG' ? '#3fb950' : dir === 'SHORT' ? '#f85149' : '#e3b341';
     var mtf = (c.mtfAlignment || 0) + '/4 TF';
     var conf = c.confluencePct != null ? c.confluencePct + '%' : '--';
-    var reasons = Array.isArray(c.evidence) ? c.evidence.slice(0, 4).join(' · ') : '';
-    return '<div style="display:inline-block;vertical-align:top;min-width:180px;max-width:31%;margin:4px 6px 0 0;padding:5px 7px;border:1px solid #21262d;border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
-      + '<b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
+    var reasonsArray = Array.isArray(c.signalReasons) && c.signalReasons.length ? c.signalReasons : c.evidence;
+    var reasons = Array.isArray(reasonsArray) ? reasonsArray.slice(0, 4).join(' · ') : '';
+    var ind = c.indicators || (c.mtf && c.mtf.M15 && c.mtf.M15.indicators) || {};
+    var scores = c.signalScores || (c.scoreBreakdown && c.scoreBreakdown.signalScores) || {};
+    var isPlaced = c.status === 'PENDING' || c.status === 'OPEN';
+    var levels = isPlaced ? '<div style="font-size:9px;color:#8b949e;margin-top:4px;">Entry <b style="color:#e3b341;">' + sourceEsc(String(c.entryLimit || '--')) + '</b> · SL <b style="color:#f85149;">' + sourceEsc(String(c.sl || '--')) + '</b> · TP1 <b style="color:#3fb950;">' + sourceEsc(String(c.tp1 || '--')) + '</b></div>' : '';
+    var scoreLine = scores.total != null ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">Score ' + sourceEsc(String(scores.total)) + '/100 · Trend ' + sourceEsc(String(scores.trend || 0)) + ' · Mom ' + sourceEsc(String(scores.momentum || 0)) + ' · Deriv ' + sourceEsc(String(scores.derivatives || 0)) + ' · Vol ' + sourceEsc(String(scores.volume || 0)) + '</div>' : '';
+    var indicatorLine = (ind.rsi != null || ind.stochRsiK != null || ind.candlePattern) ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">RSI ' + sourceEsc(String(ind.rsi == null ? '--' : ind.rsi)) + ' · Stoch ' + sourceEsc(String(ind.stochRsiK == null ? '--' : ind.stochRsiK)) + '/' + sourceEsc(String(ind.stochRsiD == null ? '--' : ind.stochRsiD)) + ' · ' + sourceEsc(String(ind.candlePattern || 'no pattern')) + '</div>' : '';
+    return '<div style="display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:7px 8px;border:1px solid ' + (isPlaced ? 'rgba(63,185,80,.35)' : '#21262d') + ';border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
+      + '<div><b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
       + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span>'
-      + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + sourceEsc(reasons || c.dataQuality || '') + '</div></div>';
+      + (isPlaced ? ' <span style="color:#3fb950;">' + sourceEsc(c.status) + '</span>' : '') + '</div>'
+      + levels + scoreLine + indicatorLine
+      + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + sourceEsc(reasons || c.dataQualityReason || c.dataQuality || '') + '</div></div>';
   }).join('');
-  var placed = Array.isArray(scan.placed) ? scan.placed.length : 0;
+  var placed = placedCandidates.length;
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
   el.innerHTML = '<div><b style="color:#8b949e;">Last VPS scan ' + sourceEsc(scan.cycleKey || '') + '</b>'
     + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · candidates ' + (scan.candidates || 0)
