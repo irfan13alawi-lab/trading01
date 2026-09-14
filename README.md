@@ -6,7 +6,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 
 - **Scanner V4.4** — 40+ pairs, funding real dari Bitget+BingX+Gate.io saat Futures
 - **Market selector** — Bitget Futures, Bitget Spot, dan CoinGecko Spot
-- **Paper Bot** — auto-scan 15 menit, limit order otomatis, monitor SL/TP
+- **Paper Bot** — auto-scan 15 menit, limit order otomatis, monitor SL/TP, dan batas risiko agregat
 - **Phase 2 Analysis** — MTF D1→H4→H1→M15, order flow, best setup
 - **Backtest Engine** — single pair + multi 10 pairs dari market yang dipilih
 - **Trading Journal** — equity curve, lesson wall, Kelly Criterion
@@ -59,6 +59,8 @@ market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
 
 Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 `paper-bot-state.json`. Restart normal tidak menghapus trade aktif maupun riwayat.
+Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
+dibatasi 15%; posisi legacy tidak dihapus atau diubah sizing-nya.
 
 ## Struktur File
 

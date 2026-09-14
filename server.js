@@ -10,6 +10,15 @@ const PAPER_MONITOR_MS = 30000;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_PER_SCAN = 3;
 const PAPER_MAX_ACTIVE = 30;
+// Keep the one-week paper sample from becoming a highly leveraged simulation:
+// each new order risks 0.5% of current equity and all active orders together
+// may reserve at most 15%. Existing legacy trades keep their recorded sizing.
+const PAPER_RISK_PCT = Math.max(0.1, Math.min(2,
+  Number.isFinite(Number(process.env.PAPER_RISK_PCT))
+    ? Number(process.env.PAPER_RISK_PCT) : 0.5));
+const PAPER_MAX_ACTIVE_RISK_PCT = Math.max(5, Math.min(50,
+  Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE_RISK_PCT))
+    ? Number(process.env.PAPER_MAX_ACTIVE_RISK_PCT) : 15));
 // Keep enough server history for a normal one-week paper trial. The status
 // endpoint remains lightweight; /paper/history serves the full retained set.
 const PAPER_MAX_CLOSED_TRADES = 5000;
@@ -437,7 +446,7 @@ function paperSetup(pair) {
   const sl = entry * (dir === 'LONG' ? 0.97 : 1.03);
   const tp1 = entry * (dir === 'LONG' ? 1.06 : 0.94);
   const tp2 = entry * (dir === 'LONG' ? 1.10 : 0.90);
-  const riskDollar = paperEquity() * 0.02;
+  const riskDollar = paperEquity() * PAPER_RISK_PCT / 100;
   const stopDistance = Math.abs(entry - sl);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
@@ -447,7 +456,9 @@ function paperSetup(pair) {
     tp1: paperRoundPrice(tp1),
     tp2: paperRoundPrice(tp2),
     contracts: Number(contracts.toFixed(6)),
-    size: Number((contracts * entry).toFixed(2))
+    size: Number((contracts * entry).toFixed(2)),
+    riskPct: PAPER_RISK_PCT,
+    riskDollar: Number(riskDollar.toFixed(2))
   };
 }
 
@@ -472,6 +483,20 @@ function paperEquity() {
     paperRealizedPnl() + paperUnrealizedPnl();
 }
 
+function paperTradeRiskDollar(trade) {
+  const entry = paperNumber(trade.entryActual || trade.entryLimit);
+  const stop = paperNumber(trade.sl);
+  const size = Math.abs(paperNumber(trade.size));
+  if (!entry || !stop || !size) return 0;
+  return Math.abs(entry - stop) / entry * size;
+}
+
+function paperActiveRiskDollar() {
+  return paperState.activeTrades
+    .filter(trade => trade.status === 'PENDING' || trade.status === 'OPEN')
+    .reduce((sum, trade) => sum + paperTradeRiskDollar(trade), 0);
+}
+
 function paperTradeView(trade) {
   return {
     id: trade.id, sym: trade.sym, dir: trade.dir, status: trade.status,
@@ -484,6 +509,8 @@ function paperTradeView(trade) {
     unrealPnl: Number((trade.unrealPnl || 0).toFixed(2)),
     mfePnl: Number((trade.mfePnl || 0).toFixed(2)),
     maePnl: Number((trade.maePnl || 0).toFixed(2)),
+    riskPct: trade.riskPct || null,
+    riskDollar: Number(paperTradeRiskDollar(trade).toFixed(2)),
     executionModel: trade.executionModel || 'LEGACY_TOLERANCE', reason: trade.reason
   };
 }
@@ -641,7 +668,15 @@ async function runPaperScan(reason, requestedCycleKey) {
     const activeSymbols = new Set(paperState.activeTrades
       .filter(t => t.status === 'PENDING' || t.status === 'OPEN')
       .map(t => t.sym));
-    const capacity = Math.max(0, PAPER_MAX_ACTIVE - paperActiveCount());
+    const equity = paperEquity();
+    const activeRisk = paperActiveRiskDollar();
+    const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
+    const perTradeRisk = equity * PAPER_RISK_PCT / 100;
+    const riskSlots = perTradeRisk > 0
+      ? Math.floor(Math.max(0, riskBudget - activeRisk) / perTradeRisk)
+      : 0;
+    const capacity = Math.min(
+      Math.max(0, PAPER_MAX_ACTIVE - paperActiveCount()), riskSlots);
     const selected = [];
     for (const pair of ranked) {
       if (selected.length >= Math.min(PAPER_PER_SCAN, capacity)) break;
@@ -657,6 +692,7 @@ async function runPaperScan(reason, requestedCycleKey) {
         id, sym: pair.sym, dir: setup.dir, entryLimit: setup.entry,
         currentPrice: pair.price, sl: setup.sl, tp1: setup.tp1, tp2: setup.tp2,
         size: setup.size, contracts: setup.contracts, status: 'PENDING',
+        riskPct: setup.riskPct, riskDollar: setup.riskDollar,
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, mtf: pair.mtf,
@@ -800,6 +836,10 @@ function paperStatus() {
     realizedPnl: Number(realizedPnl.toFixed(2)),
     unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
     equity: Number(equity.toFixed(2)),
+    riskPct: PAPER_RISK_PCT,
+    maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
+    activeRisk: Number(paperActiveRiskDollar().toFixed(2)),
+    riskBudget: Number((equity * PAPER_MAX_ACTIVE_RISK_PCT / 100).toFixed(2)),
     alerts: {telegram: TELEGRAM_ALERTS_ENABLED},
     lastScanAt: paperState.lastScanAt, lastCycleKey: paperState.lastCycleKey,
     nextScanAt: new Date(paperNextQuarter(Date.now())).toISOString(),
