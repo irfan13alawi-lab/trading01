@@ -4223,6 +4223,7 @@ function applyServerClosedTrades(closedTrades) {
   G.vpsCancelled = rawAll.filter(function(t){ return t.outcome === 'CANCELLED'; }).map(function(t){
     return {sym:t.sym || '?', dir:t.dir || 'LONG', tf:t.timeframe || t.tf || '15M',
       timeframe:t.timeframe || t.tf || '15M', outcome:'CANCELLED',
+      strategyVersion:t.strategyVersion || '', cohortId:t.cohortId || '',
       closeReason:t.closeReason || '', dateKey:t.closedAt || t.createdAt || '',
       createdAt:t.createdAt || 0, closedAt:t.closedAt || '', openedAt:t.openedAt || ''};
   });
@@ -4247,6 +4248,7 @@ function applyServerClosedTrades(closedTrades) {
       dateKey: t.closedAt || '',
        executionModel: t.executionModel || 'LEGACY_TOLERANCE',
        executionClass: t.executionClass || (t.executionModel === 'LIMIT_STRICT' ? 'STRICT' : 'LEGACY'),
+       strategyVersion: t.strategyVersion || '', cohortId: t.cohortId || '',
        dataQuality: t.dataQuality || '',
        dataQualityReason: t.dataQualityReason || '',
        signalReasons: Array.isArray(t.signalReasons) ? t.signalReasons : [],
@@ -4254,8 +4256,9 @@ function applyServerClosedTrades(closedTrades) {
       openedAt: t.openedAt || '',
       closedAt: t.closedAt || '',
       durationMs: t.openedAt && t.closedAt ? Math.max(0, new Date(t.closedAt) - new Date(t.openedAt)) : 0,
-      mfePnl: Number(t.mfePnl || 0),
-      maePnl: Number(t.maePnl || 0),
+       mfePnl: Number(t.mfePnl || 0),
+       maePnl: Number(t.maePnl || 0),
+       tp1Hit: !!t.tp1Hit, realizedPnlTp1: Number(t.realizedPnlTp1 || 0),
       outcome: t.outcome || 'BE',
       exitReason: t.closeReason || '',
       good: t.outcome === 'WIN' ? 'Paper Bot VPS reached target' : '',
@@ -4287,8 +4290,8 @@ function renderServerPaperScan(status) {
     var reasons = Array.isArray(reasonsArray) ? reasonsArray.slice(0, 4).join(' · ') : '';
     var ind = c.indicators || (c.mtf && c.mtf.M15 && c.mtf.M15.indicators) || {};
     var scores = c.signalScores || (c.scoreBreakdown && c.scoreBreakdown.signalScores) || {};
-    var isPlaced = c.status === 'PENDING' || c.status === 'OPEN';
-    var levels = isPlaced ? '<div style="font-size:9px;color:#8b949e;margin-top:4px;">Entry <b style="color:#e3b341;">' + sourceEsc(String(c.entryLimit || '--')) + '</b> · SL <b style="color:#f85149;">' + sourceEsc(String(c.sl || '--')) + '</b> · TP1 <b style="color:#3fb950;">' + sourceEsc(String(c.tp1 || '--')) + '</b></div>' : '';
+    var isPlaced = c.status === 'PENDING' || c.status === 'OPEN' || c.status === 'TP1_PARTIAL';
+    var levels = isPlaced ? '<div style="font-size:9px;color:#8b949e;margin-top:4px;">Entry <b style="color:#e3b341;">' + sourceEsc(String(c.entryLimit || '--')) + '</b> · SL <b style="color:#f85149;">' + sourceEsc(String(c.slAfterTp1 || c.sl || '--')) + '</b> · TP1 <b style="color:#3fb950;">' + sourceEsc(String(c.tp1 || '--')) + '</b> · TP2 <b style="color:#3fb950;">' + sourceEsc(String(c.tp2 || '--')) + '</b>' + (c.remainingSize != null ? ' · rem ' + sourceEsc(String(c.remainingSize)) : '') + '</div>' : '';
     var scoreLine = scores.total != null ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">Score ' + sourceEsc(String(scores.total)) + '/100 · Trend ' + sourceEsc(String(scores.trend || 0)) + ' · Mom ' + sourceEsc(String(scores.momentum || 0)) + ' · Deriv ' + sourceEsc(String(scores.derivatives || 0)) + ' · Vol ' + sourceEsc(String(scores.volume || 0)) + '</div>' : '';
     var indicatorLine = (ind.rsi != null || ind.stochRsiK != null || ind.candlePattern) ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">RSI ' + sourceEsc(String(ind.rsi == null ? '--' : ind.rsi)) + ' · Stoch ' + sourceEsc(String(ind.stochRsiK == null ? '--' : ind.stochRsiK)) + '/' + sourceEsc(String(ind.stochRsiD == null ? '--' : ind.stochRsiD)) + ' · ' + sourceEsc(String(ind.candlePattern || 'no pattern')) + '</div>' : '';
     return '<div style="display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:7px 8px;border:1px solid ' + (isPlaced ? 'rgba(63,185,80,.35)' : '#21262d') + ';border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
@@ -4300,9 +4303,16 @@ function renderServerPaperScan(status) {
   }).join('');
   var placed = placedCandidates.length;
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
+  var trialInfo = (status.strategyVersion || 'MTF_ATR_V2') + ' · cohort ' + (status.cohortId || '--');
+  var guardInfo = 'daily ' + Number(status.dailyLossR || 0).toFixed(2) + 'R/' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R';
+  var rejectionCodes = [];
+  (Array.isArray(scan.rejected) ? scan.rejected : []).forEach(function(item){
+    (Array.isArray(item.codes) ? item.codes : []).forEach(function(code){ rejectionCodes.push(code); });
+  });
+  var rejectionInfo = rejectionCodes.length ? ' · rejected ' + rejectionCodes.length + ' (' + rejectionCodes.slice(0, 4).join(', ') + ')' : '';
   el.innerHTML = '<div><b style="color:#8b949e;">Last VPS scan ' + sourceEsc(scan.cycleKey || '') + '</b>'
     + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · candidates ' + (scan.candidates || 0)
-    + ' · placed ' + placed + ' · ' + sourceEsc(reason) + '</span></div>'
+    + ' · placed ' + placed + ' · ' + sourceEsc(reason) + ' · ' + sourceEsc(trialInfo) + ' · ' + sourceEsc(guardInfo) + sourceEsc(rejectionInfo) + '</span></div>'
     + (cards || '<span style="color:#484f58;">No candidate detail</span>');
 }
 
@@ -4347,25 +4357,30 @@ function applyServerPaperStatus(status, announce) {
     var riskMax = Number(status.riskBudget || 0);
     riskGuard.textContent = '$' + riskNow.toFixed(2) + ' / $' + riskMax.toFixed(2);
     riskGuard.style.color = riskNow <= riskMax ? '#3fb950' : '#f85149';
-    riskGuard.title = 'Risk strict aktif; legacy: $' + Number(status.legacyActiveRisk || 0).toFixed(2);
+    riskGuard.title = 'Risk cohort ' + (status.strategyVersion || 'MTF_ATR_V2') + ': $' + riskNow.toFixed(2)
+      + ' | PRE_UPGRADE: $' + Number(status.preUpgradeActiveRisk || 0).toFixed(2)
+      + ' | LEGACY: $' + Number(status.legacyActiveRisk || 0).toFixed(2);
   }
   var guard = document.getElementById('bot-guard');
   if(guard) {
     var strictCount = Number(status.strictActiveCount || 0);
     var legacyCount = Number(status.legacyActiveCount || 0);
+    var preUpgradeCount = Number(status.preUpgradeActiveCount || 0);
     var reasonMap = {
       MAX_ACTIVE_REACHED: 'batas posisi bot baru tercapai',
       RISK_BUDGET_REACHED: 'risk budget bot baru tercapai',
       NO_CAPACITY: 'kapasitas belum tersedia',
       NO_VALID_UNALLOCATED_SETUP: 'tidak ada setup baru yang valid',
       NO_VALID_MTF_SETUP: 'tidak ada setup MTF yang memenuhi syarat',
+      DAILY_DRAWDOWN_GUARD: 'daily drawdown guard aktif',
+      DIRECTION_RISK_FULL: 'risk satu arah sudah penuh',
       STALE_DATA: 'data candle sudah stale',
       PARTIAL_CAPACITY: 'sebagian slot tersedia'
     };
     var guardReason = !serverRunning ? 'service VPS berhenti'
       : (status.blockReason ? (reasonMap[status.blockReason] || status.blockReason) : 'siap menerima setup baru');
-    guard.textContent = 'Guard: ' + guardReason + ' · Strict ' + strictCount + '/' + (status.maxConcurrent || 30)
-      + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1);
+    guard.textContent = 'Guard: ' + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
+      + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1);
     guard.style.color = !serverRunning ? '#f85149' : (status.blockReason ? '#e3b341' : '#3fb950');
     if(status.lastError) guard.title = 'Last error: ' + status.lastError;
   }
@@ -4876,17 +4891,18 @@ function updateActiveTradesPanel() {
   var botTrades = BOT.activeTrades.filter(function(t){ return !isLegacy(t); });
   var legacyTrades = BOT.activeTrades.filter(isLegacy);
   var open   = botTrades.filter(function(t){return t.status==='OPEN';});
+  var partial= botTrades.filter(function(t){return t.status==='TP1_PARTIAL';});
   var pending= botTrades.filter(function(t){return t.status==='PENDING';});
   var closed = BOT.activeTrades.filter(function(t){return t.status==='CLOSED';});
 
   // Update header counts
   var cnt = document.getElementById('bot-trade-cnt');
-  if(cnt) cnt.textContent = open.length + ' open / ' + pending.length + ' pending';
+  if(cnt) cnt.textContent = open.length + ' open / ' + partial.length + ' partial / ' + pending.length + ' pending';
   var legacyCnt = document.getElementById('bot-legacy-count');
   if(legacyCnt) legacyCnt.textContent = legacyTrades.filter(function(t){return t.status==='OPEN'||t.status==='PENDING';}).length;
 
   // Unrealized PnL
-  var totalUnreal = open.reduce(function(s,t){return s+(t.unrealPnl||0);}, 0);
+  var totalUnreal = open.concat(partial).reduce(function(s,t){return s+(t.unrealPnl||0);}, 0);
   var upnl = document.getElementById('bot-upnl');
   if(upnl) {
     upnl.textContent = (totalUnreal>=0?'+':'') + '$' + totalUnreal.toFixed(2);
@@ -4894,7 +4910,7 @@ function updateActiveTradesPanel() {
   }
 
   // Total exposure
-  var exposure = open.reduce(function(s,t){return s+t.size;}, 0);
+  var exposure = open.concat(partial).reduce(function(s,t){return s+(t.remainingSize != null ? t.remainingSize : t.size);}, 0);
   var expEl = document.getElementById('bot-exposure');
   if(expEl) expEl.textContent = '$' + exposure.toFixed(0);
 
@@ -4902,7 +4918,7 @@ function updateActiveTradesPanel() {
   var listEl = document.getElementById('bot-trades-list');
   if(!listEl) return;
 
-  var allActive = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='PENDING';});
+  var allActive = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL'||t.status==='PENDING';});
   if(!allActive.length) {
     listEl.innerHTML = '<div style="color:#484f58;font-size:10px;padding:4px 0;">No active trades</div>';
     return;
@@ -4912,9 +4928,9 @@ function updateActiveTradesPanel() {
     var price = t.currentPrice || t.entryLimit;
     var priceStr = price >= 1000 ? '$'+Math.round(price).toLocaleString('en') : '$'+price.toFixed(price>=1?3:5);
     var entryStr = t.entryLimit >= 1000 ? '$'+Math.round(t.entryLimit).toLocaleString('en') : '$'+t.entryLimit.toFixed(t.entryLimit>=1?3:5);
-    var statusCol = t.status==='OPEN'?'#3fb950':t.status==='PENDING'?'#e3b341':'#484f58';
+    var statusCol = t.status==='OPEN'?'#3fb950':t.status==='TP1_PARTIAL'?'#58a6ff':t.status==='PENDING'?'#e3b341':'#484f58';
     var unreal = t.unrealPnl || 0;
-    var unrealStr = t.status==='OPEN' ? ' | PnL: <span style="color:'+(unreal>=0?'#3fb950':'#f85149')+'">'+(unreal>=0?'+':'')+'$'+unreal.toFixed(2)+'</span>' : '';
+    var unrealStr = (t.status==='OPEN' || t.status==='TP1_PARTIAL') ? ' | PnL: <span style="color:'+(unreal>=0?'#3fb950':'#f85149')+'">'+(unreal>=0?'+':'')+'$'+unreal.toFixed(2)+'</span>' : '';
     var cancelBtn = G.paperServer ? '' : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
     var classLabel = isLegacy(t) ? 'LEGACY' : 'STRICT';
     var classColor = isLegacy(t) ? '#8b949e' : '#58a6ff';
@@ -4923,12 +4939,13 @@ function updateActiveTradesPanel() {
     var reasonTitle = Array.isArray(t.signalReasons) ? t.signalReasons.join(' · ') : '';
     return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;">'
       + '<span style="color:'+statusCol+';font-size:9px;min-width:50px;">'+t.status+'</span>'
-      + '<span style="color:'+classColor+';font-size:8px;min-width:38px;">'+classLabel+'</span>'
+      + '<span style="color:'+classColor+';font-size:8px;min-width:38px;">'+(t.strategyVersion==='PRE_UPGRADE'?'PRE-UP':isLegacy(t)?'LEGACY':'MTF V2')+'</span>'
       + '<b>'+t.sym+'</b>'
       + '<span style="color:#8b949e;" title="'+sourceEsc(reasonTitle)+'">'+sourceEsc(t.dir||'')+sourceEsc(mtf)+sourceEsc(conf)+'</span>'
       + '<span style="color:#484f58;">Lmt: '+entryStr+'</span>'
-      + '<span style="color:#484f58;">SL: <span style="color:#f85149;">$'+t.sl+'</span></span>'
-      + '<span style="color:#484f58;">TP: <span style="color:#3fb950;">$'+t.tp1+'</span></span>'
+      + '<span style="color:#484f58;">SL: <span style="color:#f85149;">$'+(t.slAfterTp1||t.sl)+'</span></span>'
+      + '<span style="color:#484f58;">TP: <span style="color:#3fb950;">$'+(t.status==='TP1_PARTIAL'?t.tp2:t.tp1)+'</span></span>'
+      + (t.status==='TP1_PARTIAL' ? '<span style="color:#58a6ff;">TP1 '+(t.tp1ClosePct||50)+'%</span>' : '')
       + unrealStr
       + cancelBtn
       + '</div>';

@@ -6,14 +6,14 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 
 - **Scanner V4.4** — 40+ pairs, funding real dari Bitget+BingX+Gate.io saat Futures
 - **Market selector** — Bitget Futures, Bitget Spot, dan CoinGecko Spot
-- **Paper Bot** — auto-scan 15 menit, MTF 4H/1H/30M/15M, indikator server-side, confluence gate, limit order otomatis, monitor SL/TP, dan batas risiko agregat
+- **Paper Bot** — auto-scan 15 menit, MTF 4H/1H/30M/15M, indikator server-side, confluence gate, limit order otomatis, monitor candle 1M, partial TP1/TP2, dan batas risiko agregat
 - **Phase 2 Analysis** — MTF D1→H4→H1→M15, order flow, best setup
 - **Backtest Engine** — single pair + multi 10 pairs dari market yang dipilih
 - **Trading Journal** — equity curve, lesson wall, Kelly Criterion
 - **Telegram Alert** — notifikasi server-side ke HP saat scan, limit fill, posisi ditutup, dan guard aktif
 - **Persistence** — state Paper Bot tersimpan atomik di VPS dengan backup `.bak`; jurnal browser punya export JSON/CSV
 - **Health & evidence** — status sumber `LIVE`/`DELAYED`/`ERROR`, timestamp, alasan sinyal, volume ratio, dan MTF
-- **Paper analytics** — profit factor, expectancy, drawdown, fill rate, pending expired, waktu fill, MFE/MAE, serta breakdown symbol/arah/timeframe/score
+- **Paper analytics** — profit factor, expectancy, drawdown, fill rate, pending expired, waktu fill, MFE/MAE, TP1/TP2, stop loss, cohort, strategy version, candle pattern, serta breakdown symbol/arah/timeframe/score
 
 ## Data Sources
 
@@ -63,6 +63,10 @@ market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
 
 Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 `paper-bot-state.json`. Restart normal tidak menghapus trade aktif maupun riwayat.
+Setiap order baru diberi `strategyVersion` dan `cohortId`, sehingga hasil trial
+baru dapat dibandingkan terpisah dari posisi lama. Trade lama diberi label
+`PRE_UPGRADE` atau `LEGACY`, tetap terlihat, tetapi tidak memakai slot maupun
+risk budget cohort baru.
 Sebelum order dibuat, kandidat wajib memiliki candle MTF 4H/1H/30M/15M lengkap,
 minimal 3 dari 4 timeframe searah, dan confluence default minimal 60%. Arah order
 ditentukan oleh MTF, bukan hanya perubahan 24 jam. Server menyimpan indikator,
@@ -70,20 +74,37 @@ support/resistance, ATR, kualitas data (`FULL`, `PARTIAL`, `STALE`, atau `REJECT
 dan alasan sinyal pada trade. Candle yang melewati batas freshness per timeframe
 ditolak dari auto-order agar data basi tidak ikut dieksekusi.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
-dibatasi 15%; posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak
-mengambil slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak
-menambah exposure yang tidak disengaja. Setup dengan entry/SL/TP invalid tidak
-akan dibuat menjadi paper order.
+dibatasi 15%, risiko satu arah dibatasi 10%, dan daily loss guard default 3R;
+posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak mengambil
+slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak menambah
+exposure yang tidak disengaja. Setup dengan entry/SL/TP invalid tidak akan dibuat
+menjadi paper order. Entry, SL, dan TP memakai ATR serta swing/pivot structure
+dan dibulatkan mengikuti tick size kontrak Bitget bila metadata tersedia.
+
+Setelah order limit dibuat, statusnya `PENDING`. Fill hanya terjadi bila range
+candle 1M tertutup menyentuh limit (`1M_HIGH_LOW`), bukan hanya karena ticker
+terakhir melewati level. Saat TP1 tersentuh, default 50% posisi direalisasikan,
+SL sisa dipindahkan ke breakeven, dan status berubah `TP1_PARTIAL`; TP2 menutup
+sisa posisi. Jika high/low candle menyentuh SL dan TP sekaligus, server memakai
+aturan konservatif SL lebih dulu. Pending yang tidak fill setelah 120 menit
+dibatalkan otomatis. Semua event dan timestamp candle disimpan.
 
 Parameter MTF dapat disesuaikan melalui environment service bila diperlukan:
 
 ```bash
 PAPER_CANDLE_LIMIT=120
+PAPER_MIN_CANDLES=100
 PAPER_MTF_MIN_ALIGNMENT=3
 PAPER_MIN_CONFLUENCE=60
+PAPER_MIN_SIGNAL_SCORE=70
 PAPER_SIGNAL_MODE=WEIGHTED
-PAPER_MTF_MAX_CANDIDATES=24
+PAPER_MTF_MAX_CANDIDATES=40
 PAPER_MTF_CONCURRENCY=6
+PAPER_STRATEGY_VERSION=MTF_ATR_V2
+PAPER_COHORT_ID=trial-YYYY-MM-DD
+PAPER_TP1_CLOSE_PCT=50
+PAPER_MAX_DAILY_LOSS_R=3
+PAPER_MAX_DIRECTION_RISK_PCT=10
 ```
 
 Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
@@ -91,8 +112,14 @@ Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
 `PAPER_SIGNAL_MODE=WEIGHTED` memberi bobot trigger 15M dan timeframe besar pada
 konfluensi; `CLASSIC` memakai pembobotan alignment yang lebih sederhana. Mode
 yang dipakai disimpan pada setiap trade agar hasilnya bisa dibandingkan.
-Endpoint `/paper/stats` menyajikan statistik paper lengkap dari state VPS; endpoint
-ini tidak mengubah state dan aman dipakai dashboard untuk monitoring.
+Status `/paper/status` juga memisahkan `trialActiveCount`, `preUpgradeActiveCount`,
+`dailyLossR`, `dailyGuard`, `trialStats`, dan metadata cohort. Endpoint
+`/paper/stats` menyajikan statistik paper lengkap dari state VPS, termasuk
+`byStrategyVersion`, `byCohort`, `byCandlePattern`, TP1/TP2, dan median waktu fill;
+filter `strategyVersion` dan `cohortId` tersedia untuk analisis bersih. Endpoint
+`/paper/diagnostics` menampilkan runtime scan/monitor, counter error, alasan
+rejection terstruktur, dan kesehatan semua sumber. Endpoint-endpoint ini tidak
+mengubah state dan aman dipakai dashboard untuk monitoring.
 
 Konfigurasi alert dilakukan hanya pada service VPS, bukan di browser:
 
@@ -112,7 +139,9 @@ tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supa
 riwayat paper trading tetap satu sumber.
 Jika ingin ringkasan Telegram untuk setiap scan 15 menit, tambahkan
 `TELEGRAM_SCAN_SUMMARY=true` ke file environment VPS; default-nya `false`.
-History dan statistik mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
+History dan statistik mendukung filter `symbol`, `timeframe`, `outcome`,
+`strategyVersion`, `cohortId`, `from`, dan `to`. Untuk evaluasi strategi, tunggu
+minimal 50–100 trade cohort baru yang konsisten sebelum mengubah parameter lagi.
 
 Untuk rotasi journal, pasang `nexora-journald.conf` ke
 `/etc/systemd/journald.conf.d/nexora.conf`, reload `systemd-journald`, lalu jalankan
