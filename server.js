@@ -317,12 +317,26 @@ function isStrictPaperTrade(trade) {
   return paperExecutionModel(trade) === 'LIMIT_STRICT';
 }
 
+function isUpgradedPaperTrade(trade) {
+  return isStrictPaperTrade(trade) && trade &&
+    trade.signalScores && typeof trade.signalScores === 'object' &&
+    trade.setupValidation && typeof trade.setupValidation === 'object' &&
+    trade.dataQuality === 'FULL';
+}
+
 function normalisePaperTrade(trade) {
   const next = {...trade};
   next.executionModel = paperExecutionModel(next);
   next.executionClass = isStrictPaperTrade(next) ? 'STRICT' : 'LEGACY';
-  next.signalMode = next.signalMode || (isStrictPaperTrade(next) ? 'WEIGHTED' : 'LEGACY');
-  next.mode = next.mode || next.signalMode;
+  if (isStrictPaperTrade(next) && !isUpgradedPaperTrade(next)) {
+    // Older LIMIT_STRICT records predate the explainable MTF signal schema.
+    // Keep them visible and active, but never mix them into the new strategy
+    // cohort's mode statistics.
+    next.signalMode = 'PRE_UPGRADE';
+  } else {
+    next.signalMode = next.signalMode || (isStrictPaperTrade(next) ? 'WEIGHTED' : 'LEGACY');
+  }
+  next.mode = next.signalMode || next.mode;
   next.timeframe = next.timeframe || next.tf || '15M';
   next.tf = next.tf || next.timeframe;
   if (!Array.isArray(next.signalReasons)) next.signalReasons = [];
@@ -423,6 +437,10 @@ function loadPaperState() {
     // old decimal rules (notably SHIB-like symbols).
     let repairedActive = false;
     state.activeTrades.forEach(trade => {
+      // The fixed 3%/6%/10% bracket below is only a compatibility repair for
+      // pre-upgrade orders. New trades use ATR/structure levels and must keep
+      // those levels across every service restart.
+      if (isUpgradedPaperTrade(trade)) return;
       const entry = paperNumber(trade.entryLimit);
       if (!entry || !trade.dir) return;
       let limitEntry = entry;
