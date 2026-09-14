@@ -2395,6 +2395,15 @@ async function paperReplay(query) {
     trade.events = trade.events.slice(0, 20);
     trade.lastEvent = type;
   };
+  const replayTradeView = trade => ({
+    ...paperTradeView(trade),
+    exitPrice: trade.exitPrice == null ? null : trade.exitPrice,
+    closedAt: trade.closedAt || null,
+    outcome: trade.outcome || null,
+    closeReason: trade.closeReason || null,
+    r: trade.r == null ? null : trade.r,
+    pnl: trade.pnl == null ? null : trade.pnl
+  });
   const closeReplayTrade = (trade, exitPrice, outcome, reason, at) => {
     const closeSize = paperTradeRemainingSize(trade);
     const pnlPart = paperTradePnl(trade, exitPrice, closeSize);
@@ -2408,7 +2417,7 @@ async function paperReplay(query) {
     paperSetRemainingSize(trade, 0); trade.unrealPnl = 0;
     trade.outcome = outcome; trade.closeReason = reason; trade.r = Number(r.toFixed(2));
     trade.pnl = Number(totalPnl.toFixed(2)); event(trade, 'CLOSED', at, exitPrice, reason);
-    trades.push(paperTradeView(trade)); equity += totalPnl; active = null;
+    trades.push(replayTradeView(trade)); equity += totalPnl; active = null;
   };
   const partialReplayTrade = (trade, exitPrice, at) => {
     const currentSize = paperTradeRemainingSize(trade);
@@ -2432,7 +2441,7 @@ async function paperReplay(query) {
           active.status = 'CANCELLED'; active.closedAt = new Date(candleAt).toISOString();
           active.closeReason = 'Pending expired after 120 minutes'; active.outcome = 'CANCELLED';
           event(active, 'PENDING_EXPIRED', candleAt, active.entryLimit, active.closeReason);
-          trades.push(paperTradeView(active)); active = null; continue;
+          trades.push(replayTradeView(active)); active = null; continue;
         }
         const filled = active.dir === 'LONG' ? bar.low <= active.entryLimit : bar.high >= active.entryLimit;
         if (filled) {
