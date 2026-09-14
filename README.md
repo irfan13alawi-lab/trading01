@@ -85,7 +85,7 @@ Setelah order limit dibuat, statusnya `PENDING`. Fill hanya terjadi bila range
 candle 1M tertutup menyentuh limit (`1M_HIGH_LOW`), bukan hanya karena ticker
 terakhir melewati level. Saat TP1 tersentuh, default 50% posisi direalisasikan,
 SL sisa dipindahkan ke breakeven, dan status berubah `TP1_PARTIAL`; TP2 menutup
-sisa posisi. Jika high/low candle menyentuh SL dan TP sekaligus, server memakai
+sisa posisi dan menyimpan `closeStage=CLOSED_TP2`. Jika high/low candle menyentuh SL dan TP sekaligus, server memakai
 aturan konservatif SL lebih dulu. Pending yang tidak fill setelah 120 menit
 dibatalkan otomatis. Semua event dan timestamp candle disimpan.
 
@@ -105,6 +105,8 @@ PAPER_COHORT_ID=trial-YYYY-MM-DD
 PAPER_TP1_CLOSE_PCT=50
 PAPER_MAX_DAILY_LOSS_R=3
 PAPER_MAX_DIRECTION_RISK_PCT=10
+PAPER_MAX_PER_DIRECTION=5
+PAPER_MAX_HIGH_CORR_POSITIONS=10
 ```
 
 Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
@@ -116,6 +118,8 @@ Status `/paper/status` juga memisahkan `trialActiveCount`, `preUpgradeActiveCoun
 `dailyLossR`, `dailyGuard`, `trialStats`, dan metadata cohort. Endpoint
 `/paper/stats` menyajikan statistik paper lengkap dari state VPS, termasuk
 `byStrategyVersion`, `byCohort`, `byCandlePattern`, TP1/TP2, dan median waktu fill;
+plus bucket confluence, funding, volume ratio, median R, hit-rate TP1/TP2/SL,
+dan pending-expired rate;
 filter `strategyVersion` dan `cohortId` tersedia untuk analisis bersih. Endpoint
 `/paper/diagnostics` menampilkan runtime scan/monitor, counter error, alasan
 rejection terstruktur, dan kesehatan semua sumber. Endpoint-endpoint ini tidak
