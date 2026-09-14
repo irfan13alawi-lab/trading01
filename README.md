@@ -41,6 +41,9 @@ open Nexora_V4_Clean.html
 3. Pasang frontend ke `/var/www/html/nexora/index.html` dan restart `nexora-proxy`.
 4. Pastikan dashboard dibuka melalui `http://43.156.52.203:18084/`, lalu tekan `Ctrl+Shift+R`.
 
+Atau jalankan `deploy-vps.sh` dari terminal Ubuntu Remote-SSH untuk mengunduh,
+memasang, me-restart, dan memverifikasi seluruh komponen sekaligus.
+
 File utama frontend hanya satu: `Nexora_V4_Clean.html`.
 
 ## Proxy API VPS
@@ -81,6 +84,8 @@ Untuk menerima peringatan ketika proses atau VPS Paper Bot berhenti, pasang juga
 kedua file service/script ke `/etc/systemd/system` dan aktifkan watchdog. Dashboard
 tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supaya
 riwayat paper trading tetap satu sumber.
+Jika ingin ringkasan Telegram untuk setiap scan 15 menit, tambahkan
+`TELEGRAM_SCAN_SUMMARY=true` ke file environment VPS; default-nya `false`.
 History mendukung filter `symbol`, `timeframe`, `outcome`, `from`, dan `to`.
 
 Untuk rotasi journal, pasang `nexora-journald.conf` ke

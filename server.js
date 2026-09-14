@@ -39,6 +39,7 @@ const PAPER_STARTING_EQUITY = Number(process.env.PAPER_STARTING_EQUITY || 285);
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
+const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 const PAPER_STATE_BACKUP_FILE = PAPER_STATE_FILE + '.bak';
@@ -928,7 +929,11 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.recentScans = paperState.recentScans.slice(0, PAPER_MAX_RECENT_SCANS);
     savePaperState();
     console.log('[paper] scan complete', cycleKey, 'placed', placed.length);
-    if (placed.length) void sendTelegramMessage(paperScanAlert(cycleKey, placed));
+    // Order-bearing scans are always reported. Empty-scan summaries are an
+    // explicit opt-in because they create a recurring message every 15 minutes.
+    if (placed.length || TELEGRAM_SCAN_SUMMARY) {
+      void sendTelegramMessage(paperScanAlert(cycleKey, placed));
+    }
     if (blockReason && !placed.length) void sendTelegramMessage(paperCapacityAlert(paperStatus()));
   } catch (error) {
     paperState.lastError = error.message;
@@ -1089,6 +1094,7 @@ function paperStatus() {
     blockReason,
     alerts: {
       telegram: TELEGRAM_ALERTS_ENABLED,
+      scanSummary: TELEGRAM_SCAN_SUMMARY,
       sent: telegramState.sent,
       lastAttemptAt: telegramState.lastAttemptAt,
       lastSuccessAt: telegramState.lastSuccessAt,
@@ -1191,6 +1197,7 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, JSON.stringify({
       ok: true,
       enabled: TELEGRAM_ALERTS_ENABLED,
+      scanSummary: TELEGRAM_SCAN_SUMMARY,
       sent: telegramState.sent,
       lastAttemptAt: telegramState.lastAttemptAt,
       lastSuccessAt: telegramState.lastSuccessAt,
