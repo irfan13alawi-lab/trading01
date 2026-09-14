@@ -562,6 +562,13 @@ function loadPaperState() {
       const sl = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 0.97 : 1.03));
       const tp1 = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 1.06 : 0.94));
       const tp2 = paperRoundPrice(bracketEntry * (trade.dir === 'LONG' ? 1.10 : 0.90));
+      const existingBracketValid = trade.dir === 'LONG'
+        ? trade.sl < bracketEntry && trade.tp1 > bracketEntry && trade.tp2 > trade.tp1
+        : trade.sl > bracketEntry && trade.tp1 < bracketEntry && trade.tp2 < trade.tp1;
+      // A migration must not rewrite a live pre-upgrade order's bracket. Only
+      // repair records that are actually missing or have an impossible level
+      // ordering; otherwise the historical position remains auditable as-is.
+      if (existingBracketValid) return;
       if (trade.sl !== sl || trade.tp1 !== tp1 || trade.tp2 !== tp2) {
         trade.sl = sl;
         trade.tp1 = tp1;
