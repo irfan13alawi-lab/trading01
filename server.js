@@ -39,7 +39,7 @@ const PAPER_MTF_MAX_CANDIDATES = Math.max(8, Math.min(40,
     ? Number(process.env.PAPER_MTF_MAX_CANDIDATES) : 40));
 const PAPER_MAX_ACTIVE = Math.max(3, Math.min(100,
   Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE))
-    ? Number(process.env.PAPER_MAX_ACTIVE) : 30));
+    ? Number(process.env.PAPER_MAX_ACTIVE) : 80));
 const PAPER_MAX_PER_SYMBOL = Math.max(1, Math.min(3,
   Number.isFinite(Number(process.env.PAPER_MAX_PER_SYMBOL))
     ? Number(process.env.PAPER_MAX_PER_SYMBOL) : 1));
@@ -50,24 +50,24 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
 const PAPER_SCHEMA_VERSION = 3;
-// Keep the one-week paper sample from becoming a highly leveraged simulation:
-// each new order risks 0.5% of current equity and all active orders together
-// may reserve at most 15%. Existing legacy trades keep their recorded sizing.
+// This is still paper-only sizing. The trial can keep up to 80 active records
+// so a one-week sample is not starved by pending orders; live exchange keys
+// are not used by this service. Existing legacy trades keep their sizing.
 const PAPER_RISK_PCT = Math.max(0.1, Math.min(2,
   Number.isFinite(Number(process.env.PAPER_RISK_PCT))
     ? Number(process.env.PAPER_RISK_PCT) : 0.5));
 const PAPER_MAX_ACTIVE_RISK_PCT = Math.max(5, Math.min(50,
   Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE_RISK_PCT))
-    ? Number(process.env.PAPER_MAX_ACTIVE_RISK_PCT) : 15));
+    ? Number(process.env.PAPER_MAX_ACTIVE_RISK_PCT) : 40));
 const PAPER_MAX_DIRECTION_RISK_PCT = Math.max(2, Math.min(30,
   Number.isFinite(Number(process.env.PAPER_MAX_DIRECTION_RISK_PCT))
-    ? Number(process.env.PAPER_MAX_DIRECTION_RISK_PCT) : 10));
-const PAPER_MAX_PER_DIRECTION = Math.max(1, Math.min(20,
+    ? Number(process.env.PAPER_MAX_DIRECTION_RISK_PCT) : 20));
+const PAPER_MAX_PER_DIRECTION = Math.max(1, Math.min(80,
   Number.isFinite(Number(process.env.PAPER_MAX_PER_DIRECTION))
-    ? Number(process.env.PAPER_MAX_PER_DIRECTION) : 5));
-const PAPER_MAX_HIGH_CORR_POSITIONS = Math.max(2, Math.min(30,
+    ? Number(process.env.PAPER_MAX_PER_DIRECTION) : 40));
+const PAPER_MAX_HIGH_CORR_POSITIONS = Math.max(2, Math.min(80,
   Number.isFinite(Number(process.env.PAPER_MAX_HIGH_CORR_POSITIONS))
-    ? Number(process.env.PAPER_MAX_HIGH_CORR_POSITIONS) : 10));
+    ? Number(process.env.PAPER_MAX_HIGH_CORR_POSITIONS) : 80));
 const PAPER_MAX_DAILY_LOSS_R = Math.max(1, Math.min(20,
   Number.isFinite(Number(process.env.PAPER_MAX_DAILY_LOSS_R))
     ? Number(process.env.PAPER_MAX_DAILY_LOSS_R) : 3));
@@ -623,6 +623,7 @@ function loadPaperState() {
 
 let paperState = loadPaperState();
 let paperBusy = false;
+let paperReplayBusy = false;
 let paperStarted = false;
 if (paperState._needsSave) {
   delete paperState._needsSave;
@@ -1014,7 +1015,8 @@ function buildPaperPairs(payload) {
   }).filter(Boolean).sort((a, b) => b.rank - a.rank);
 }
 
-function paperSetup(pair) {
+function paperSetup(pair, options) {
+  const setupOptions = options || {};
   const roundPrice = value => paperRoundPriceForPair(value, pair);
   const dir = pair.mtfDirection || (pair.chg < 0 ? 'SHORT' : 'LONG');
   const m15 = pair.mtf && pair.mtf.M15;
@@ -1064,7 +1066,9 @@ function paperSetup(pair) {
   const tp2 = roundPrice(dir === 'LONG'
     ? Math.max(entry + riskDistance * 3, tp1 * 1.01, nextTarget || 0)
     : Math.min(entry - riskDistance * 3, tp1 * 0.99, nextTarget || Number.POSITIVE_INFINITY));
-  const riskDollar = Math.max(0, paperEquity() * PAPER_RISK_PCT / 100);
+  const sizingEquity = Number.isFinite(Number(setupOptions.equity))
+    ? Number(setupOptions.equity) : paperEquity();
+  const riskDollar = Math.max(0, sizingEquity * PAPER_RISK_PCT / 100);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
@@ -1449,6 +1453,69 @@ async function fetchPaperCandles(sym, granularity, requestedLimit) {
   return closedRows;
 }
 
+// Historical candles for the replay endpoint. Bitget returns the newest page
+// first and limits one response, so page backwards with endTime. Only fully
+// closed candles are retained; the live bot and replay therefore share the
+// same no-lookahead rule.
+async function fetchPaperCandleHistory(sym, granularity, requestedLimit) {
+  const wanted = Math.max(100, Math.min(25000,
+    Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : 1000));
+  const intervalMs = paperGranularityMs(granularity);
+  const rowsByTs = new Map();
+  let endTime = Date.now();
+  let pages = 0;
+  while (rowsByTs.size < wanted && pages < 40) {
+    const pageLimit = Math.min(1000, wanted - rowsByTs.size);
+    const target = APIS['/bitget'] +
+      '/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=' +
+      encodeURIComponent(sym + 'USDT') + '&granularity=' +
+      encodeURIComponent(granularity) + '&limit=' + pageLimit +
+      '&endTime=' + Math.max(0, Math.floor(endTime));
+    const startedAt = Date.now();
+    let result;
+    try {
+      result = await requestUpstream(target);
+      markSourceHealth('/bitget', {
+        ...result, latencyMs: Date.now() - startedAt,
+        path: '/api/v2/mix/market/candles?granularity=' + granularity
+      });
+    } catch (error) {
+      markSourceError('/bitget', error, '/api/v2/mix/market/candles?granularity=' + granularity);
+      throw error;
+    }
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error('Bitget historical candles HTTP ' + result.status);
+    }
+    let payload;
+    try { payload = JSON.parse(result.body); }
+    catch (_) { throw new Error('Bitget historical candles returned invalid JSON'); }
+    if (!payload || payload.code !== '00000' || !Array.isArray(payload.data)) {
+      throw new Error((payload && payload.msg) || 'Bitget historical candles response invalid');
+    }
+    const pageRows = payload.data.map(row => ({
+      ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]),
+      low: Number(row[3]), close: Number(row[4]), volume: Number(row[6] || row[5] || 0)
+    })).filter(row => row.ts > 0 && row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
+      .sort((a, b) => a.ts - b.ts);
+    if (!pageRows.length) break;
+    const now = Date.now();
+    pageRows.forEach(row => {
+      if (row.ts + intervalMs <= now) rowsByTs.set(row.ts, row);
+    });
+    const oldest = pageRows[0].ts;
+    if (!oldest || oldest >= endTime) break;
+    endTime = oldest - 1;
+    pages += 1;
+    if (pageRows.length < pageLimit) break;
+  }
+  const rows = [...rowsByTs.values()].sort((a, b) => a.ts - b.ts).slice(-wanted);
+  rows._nexoraFetchedAt = new Date().toISOString();
+  rows._nexoraCandleIntervalMs = intervalMs;
+  rows._nexoraLatestRawTs = rows.length ? rows[rows.length - 1].ts : null;
+  rows._nexoraLatestClosedTs = rows.length ? rows[rows.length - 1].ts : null;
+  return rows;
+}
+
 async function fetchPaperMonitorBar(sym) {
   const rows = await fetchPaperCandles(sym, '1m', PAPER_MONITOR_CANDLE_LIMIT);
   if (!Array.isArray(rows) || !rows.length) return [];
@@ -1479,7 +1546,8 @@ async function fetchPaperMonitorBars(symbols) {
   return bars;
 }
 
-function paperTimeframeEvidence(rows, timeframe) {
+function paperTimeframeEvidence(rows, timeframe, referenceNow) {
+  const observedAt = Number.isFinite(Number(referenceNow)) ? Number(referenceNow) : Date.now();
   const indicators = paperIndicatorSnapshot(rows);
   if (!indicators) {
     return {
@@ -1494,8 +1562,8 @@ function paperTimeframeEvidence(rows, timeframe) {
   }
   const last = rows[rows.length - 1];
   const intervalMs = rows._nexoraCandleIntervalMs || paperGranularityMs(timeframe);
-  const isClosed = !!last && last.ts > 0 && last.ts + intervalMs <= Date.now();
-  const ageMs = last && last.ts ? Math.max(0, Date.now() - last.ts) : null;
+  const isClosed = !!last && last.ts > 0 && last.ts + intervalMs <= observedAt;
+  const ageMs = last && last.ts ? Math.max(0, observedAt - last.ts) : null;
   const maxAgeMs = PAPER_TIMEFRAME_MAX_AGE_MS[timeframe] || 60 * 60 * 1000;
   const stale = ageMs != null && ageMs > maxAgeMs;
   const complete = indicators.sampleSize >= PAPER_MIN_CANDLES && isClosed;
@@ -1517,7 +1585,8 @@ function paperTimeframeEvidence(rows, timeframe) {
   };
 }
 
-function paperMtfSummary(mtf) {
+function paperMtfSummary(mtf, referenceNow) {
+  const observedAt = Number.isFinite(Number(referenceNow)) ? Number(referenceNow) : Date.now();
   const names = ['H4', 'H1', 'M30', 'M15'];
   const available = names.map(name => mtf[name]).filter(item => item && item.status === 'FULL');
   const staleCount = names.filter(name => mtf[name] && mtf[name].status === 'STALE').length;
@@ -1538,7 +1607,7 @@ function paperMtfSummary(mtf) {
     const item = mtf[name];
     const stamp = item && Date.parse(item.lastClosedCandleAt || item.candleAt || '');
     return item && item.status === 'FULL' && item.isClosed === true &&
-      Number.isFinite(stamp) && stamp <= Date.now();
+      Number.isFinite(stamp) && stamp <= observedAt;
   });
   const averageStrength = available.length
     ? paperMean(available.map(item => item.strengthPct || 0)) : 0;
@@ -1579,8 +1648,8 @@ function paperSignalScores(pair, summary) {
   };
 }
 
-function applyPaperMtf(pair) {
-  const summary = paperMtfSummary(pair.mtf || {});
+function applyPaperMtf(pair, referenceNow) {
+  const summary = paperMtfSummary(pair.mtf || {}, referenceNow);
   pair.mtfAvailable = summary.available;
   pair.mtfStatus = summary.status;
   pair.mtfDirection = summary.direction;
@@ -2201,6 +2270,298 @@ async function monitorPaperTrades() {
   }
 }
 
+function paperReplayParam(query, name) {
+  return query && typeof query.get === 'function' ? query.get(name) : query && query[name];
+}
+
+function paperReplaySlice(rows, asOf, intervalMs) {
+  const source = Array.isArray(rows) ? rows : [];
+  const sliced = source.filter(row => row && row.ts + intervalMs <= asOf);
+  sliced._nexoraFetchedAt = source._nexoraFetchedAt || new Date(asOf).toISOString();
+  sliced._nexoraCandleIntervalMs = intervalMs;
+  sliced._nexoraLatestRawTs = sliced.length ? sliced[sliced.length - 1].ts : null;
+  sliced._nexoraLatestClosedTs = sliced._nexoraLatestRawTs;
+  return sliced;
+}
+
+function paperReplayMetrics(trades) {
+  const all = Array.isArray(trades) ? trades : [];
+  const cancelled = all.filter(trade => trade.outcome === 'CANCELLED');
+  const closed = all.filter(trade => trade.outcome !== 'CANCELLED');
+  const wins = closed.filter(trade => paperNumber(trade.r) > 0);
+  const losses = closed.filter(trade => paperNumber(trade.r) < 0);
+  const netR = closed.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  let cumulative = 0;
+  let peak = 0;
+  let maxDrawdownR = 0;
+  closed.slice().sort((a, b) => (a.closedAt || '').localeCompare(b.closedAt || ''))
+    .forEach(trade => {
+      cumulative += paperNumber(trade.r);
+      peak = Math.max(peak, cumulative);
+      maxDrawdownR = Math.max(maxDrawdownR, peak - cumulative);
+    });
+  const filled = closed.filter(trade => trade.openedAt);
+  const tp1Hits = closed.filter(trade => trade.tp1Hit).length;
+  const tp2Hits = closed.filter(trade => String(trade.closeReason || '').toLowerCase().includes('tp2')).length;
+  const stopLosses = closed.filter(trade => String(trade.closeReason || '').toLowerCase().includes('sl')).length;
+  const grossProfitR = wins.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  const grossLossR = losses.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  const rValues = closed.map(trade => paperNumber(trade.r)).sort((a, b) => a - b);
+  const median = rValues.length ? (rValues.length % 2
+    ? rValues[(rValues.length - 1) / 2]
+    : (rValues[rValues.length / 2 - 1] + rValues[rValues.length / 2]) / 2) : 0;
+  const average = values => values.length
+    ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const medianValue = values => {
+    if (!values.length) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle]
+      : (sorted[middle - 1] + sorted[middle]) / 2;
+  };
+  const fillTimes = filled.map(trade => Math.max(0,
+    (Date.parse(trade.openedAt) || 0) - (Number(trade.createdAt) || 0))).filter(Boolean);
+  const durations = closed.map(trade => Math.max(0,
+    (Date.parse(trade.closedAt) || 0) - (Date.parse(trade.openedAt) || 0))).filter(Boolean);
+  return {
+    sample: {
+      orders: all.length, closed: closed.length, filled: filled.length,
+      pendingExpired: cancelled.length, cancelled: cancelled.length,
+      wins: wins.length, losses: losses.length,
+      breakeven: closed.filter(trade => paperNumber(trade.r) === 0).length
+    },
+    metrics: {
+      winRate: closed.length ? Number((wins.length / closed.length * 100).toFixed(1)) : 0,
+      netR: Number(netR.toFixed(2)), averageR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
+      medianR: Number(median.toFixed(3)), expectancyR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
+      profitFactor: grossLossR < 0 ? Number((grossProfitR / Math.abs(grossLossR)).toFixed(2)) : null,
+      maxDrawdownR: Number(maxDrawdownR.toFixed(2)), grossProfitR: Number(grossProfitR.toFixed(2)),
+      grossLossR: Number(grossLossR.toFixed(2)), pnl: Number(closed.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0).toFixed(2)),
+      fillRate: all.length ? Number((filled.length / all.length * 100).toFixed(1)) : 0,
+      averageTimeToFillMs: Math.round(average(fillTimes)), medianTimeToFillMs: Math.round(medianValue(fillTimes)),
+      averageDurationMs: Math.round(average(durations)),
+      averageMfePnl: Number(average(closed.map(trade => paperNumber(trade.mfePnl))).toFixed(2)),
+      averageMaePnl: Number(average(closed.map(trade => paperNumber(trade.maePnl))).toFixed(2)),
+      tp1Hits, tp2Hits, stopLosses,
+      tp1HitRate: closed.length ? Number((tp1Hits / closed.length * 100).toFixed(1)) : 0,
+      tp2HitRate: closed.length ? Number((tp2Hits / closed.length * 100).toFixed(1)) : 0,
+      slHitRate: closed.length ? Number((stopLosses / closed.length * 100).toFixed(1)) : 0,
+      pendingExpiredRate: all.length ? Number((cancelled.length / all.length * 100).toFixed(1)) : 0
+    }
+  };
+}
+
+async function paperReplay(query) {
+  const rawSymbol = String(paperReplayParam(query, 'symbol') || 'BTC').toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+  const sym = PAPER_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'BTC';
+  const requestedDays = Number(paperReplayParam(query, 'days'));
+  const days = Math.max(1, Math.min(7, Number.isFinite(requestedDays) ? requestedDays : 3));
+  const endAt = Date.now();
+  const startAt = endAt - days * 24 * 60 * 60 * 1000;
+  const tfSpecs = [
+    ['H4', '4H', 4 * 60 * 60 * 1000], ['H1', '1H', 60 * 60 * 1000],
+    ['M30', '30m', 30 * 60 * 1000], ['M15', '15m', 15 * 60 * 1000]
+  ];
+  const limits = {
+    H4: Math.ceil(days * 6) + PAPER_MIN_CANDLES + 10,
+    H1: Math.ceil(days * 24) + PAPER_MIN_CANDLES + 10,
+    M30: Math.ceil(days * 48) + PAPER_MIN_CANDLES + 10,
+    M15: Math.ceil(days * 96) + PAPER_MIN_CANDLES * 16 + 10,
+    M1: Math.ceil(days * 1440) + 10
+  };
+  const histories = {};
+  for (const [name, granularity] of tfSpecs) {
+    histories[name] = await fetchPaperCandleHistory(sym, granularity, limits[name]);
+  }
+  histories.M1 = await fetchPaperCandleHistory(sym, '1m', limits.M1);
+  const instruments = await fetchPaperInstruments().catch(() => new Map());
+  const pairInstrument = instruments && instruments.get ? instruments.get(sym) : null;
+  const m15Rows = histories.M15;
+  const minuteRows = histories.M1;
+  const trades = [];
+  const scans = [];
+  const rejectionCounts = {};
+  let active = null;
+  let minuteCursor = 0;
+  let equity = Number(PAPER_STARTING_EQUITY);
+  let placed = 0;
+  let eligibleSignals = 0;
+
+  const event = (trade, type, at, price, reason) => {
+    if (!Array.isArray(trade.events)) trade.events = [];
+    trade.events.unshift({type, at: new Date(at).toISOString(), price: price == null ? null : price,
+      candleAt: new Date(at).toISOString(), reason: reason || null});
+    trade.events = trade.events.slice(0, 20);
+    trade.lastEvent = type;
+  };
+  const closeReplayTrade = (trade, exitPrice, outcome, reason, at) => {
+    const closeSize = paperTradeRemainingSize(trade);
+    const pnlPart = paperTradePnl(trade, exitPrice, closeSize);
+    const totalPnl = paperNumber(trade.realizedPnl) + pnlPart;
+    const initialRisk = paperTradeInitialRiskDollar(trade);
+    const r = initialRisk > 0 ? totalPnl / initialRisk : 0;
+    trade.status = 'CLOSED'; trade.closeStage = String(reason).toLowerCase().includes('tp2')
+      ? 'CLOSED_TP2' : trade.tp1Hit ? 'CLOSED_AFTER_TP1' : 'CLOSED_DIRECT';
+    trade.exitPrice = exitPrice; trade.closedAt = new Date(at).toISOString();
+    trade.realizedPnl = totalPnl; trade.realizedPnlFinal = Number(pnlPart.toFixed(2));
+    paperSetRemainingSize(trade, 0); trade.unrealPnl = 0;
+    trade.outcome = outcome; trade.closeReason = reason; trade.r = Number(r.toFixed(2));
+    trade.pnl = Number(totalPnl.toFixed(2)); event(trade, 'CLOSED', at, exitPrice, reason);
+    trades.push(paperTradeView(trade)); equity += totalPnl; active = null;
+  };
+  const partialReplayTrade = (trade, exitPrice, at) => {
+    const currentSize = paperTradeRemainingSize(trade);
+    const closePct = PAPER_TP1_CLOSE_PCT;
+    const closeSize = currentSize * closePct / 100;
+    const pnlPart = paperTradePnl(trade, exitPrice, closeSize);
+    trade.realizedPnlTp1 = paperNumber(trade.realizedPnlTp1) + pnlPart;
+    trade.realizedPnl = paperNumber(trade.realizedPnl) + pnlPart;
+    trade.tp1Hit = true; trade.tp1HitAt = new Date(at).toISOString();
+    trade.slAfterTp1 = trade.entryActual || trade.entryLimit;
+    paperSetRemainingSize(trade, currentSize - closeSize);
+    trade.status = 'TP1_PARTIAL'; event(trade, 'TP1_PARTIAL', at, exitPrice, 'TP1 ' + closePct + '%');
+  };
+  const processMinuteBarsUntil = until => {
+    while (minuteCursor < minuteRows.length && minuteRows[minuteCursor].ts + 60000 <= until) {
+      const bar = minuteRows[minuteCursor++];
+      if (!active) continue;
+      const candleAt = bar.ts + 60000;
+      if (active.status === 'PENDING') {
+        if (candleAt >= active.createdAt + PAPER_PENDING_TTL_MS) {
+          active.status = 'CANCELLED'; active.closedAt = new Date(candleAt).toISOString();
+          active.closeReason = 'Pending expired after 120 minutes'; active.outcome = 'CANCELLED';
+          event(active, 'PENDING_EXPIRED', candleAt, active.entryLimit, active.closeReason);
+          trades.push(paperTradeView(active)); active = null; continue;
+        }
+        const filled = active.dir === 'LONG' ? bar.low <= active.entryLimit : bar.high >= active.entryLimit;
+        if (filled) {
+          active.status = 'OPEN'; active.entryActual = active.entryLimit;
+          active.openedAt = new Date(candleAt).toISOString(); active.fillMethod = '1M_HIGH_LOW';
+          active.fillCandleAt = new Date(bar.ts).toISOString(); event(active, 'LIMIT_FILLED', candleAt, active.entryActual);
+        }
+        continue;
+      }
+      const entry = active.entryActual || active.entryLimit;
+      const size = paperTradeRemainingSize(active);
+      active.currentPrice = bar.close; active.unrealPnl = paperTradePnl(active, bar.close, size);
+      const marked = paperNumber(active.realizedPnl) + active.unrealPnl;
+      active.mfePnl = Math.max(paperNumber(active.mfePnl), marked);
+      active.maePnl = Math.min(paperNumber(active.maePnl), marked);
+      const stop = active.status === 'TP1_PARTIAL' ? active.slAfterTp1 : active.sl;
+      const target = active.status === 'TP1_PARTIAL' ? active.tp2 : active.tp1;
+      const stopHit = active.dir === 'LONG' ? bar.low <= stop : bar.high >= stop;
+      const targetHit = active.dir === 'LONG' ? bar.high >= target : bar.low <= target;
+      if (stopHit) {
+        const projected = paperTradePnl(active, stop, size);
+        const projectedR = paperTradeInitialRiskDollar(active) > 0
+          ? (paperNumber(active.realizedPnl) + projected) / paperTradeInitialRiskDollar(active) : 0;
+        closeReplayTrade(active, stop, projectedR > 0.05 ? 'WIN' : projectedR < -0.05 ? 'LOSS' : 'BREAKEVEN',
+          active.tp1Hit ? 'Hit SL after TP1' : 'Hit SL', candleAt);
+      } else if (targetHit && active.status === 'OPEN') {
+        partialReplayTrade(active, active.tp1, candleAt);
+      } else if (targetHit && active.status === 'TP1_PARTIAL') {
+        closeReplayTrade(active, active.tp2, 'WIN', 'Hit TP2', candleAt);
+      }
+    }
+  };
+
+  const recordRejection = code => { rejectionCounts[code] = (rejectionCounts[code] || 0) + 1; };
+  const scanRows = m15Rows.filter(row => row.ts + 15 * 60 * 1000 >= startAt && row.ts + 15 * 60 * 1000 <= endAt);
+  for (const triggerRow of scanRows) {
+    const asOf = triggerRow.ts + 15 * 60 * 1000;
+    processMinuteBarsUntil(asOf);
+    const snapshotRows = {};
+    for (const [name, _, intervalMs] of tfSpecs) {
+      snapshotRows[name] = paperReplaySlice(histories[name], asOf, intervalMs);
+    }
+    const lastM15 = snapshotRows.M15[snapshotRows.M15.length - 1];
+    if (!lastM15 || Object.values(snapshotRows).some(rows => rows.length < PAPER_MIN_CANDLES)) continue;
+    const lookback = snapshotRows.M15.slice(-97, -1);
+    const previousClose = lookback.length ? lookback[0].close : lastM15.close;
+    const chg = previousClose ? (lastM15.close - previousClose) / previousClose * 100 : 0;
+    const pair = {
+      sym, price: lastM15.close, chg, volume: lastM15.volume, fund: 0, oi: 0, oiUSD: 1,
+      oiReady: true, fundingAvailable: true, oiAvailable: true,
+      volumeAvailable: lastM15.volume > 0, volumeRatio: 1, sig: paperSignal(chg, 0, 0),
+      contextScoreBreakdown: paperScoreDetails(chg, 0, 0, true, 1),
+      mtf: {
+        H4: paperTimeframeEvidence(snapshotRows.H4, 'H4', asOf),
+        H1: paperTimeframeEvidence(snapshotRows.H1, 'H1', asOf),
+        M30: paperTimeframeEvidence(snapshotRows.M30, 'M30', asOf),
+        M15: paperTimeframeEvidence(snapshotRows.M15, 'M15', asOf)
+      }
+    };
+    if (pairInstrument) {
+      pair.tickSize = pairInstrument.tickSize; pair.pricePlace = pairInstrument.pricePlace;
+      pair.sizePlace = pairInstrument.sizePlace; pair.minTradeNum = pairInstrument.minTradeNum;
+    }
+    applyPaperMtf(pair, asOf);
+    const scan = {at: new Date(asOf).toISOString(), cycleKey: paperCycleKey(asOf - 1), sym,
+      price: pair.price, direction: pair.mtfDirection, mtfAlignment: pair.mtfAlignment,
+      confluencePct: pair.confluencePct, signalScore: pair.signalScores && pair.signalScores.total,
+      eligible: false, rejectionCodes: []};
+    if (active) { scan.rejectionCodes.push('ACTIVE_POSITION'); recordRejection('ACTIVE_POSITION'); scans.push(scan); continue; }
+    const reject = code => { scan.rejectionCodes.push(code); recordRejection(code); };
+    if (pair.mtfStatus !== 'FULL') reject(pair.mtfStatus === 'STALE' ? 'MTF_STALE' : 'MTF_PARTIAL');
+    else if (pair.mtfDirection === 'NEUTRAL') reject('MTF_NEUTRAL');
+    else if (!pair.mtfSummary.higherAligned) reject('HIGHER_TF_CONFLICT');
+    else if (!pair.mtfSummary.confirmAligned) reject('M30_CONFIRM_CONFLICT');
+    else if (!pair.mtfSummary.triggerAligned) reject('M15_TRIGGER_CONFLICT');
+    else if (pair.mtfAlignment < PAPER_MTF_MIN_ALIGNMENT || pair.confluencePct < PAPER_MIN_CONFLUENCE) reject('CONFLUENCE_LOW');
+    else if (!pair.signalScores || pair.signalScores.total < PAPER_MIN_SIGNAL_SCORE) reject('SIGNAL_SCORE_LOW');
+    else if (pair.dataQuality !== 'FULL') reject('DATA_REJECTED');
+    if (scan.rejectionCodes.length) { scans.push(scan); continue; }
+    const setup = paperSetup(pair, {equity});
+    const validation = validatePaperSetup(pair, setup);
+    if (!validation.ok) { validation.reasonCodes.forEach(reject); scans.push(scan); continue; }
+    eligibleSignals += 1; scan.eligible = true; scan.setupValidation = validation;
+    const id = 'REPLAY-' + String(placed + 1).padStart(5, '0');
+    active = {
+      id, sym, dir: setup.dir, entryLimit: setup.entry, entryActual: null, currentPrice: pair.price,
+      sl: setup.sl, tp1: setup.tp1, tp2: setup.tp2, size: setup.size, originalSize: setup.size,
+      remainingSize: setup.size, contracts: setup.contracts, originalContracts: setup.contracts,
+      remainingContracts: setup.contracts, riskPct: setup.riskPct, riskDollar: setup.riskDollar,
+      riskDollarAtEntry: setup.riskDollar, expectedLossAtSl: validation.expectedLoss,
+      tp1ClosePct: PAPER_TP1_CLOSE_PCT, tp1Hit: false, realizedPnlTp1: 0, realizedPnl: 0,
+      unrealPnl: 0, mfePnl: 0, maePnl: 0, status: 'PENDING', createdAt: asOf,
+      openedAt: null, cycleKey: scan.cycleKey, score: pair.sc, tier: pair.tier, fund: pair.fund,
+      oi: pair.oi, volume: pair.volume, volumeRatio: pair.volumeRatio, mtf: pair.mtf,
+      timeframe: '15M', tf: '15M', mode: 'REPLAY', signalMode: PAPER_SIGNAL_MODE,
+      dataQuality: pair.dataQuality, strategyVersion: PAPER_STRATEGY_VERSION,
+      cohortId: 'replay-' + new Date(startAt).toISOString().slice(0, 10), signalCreatedAt: new Date(asOf).toISOString(),
+      candleAtByTf: Object.fromEntries(tfSpecs.map(([name]) => [name, pair.mtf[name].lastClosedCandleAt])),
+      dataAt: new Date(asOf).toISOString(), source: 'Bitget Futures historical replay',
+      confluencePct: pair.confluencePct, mtfDirection: pair.mtfDirection, mtfAlignment: pair.mtfAlignment,
+      mtfSummary: pair.mtfSummary, indicators: pair.mtf.M15.indicators,
+      candlePattern: pair.mtf.M15.indicators && pair.mtf.M15.indicators.candlePattern,
+      signalScores: pair.signalScores, support: pair.support, resistance: pair.resistance,
+      structureSupport: setup.structureSupport, structureResistance: setup.structureResistance,
+      atr: setup.atr, tickSize: pair.tickSize, pricePlace: pair.pricePlace,
+      signalReasons: paperCandidateView(pair).evidence, scoreBreakdown: pair.scoreBreakdown,
+      setupValidation: validation, executionModel: 'LIMIT_STRICT', executionClass: 'STRICT', events: []
+    };
+    event(active, 'ORDER_PLACED', asOf, setup.entry, 'historical replay'); placed += 1; scans.push(scan);
+  }
+  processMinuteBarsUntil(endAt);
+  const openAtEnd = active ? paperTradeView(active) : null;
+  const calculated = paperReplayMetrics(trades);
+  return {
+    ok: true, strategyVersion: PAPER_STRATEGY_VERSION, executionModel: 'LIMIT_STRICT',
+    sameTechnicalLogic: true, derivativesMode: 'NEUTRAL_REPLAY',
+    source: 'Bitget Futures historical candles', symbol: sym, days,
+    from: new Date(startAt).toISOString(), to: new Date(endAt).toISOString(),
+    candles: Object.fromEntries(Object.entries(histories).map(([name, rows]) => [name, rows.length])),
+    summary: {scans: scans.length, eligibleSignals, placed,
+      closed: trades.filter(t => t.outcome !== 'CANCELLED').length,
+      openAtEnd: openAtEnd ? 1 : 0, expired: trades.filter(t => t.outcome === 'CANCELLED').length},
+    rejectionCounts, sample: calculated.sample, metrics: calculated.metrics,
+    equityCurve: trades.filter(t => t.outcome !== 'CANCELLED').map(t => ({at: t.closedAt, r: t.r, pnl: t.pnl})),
+    scans: scans.slice(-500), trades: trades.slice(-500), openTrade: openAtEnd,
+    note: 'Replay memakai MTF + ATR/structure + limit OHLC 1m + TP1 partial + expiry yang sama. Funding/OI historis dinetralkan karena endpoint historisnya tidak konsisten; hasil ini bukan jaminan profit.'
+  };
+}
+
 function paperStatus() {
   const active = paperState.activeTrades.map(paperTradeView);
   const open = active.filter(t => t.status === 'OPEN').length;
@@ -2342,6 +2703,10 @@ function paperDiagnostics() {
     service: 'nexora-paper-bot',
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: paperState.cohortId,
+    state: status.state,
+    lastScanAt: status.lastScanAt,
+    nextScanAt: status.nextScanAt,
+    lastMonitorAt: status.lastMonitorAt,
     config: {
       interval: '15M', perScan: PAPER_PER_SCAN, pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000,
       minCandles: PAPER_MIN_CANDLES, candleLimit: PAPER_CANDLE_LIMIT,
@@ -2363,6 +2728,7 @@ function paperDiagnostics() {
     bot: {
       enabled: paperState.enabled, running: paperStarted,
       lastScanAt: status.lastScanAt, lastMonitorAt: status.lastMonitorAt,
+      nextScanAt: status.nextScanAt,
       lastPriceAt: status.lastPriceAt, lastError: status.lastError,
       blockReason: status.blockReason, trialActiveCount: status.trialActiveCount,
       preUpgradeActiveCount: status.preUpgradeActiveCount,
@@ -2377,6 +2743,7 @@ function paperHistoryFilters(query) {
   const get = name => typeof params.get === 'function' ? params.get(name) : params[name];
   return {
     symbol: String(get('symbol') || get('sym') || '').trim().toUpperCase(),
+    direction: String(get('direction') || get('dir') || '').trim().toUpperCase(),
     timeframe: String(get('timeframe') || get('tf') || '').trim().toUpperCase(),
     outcome: String(get('outcome') || '').trim().toUpperCase(),
     strategyVersion: String(get('strategyVersion') || get('strategy') || '').trim(),
@@ -2388,6 +2755,7 @@ function paperHistoryFilters(query) {
 
 function paperHistoryMatches(trade, filters) {
   if (filters.symbol && String(trade.sym || '').toUpperCase() !== filters.symbol) return false;
+  if (filters.direction && String(trade.dir || '').toUpperCase() !== filters.direction) return false;
   if (filters.timeframe && String(trade.timeframe || trade.tf || '').toUpperCase() !== filters.timeframe) return false;
   if (filters.outcome && String(trade.outcome || '').toUpperCase() !== filters.outcome) return false;
   if (filters.strategyVersion && String(trade.strategyVersion || paperTradeStrategyVersion(trade)) !== filters.strategyVersion) return false;
@@ -2467,14 +2835,14 @@ function paperStats(query) {
   return {
     ok: true,
     asOf: new Date().toISOString(),
-    filters: {...filters, symbol: filters.symbol || 'all', timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all'},
+    filters: {...filters, symbol: filters.symbol || 'all', direction: filters.direction || 'all', timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all'},
     sample: {
       orders: all.length, closed: closed.length, filled: filled.length,
       pendingExpired: expired.length, cancelled: cancelled.length,
       wins: wins.length, losses: losses.length,
       breakeven: closed.filter(trade => paperNumber(trade.r) === 0).length,
       strategyVersion: filters.strategyVersion || 'all',
-      cohortId: filters.cohortId || 'all'
+      cohortId: filters.cohortId || 'all', direction: filters.direction || 'all'
     },
     metrics: {
       winRate: closed.length ? Number((wins.length / closed.length * 100).toFixed(1)) : 0,
@@ -2538,7 +2906,7 @@ function paperHistory(query) {
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
     filters: {symbol: filters.symbol || 'all', timeframe: filters.timeframe || 'all',
       outcome: filters.outcome || 'all', strategyVersion: filters.strategyVersion || 'all',
-      cohortId: filters.cohortId || 'all', from: filters.from, to: filters.to},
+      cohortId: filters.cohortId || 'all', direction: filters.direction || 'all', from: filters.from, to: filters.to},
     total: closedTrades.length
   };
 }
@@ -2575,6 +2943,8 @@ const server = http.createServer(async (req, res) => {
       paperBot: paperStarted,
       paperBotEnabled: paperState.enabled,
       paperStrategyVersion: PAPER_STRATEGY_VERSION,
+      strategyVersion: PAPER_STRATEGY_VERSION,
+      schemaVersion: PAPER_SCHEMA_VERSION,
       time: new Date().toISOString(),
       sources: sourceHealthView()
     }));
@@ -2610,6 +2980,26 @@ const server = http.createServer(async (req, res) => {
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError
     }));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/replay') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    if (paperReplayBusy) {
+      send(res, 409, JSON.stringify({ok: false, error: 'A replay is already running'}));
+      return;
+    }
+    paperReplayBusy = true;
+    try {
+      send(res, 200, JSON.stringify(await paperReplay(requestUrl.searchParams)));
+    } catch (error) {
+      console.error('[paper] replay failed:', error.message);
+      send(res, 502, JSON.stringify({ok: false, error: error.message}));
+    } finally {
+      paperReplayBusy = false;
+    }
     return;
   }
   if (requestUrl.pathname === '/paper/history') {

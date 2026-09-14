@@ -172,6 +172,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 /* Active trades panel / positions */
 #active-trades-panel{display:none;flex-wrap:wrap;align-items:center;gap:16px;padding:8px 16px;
   background:var(--bg2);border-bottom:1px solid var(--border);font-size:11px;}
+#bot-ops{flex:1 1 100%;padding:6px 0;border-top:1px solid rgba(255,255,255,.05);color:var(--text2);font-size:10px;line-height:1.6;}
 #positions-widget{display:none;}
 .mini-chart{width:100%;height:60px;}
 .mini-ov{position:relative;}
@@ -239,11 +240,12 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
   <div class="hstat"><span class="l">Equity</span><span class="v" id="bot-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
-  <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">30</span></div>
+  <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">80</span></div>
   <div class="hstat"><span class="l">New Slots</span><span class="v" id="bot-new-slots">--</span></div>
   <div class="hstat"><span class="l">Risk Guard</span><span class="v" id="bot-risk-guard">--</span></div>
   <div id="bot-guard" class="muted" style="flex:1 1 100%;color:#e3b341;">Checking capacity guard...</div>
   <div id="bot-last-scan" class="muted" style="flex:1 1 100%;padding:6px 0;border-top:1px solid rgba(255,255,255,.05);">Last VPS scan: checking...</div>
+  <div id="bot-ops">VPS operations: checking diagnostics...</div>
   <div id="bot-trades-list" style="flex:1 1 100%;display:flex;gap:8px;flex-wrap:wrap;"></div>
 </div>
 
@@ -308,6 +310,26 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       </div>
       <div class="chart" id="c-rsi"></div>
       <div class="chart" id="c-macd" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="card" id="vps-signal-chart-card">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-chart-candlestick"></i> VPS Signal Chart <span class="muted" id="vps-chart-status">Select a symbol</span></div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+        <input id="vps-chart-symbol" value="BTC" placeholder="BTC" style="width:80px;text-transform:uppercase;" onchange="loadVpsSignalChart()">
+        <span class="pill on" id="vps-tf-15m" onclick="setVpsChartTf('15m',this)">15M</span>
+        <span class="pill" id="vps-tf-1h" onclick="setVpsChartTf('1H',this)">1H</span>
+        <span class="pill" id="vps-tf-4h" onclick="setVpsChartTf('4H',this)">4H</span>
+        <button class="btn btn-sm btn-blue" onclick="loadVpsSignalChart()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+        <button class="btn btn-sm" onclick="openVpsTradingView()"><i class="fa-solid fa-arrow-up-right-from-square"></i> TradingView</button>
+      </div>
+    </div>
+    <div id="vps-chart-meta" class="muted" style="margin-bottom:6px;">Data candle berasal dari VPS Bitget Futures.</div>
+    <div class="chart" id="vps-price-chart" style="height:360px;"></div>
+    <div class="g2" style="margin-bottom:0;">
+      <div><div class="muted" style="margin:4px 0;">RSI / Stoch RSI</div><div class="chart-sm" id="vps-rsi-chart"></div></div>
+      <div><div class="muted" style="margin:4px 0;">MACD</div><div class="chart-sm" id="vps-macd-chart"></div></div>
     </div>
   </div>
 
@@ -478,6 +500,27 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="kpi"><div class="l">Max DD</div><div class="v" id="e-dd">0R</div></div>
     <div class="kpi"><div class="l">Net R</div><div class="v" id="e-nr">0R</div></div>
     <div class="kpi"><div class="l">Gate <span id="e-gst"></span></div><div class="v" id="e-gate">--</div></div>
+  </div>
+
+  <div class="card" id="vps-stats-panel">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-chart-pie"></i> VPS Cohort Statistics <span class="muted" id="vps-stats-asof">Waiting...</span></div>
+      <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+    </div>
+    <div class="frow" style="grid-template-columns:repeat(7,1fr);">
+      <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
+      <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option><option value="pre_upgrade">PRE_UPGRADE</option><option value="legacy">LEGACY</option></select></div>
+      <div class="fg"><label>Symbol</label><input id="vps-st-symbol" placeholder="All" onchange="pollPaperStats()"></div>
+      <div class="fg"><label>Direction</label><select id="vps-st-direction" onchange="pollPaperStats()"><option value="">All</option><option>LONG</option><option>SHORT</option></select></div>
+      <div class="fg"><label>Timeframe</label><select id="vps-st-tf" onchange="pollPaperStats()"><option value="">All</option><option>15M</option><option>1H</option><option>4H</option></select></div>
+      <div class="fg"><label>From</label><input id="vps-st-from" type="date" onchange="pollPaperStats()"></div>
+      <div class="fg"><label>To</label><input id="vps-st-to" type="date" onchange="pollPaperStats()"></div>
+    </div>
+    <div class="g6" id="vps-stats-kpis" style="margin-bottom:10px;"></div>
+    <div class="g2" style="margin-bottom:0;">
+      <div><div class="muted" style="margin-bottom:4px;">By symbol / direction</div><div id="vps-stats-breakdown"></div></div>
+      <div><div class="muted" style="margin-bottom:4px;">By confluence / score / outcome</div><div id="vps-stats-quality"></div></div>
+    </div>
   </div>
 
   <div class="g2">
@@ -730,6 +773,22 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- ============ BACKTEST ============ -->
 <div class="page" id="p-bt">
+  <div class="card" id="vps-replay-panel">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-clock-rotate-left"></i> VPS Strategy Replay <span class="badge ba">MTF_ATR_V2</span> <span class="muted" id="vps-replay-status">Historical closed-candle test</span></div>
+    </div>
+    <div class="frow" style="grid-template-columns:2fr 1fr auto;align-items:end;">
+      <div class="fg"><label>Symbol</label><input id="vps-replay-symbol" value="BTC" placeholder="BTC"></div>
+      <div class="fg"><label>Days (max 7)</label><select id="vps-replay-days"><option value="1">1 day</option><option value="3" selected>3 days</option><option value="7">7 days</option></select></div>
+      <button class="btn btn-sm btn-blue" id="vps-replay-btn" onclick="runVpsReplay()"><i class="fa-solid fa-play"></i> Run VPS Replay</button>
+    </div>
+    <div id="vps-replay-note" class="muted">Replay memakai candle tertutup, MTF, ATR/structure, strict limit fill dari OHLC 1m, TP1 partial, dan pending expiry.</div>
+    <div class="g6" id="vps-replay-kpis" style="margin-top:10px;"></div>
+    <div class="g2" style="margin-bottom:0;">
+      <div><div class="muted">Replay equity curve</div><div class="chart-sm" id="vps-replay-equity"></div></div>
+      <div><div class="muted">Replay audit / rejection</div><div id="vps-replay-audit" class="log" style="height:180px;"></div></div>
+    </div>
+  </div>
   <div class="card">
     <div class="card-t"><i class="fa-solid fa-vial"></i> Backtest Engine <span class="muted" id="bt-status"></span></div>
     <div class="frow" style="grid-template-columns:repeat(5,1fr);">
@@ -838,7 +897,7 @@ var G = {
   coinId: 'bitcoin', iv: 30,
   refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [], vpsCancelled: [], vpsStats: null,
   scanView: 'grid', scanFocus: 'BTC', marketExchange: 'bitget', marketType: 'futures',
-  charts: {btEq: null, btMon: null},
+  charts: {btEq: null, btMon: null, vpsPrice: null, vpsRsi: null, vpsMacd: null, vpsReplay: null},
   eq: [], trades: [],
   cgKey: '',
   derivs: {},
@@ -879,6 +938,9 @@ var PAPER_API = PROXY_BASE ? PROXY_BASE + '/paper' : '';
 var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
 var paperStatsTimer = null;
+var paperDiagnosticsTimer = null;
+var VPS_CHART_TF = '15m';
+var VPS_CHART_SYMBOL = 'BTC';
 
 // Persist only the user's market view; paper execution remains server-side
 // Bitget Futures and never follows a Spot selection in the browser.
@@ -1860,6 +1922,122 @@ function loadRSI(id) {
     sLog('RSI/MACD '+id+' loaded from '+result.source+'.');
   }).catch(function(e){
     sLog('RSI/MACD '+id+' unavailable: '+(e.message||e));
+  });
+}
+
+// VPS signal chart: this is the audit view for strict paper trades. It uses
+// the same Bitget proxy as the bot and overlays the exact stored trade levels
+// instead of relying on a third-party widget's data feed.
+function vpsChartIntervalMs(tf) {
+  return tf === '4H' ? 4*60*60*1000 : tf === '1H' ? 60*60*1000 : 15*60*1000;
+}
+function vpsChartTrade(sym) {
+  var all = (Array.isArray(BOT.activeTrades) ? BOT.activeTrades : []).concat(Array.isArray(G.vpsClosed) ? G.vpsClosed : []);
+  var rows = all.filter(function(t){ return String(t.sym || '').toUpperCase().replace(/USDT$/,'') === sym; });
+  rows.sort(function(a,b){ return Number(b.createdAt || new Date(b.openedAt || b.closedAt || 0).getTime() || 0) - Number(a.createdAt || new Date(a.openedAt || a.closedAt || 0).getTime() || 0); });
+  return rows[0] || null;
+}
+function vpsChartTradeLines(trade) {
+  if(!trade) return [];
+  var lines = [];
+  function line(value, color, label) {
+    if(value == null || !isFinite(Number(value)) || Number(value) <= 0) return;
+    lines.push({value:Number(value),color:color,width:1,dashStyle:label==='Entry'?'Solid':'Dash',zIndex:5,
+      label:{text:label+' '+String(value),align:'right',x:-4,style:{color:color,fontSize:'9px'}}});
+  }
+  line(trade.entryActual || trade.entryLimit, '#e3b341', 'Entry');
+  line(trade.slAfterTp1 || trade.sl, '#f85149', 'SL');
+  line(trade.tp1, '#3fb950', 'TP1');
+  line(trade.tp2, '#58a6ff', 'TP2');
+  return lines;
+}
+function vpsChartMarkers(trade, rows) {
+  if(!trade || !Array.isArray(rows) || !rows.length) return [];
+  var points = [];
+  function add(at, price, label, color) {
+    var ts = at ? new Date(at).getTime() : 0;
+    var p = Number(price);
+    if(!ts || !isFinite(p) || !p) return;
+    points.push({x:ts,y:p,name:label,color:color,marker:{radius:4,fillColor:color,lineColor:'#0d1117',lineWidth:1}});
+  }
+  add(trade.createdAt, trade.entryLimit, 'ORDER', '#e3b341');
+  add(trade.openedAt, trade.entryActual || trade.entryLimit, 'FILL', '#3fb950');
+  if(trade.tp1HitAt) add(trade.tp1HitAt, trade.tp1, 'TP1', '#58a6ff');
+  add(trade.closedAt, trade.exit || trade.exitPrice, trade.outcome || 'CLOSE', trade.outcome === 'WIN' ? '#3fb950' : '#f85149');
+  if(Array.isArray(trade.events)) trade.events.slice().reverse().forEach(function(e){
+    if(e.type === 'TP1_PARTIAL') add(e.at, e.price, 'TP1', '#58a6ff');
+    if(e.type === 'CLOSED') add(e.at, e.price, 'CLOSE', '#f85149');
+  });
+  return points;
+}
+function setVpsChartTf(tf, btn) {
+  VPS_CHART_TF = tf;
+  document.querySelectorAll('#vps-signal-chart-card .pill').forEach(function(p){p.classList.remove('on');});
+  if(btn) btn.classList.add('on');
+  loadVpsSignalChart();
+}
+function openVpsTradingView() {
+  var sym = (document.getElementById('vps-chart-symbol') || {}).value || VPS_CHART_SYMBOL || 'BTC';
+  sym = sym.toUpperCase().replace(/[^A-Z0-9]/g,'');
+  window.open('https://www.tradingview.com/chart/?symbol=BITGET%3A' + encodeURIComponent(sym + 'USDT'), '_blank', 'noopener');
+}
+function openVpsChartForTrade(sym) {
+  var input = document.getElementById('vps-chart-symbol');
+  if(input) input.value = String(sym || 'BTC').replace(/USDT$/i,'').toUpperCase();
+  loadVpsSignalChart();
+  var panel = document.getElementById('vps-signal-chart-card');
+  if(panel && panel.scrollIntoView) panel.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function loadVpsSignalChart() {
+  if(!PROXY_BASE) return;
+  var input = document.getElementById('vps-chart-symbol');
+  var sym = String(input && input.value || VPS_CHART_SYMBOL || 'BTC').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(!sym) sym = 'BTC';
+  VPS_CHART_SYMBOL = sym;
+  if(input) input.value = sym;
+  var status = document.getElementById('vps-chart-status');
+  if(status) status.textContent = 'Loading ' + sym + ' ' + VPS_CHART_TF + '...';
+  var meta = document.getElementById('vps-chart-meta');
+  var granularity = VPS_CHART_TF === '4H' ? '4H' : VPS_CHART_TF === '1H' ? '1H' : '15m';
+  fetchBitgetCandles(sym, granularity, 180).then(function(raw) {
+    var intervalMs = vpsChartIntervalMs(VPS_CHART_TF);
+    var rows = raw.filter(function(p){ return p && p[0] + intervalMs <= Date.now(); });
+    if(rows.length < 30) throw new Error('Not enough closed candles');
+    var closes = rows.map(function(p){return Number(p[4]);});
+    var ema21 = calcEMA(closes,21).map(function(v,i){return [rows[i][0],v];});
+    var ema50 = calcEMA(closes,50).map(function(v,i){return [rows[i][0],v];});
+    var rsi = calcRSI(closes,14).map(function(v,i){return [rows[i+14] ? rows[i+14][0] : rows[rows.length-1][0],v];});
+    var e12 = calcEMA(closes,12), e26 = calcEMA(closes,26);
+    var macd = e12.map(function(v,i){return v-e26[i];});
+    var sig = calcEMA(macd,9);
+    var macdRows = rows.map(function(p,i){return {x:p[0],y:macd[i]-sig[i],macd:macd[i],signal:sig[i]};}).slice(26);
+    var trade = vpsChartTrade(sym);
+    var markerData = vpsChartMarkers(trade, rows);
+    if(G.charts.vpsPrice) { try{G.charts.vpsPrice.destroy();}catch(e){} }
+    G.charts.vpsPrice = hcStock('vps-price-chart', {
+      chart:{backgroundColor:'transparent',style:{fontFamily:'inherit'},margin:[10,10,30,60]},
+      rangeSelector:{enabled:false},navigator:{enabled:false},scrollbar:{enabled:false},title:{text:null},
+      xAxis:{type:'datetime',lineColor:'#21262d',tickColor:'#21262d',labels:{style:{color:'#484f58',fontSize:'9px'}}},
+      yAxis:{title:null,gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'9px'},align:'left',x:0},plotLines:vpsChartTradeLines(trade)},
+      tooltip:{shared:true,backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){return '<b>'+fmtDate(this.x)+'</b><br>'+this.points.map(function(p){return sourceEsc(p.series.name)+': '+(Number(p.y)||0).toFixed(6);}).join('<br>');}},
+      plotOptions:{candlestick:{color:'#f85149',upColor:'#3fb950',lineColor:'#f85149',upLineColor:'#3fb950',lineWidth:1},scatter:{tooltip:{pointFormat:'<b>{point.name}</b>: {point.y:.6f}<br>'}}},
+      series:[
+        {type:'candlestick',name:sym+' '+VPS_CHART_TF,data:rows,dataGrouping:{enabled:false}},
+        {type:'line',name:'EMA21',data:ema21,color:'#e3b341',lineWidth:1.2,marker:{enabled:false}},
+        {type:'line',name:'EMA50',data:ema50,color:'#bc8cff',lineWidth:1.2,marker:{enabled:false}},
+        {type:'scatter',name:'Trade events',data:markerData,showInLegend:false}
+      ],credits:{enabled:false}
+    });
+    if(G.charts.vpsRsi) { try{G.charts.vpsRsi.destroy();}catch(e){} }
+    G.charts.vpsRsi = hcChart('vps-rsi-chart', {chart:{backgroundColor:'transparent',margin:[5,10,24,45],style:{fontFamily:'inherit'}},title:{text:null},xAxis:{type:'datetime',labels:{style:{color:'#484f58',fontSize:'8px'}},lineColor:'#21262d'},yAxis:{min:0,max:100,title:null,gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'8px'}},plotBands:[{from:70,to:100,color:'rgba(248,81,73,.06)'},{from:0,to:30,color:'rgba(63,185,80,.06)'}],plotLines:[{value:70,color:'#f85149',dashStyle:'Dot',width:1},{value:30,color:'#3fb950',dashStyle:'Dot',width:1}]},legend:{enabled:false},tooltip:{shared:true},series:[{name:'RSI',data:rsi,color:'#58a6ff',lineWidth:1.3,marker:{enabled:false}}],credits:{enabled:false}});
+    if(G.charts.vpsMacd) { try{G.charts.vpsMacd.destroy();}catch(e){} }
+    G.charts.vpsMacd = hcChart('vps-macd-chart', {chart:{backgroundColor:'transparent',margin:[5,10,24,45],style:{fontFamily:'inherit'}},title:{text:null},xAxis:{type:'datetime',labels:{style:{color:'#484f58',fontSize:'8px'}},lineColor:'#21262d'},yAxis:{title:null,gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'8px'}},plotLines:[{value:0,color:'#21262d',width:1}]},legend:{enabled:false},tooltip:{shared:true},series:[{name:'Histogram',type:'column',data:macdRows.map(function(p){return {x:p.x,y:p.y,color:p.y>=0?'#3fb950':'#f85149'};}),borderWidth:0},{name:'MACD',type:'line',data:macdRows.map(function(p){return [p.x,p.macd];}),color:'#58a6ff',lineWidth:1,marker:{enabled:false}},{name:'Signal',type:'line',data:macdRows.map(function(p){return [p.x,p.signal];}),color:'#e3b341',dashStyle:'Dash',lineWidth:1,marker:{enabled:false}}],credits:{enabled:false}});
+    var tradeText = trade ? (' · ' + trade.id + ' ' + trade.status + ' · Entry ' + (trade.entryActual || trade.entryLimit) + ' · SL ' + (trade.slAfterTp1 || trade.sl) + ' · TP1 ' + trade.tp1 + ' · TP2 ' + trade.tp2) : ' · No selected trade';
+    if(status) { status.textContent = 'LIVE · ' + rows.length + ' closed candles'; status.style.color = '#3fb950'; }
+    if(meta) meta.textContent = 'Bitget Futures via VPS · ' + sym + ' ' + VPS_CHART_TF + ' · latest closed ' + new Date(rows[rows.length-1][0]).toLocaleString('id-ID') + tradeText;
+  }).catch(function(error){
+    if(status) { status.textContent = 'Chart error: ' + (error.message || error); status.style.color = '#f85149'; }
+    if(meta) meta.textContent = 'Candle chart tidak tersedia; cek proxy Bitget VPS.';
   });
 }
 
@@ -4280,39 +4458,58 @@ function renderServerPaperScan(status) {
   }
   var at = scan.at ? new Date(scan.at).toLocaleTimeString('id-ID') : '--';
   var candidates = Array.isArray(scan.selected) ? scan.selected.slice(0, 3) : [];
-  var placedCandidates = Array.isArray(scan.placed) ? scan.placed.slice(0, 3) : [];
-  var cards = (placedCandidates.length ? placedCandidates : candidates).map(function(c) {
+  var placedCandidates = Array.isArray(scan.placed) ? scan.placed : [];
+  var placedBySymbol = {};
+  placedCandidates.forEach(function(t){ if(t && t.sym) placedBySymbol[t.sym] = t; });
+  var cards = candidates.map(function(candidate) {
+    var c = Object.assign({}, candidate || {}, placedBySymbol[candidate && candidate.sym] || {});
     var dir = c.direction || c.mtfDirection || c.dir || 'NEUTRAL';
     var dirColor = dir === 'LONG' ? '#3fb950' : dir === 'SHORT' ? '#f85149' : '#e3b341';
-    var mtf = (c.mtfAlignment || 0) + '/4 TF';
+    var mtfSummary = c.mtfSummary || {};
+    var tfNames = ['H4','H1','M30','M15'];
+    var tfLine = tfNames.map(function(tf){
+      var item = c.mtf && c.mtf[tf] ? c.mtf[tf] : {};
+      var tfDir = item.direction || '--';
+      var tfColor = tfDir === 'LONG' ? '#3fb950' : tfDir === 'SHORT' ? '#f85149' : '#8b949e';
+      return '<span style="color:' + tfColor + ';border:1px solid #21262d;border-radius:3px;padding:1px 3px;margin-right:2px;">' + tf + ' ' + sourceEsc(tfDir) + '</span>';
+    }).join('');
+    var mtf = (c.mtfAlignment || mtfSummary.alignmentCount || 0) + '/4 TF';
     var conf = c.confluencePct != null ? c.confluencePct + '%' : '--';
     var reasonsArray = Array.isArray(c.signalReasons) && c.signalReasons.length ? c.signalReasons : c.evidence;
     var reasons = Array.isArray(reasonsArray) ? reasonsArray.slice(0, 4).join(' · ') : '';
     var ind = c.indicators || (c.mtf && c.mtf.M15 && c.mtf.M15.indicators) || {};
     var scores = c.signalScores || (c.scoreBreakdown && c.scoreBreakdown.signalScores) || {};
     var isPlaced = c.status === 'PENDING' || c.status === 'OPEN' || c.status === 'TP1_PARTIAL';
+    var quality = c.dataQuality || '--';
+    var qualityColor = quality === 'FULL' ? '#3fb950' : quality === 'STALE' || quality === 'REJECTED' ? '#f85149' : '#e3b341';
     var levels = isPlaced ? '<div style="font-size:9px;color:#8b949e;margin-top:4px;">Entry <b style="color:#e3b341;">' + sourceEsc(String(c.entryLimit || '--')) + '</b> · SL <b style="color:#f85149;">' + sourceEsc(String(c.slAfterTp1 || c.sl || '--')) + '</b> · TP1 <b style="color:#3fb950;">' + sourceEsc(String(c.tp1 || '--')) + '</b> · TP2 <b style="color:#3fb950;">' + sourceEsc(String(c.tp2 || '--')) + '</b>' + (c.remainingSize != null ? ' · rem ' + sourceEsc(String(c.remainingSize)) : '') + '</div>' : '';
-    var scoreLine = scores.total != null ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">Score ' + sourceEsc(String(scores.total)) + '/100 · Trend ' + sourceEsc(String(scores.trend || 0)) + ' · Mom ' + sourceEsc(String(scores.momentum || 0)) + ' · Deriv ' + sourceEsc(String(scores.derivatives || 0)) + ' · Vol ' + sourceEsc(String(scores.volume || 0)) + '</div>' : '';
+    var scoreLine = scores.total != null ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">Signal ' + sourceEsc(String(scores.total)) + '/' + sourceEsc(String(scores.max && scores.max.total || 100)) + ' · Trend ' + sourceEsc(String(scores.trend || 0)) + ' · Mom ' + sourceEsc(String(scores.momentum || 0)) + ' · Deriv ' + sourceEsc(String(scores.derivatives || 0)) + ' · Vol ' + sourceEsc(String(scores.volume || 0)) + '</div>' : '';
     var indicatorLine = (ind.rsi != null || ind.stochRsiK != null || ind.candlePattern) ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">RSI ' + sourceEsc(String(ind.rsi == null ? '--' : ind.rsi)) + ' · Stoch ' + sourceEsc(String(ind.stochRsiK == null ? '--' : ind.stochRsiK)) + '/' + sourceEsc(String(ind.stochRsiD == null ? '--' : ind.stochRsiD)) + ' · ' + sourceEsc(String(ind.candlePattern || 'no pattern')) + '</div>' : '';
+    var marketLine = '24H ' + (c.chg == null ? '--' : Number(c.chg).toFixed(2) + '%') + ' · F ' + (c.fund == null ? '--' : Number(c.fund).toFixed(5)) + ' · OI ' + (c.oi == null ? '--' : Number(c.oi).toFixed(2) + '%') + ' · Vol ' + (c.volumeRatio == null ? '--' : Number(c.volumeRatio).toFixed(2) + 'x');
+    var stateLine = isPlaced ? '<span style="color:#3fb950;">' + sourceEsc(c.status) + '</span>' : '<span style="color:#e3b341;">candidate / tidak ditempatkan</span>';
     return '<div style="display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:7px 8px;border:1px solid ' + (isPlaced ? 'rgba(63,185,80,.35)' : '#21262d') + ';border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
       + '<div><b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
-      + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span>'
-      + (isPlaced ? ' <span style="color:#3fb950;">' + sourceEsc(c.status) + '</span>' : '') + '</div>'
+      + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span> · ' + stateLine + '</div>'
+      + '<div style="font-size:9px;margin-top:4px;">' + tfLine + '</div>'
+      + '<div style="font-size:9px;color:#8b949e;margin-top:3px;">' + sourceEsc(marketLine) + ' · Quality <span style="color:' + qualityColor + ';">' + sourceEsc(quality) + '</span></div>'
       + levels + scoreLine + indicatorLine
       + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + sourceEsc(reasons || c.dataQualityReason || c.dataQuality || '') + '</div></div>';
   }).join('');
   var placed = placedCandidates.length;
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
   var trialInfo = (status.strategyVersion || 'MTF_ATR_V2') + ' · cohort ' + (status.cohortId || '--');
-  var guardInfo = 'daily ' + Number(status.dailyLossR || 0).toFixed(2) + 'R/' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R';
+  var capacity = scan.capacity || {};
+  var guardInfo = 'daily ' + Number(status.dailyLossR || capacity.dailyLossR || 0).toFixed(2) + 'R/' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R'
+    + ' · risk $' + Number(capacity.availableRisk == null ? status.availableRisk || 0 : capacity.availableRisk).toFixed(2)
+    + ' · slots ' + Number(capacity.availableSlots == null ? status.availableSlots || 0 : capacity.availableSlots);
   var rejectionCodes = [];
   (Array.isArray(scan.rejected) ? scan.rejected : []).forEach(function(item){
     (Array.isArray(item.codes) ? item.codes : []).forEach(function(code){ rejectionCodes.push(code); });
   });
-  var rejectionInfo = rejectionCodes.length ? ' · rejected ' + rejectionCodes.length + ' (' + rejectionCodes.slice(0, 4).join(', ') + ')' : '';
+  var rejectionInfo = rejectionCodes.length ? ' · rejected ' + rejectionCodes.length + ' (' + rejectionCodes.slice(0, 5).join(', ') + ')' : '';
   el.innerHTML = '<div><b style="color:#8b949e;">Last VPS scan ' + sourceEsc(scan.cycleKey || '') + '</b>'
     + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · candidates ' + (scan.candidates || 0)
-    + ' · placed ' + placed + ' · ' + sourceEsc(reason) + ' · ' + sourceEsc(trialInfo) + ' · ' + sourceEsc(guardInfo) + sourceEsc(rejectionInfo) + '</span></div>'
+    + ' · top ' + candidates.length + ' · placed ' + placed + ' · ' + sourceEsc(reason) + ' · ' + sourceEsc(trialInfo) + ' · ' + sourceEsc(guardInfo) + sourceEsc(rejectionInfo) + '</span></div>'
     + (cards || '<span style="color:#484f58;">No candidate detail</span>');
 }
 
@@ -4325,6 +4522,13 @@ function applyServerPaperStatus(status, announce) {
   BOT.paperMode = false;
   BOT.activeTrades = Array.isArray(status.activeTrades) ? status.activeTrades : [];
   if(status.stats) G.vpsStats = {metrics: status.stats, sample: status.statsSample || null};
+  var cohortSelect = document.getElementById('vps-st-cohort');
+  if(cohortSelect && status.cohortId && !Array.prototype.some.call(cohortSelect.options, function(opt){return opt.value === status.cohortId;})) {
+    var cohortOption = document.createElement('option');
+    cohortOption.value = status.cohortId;
+    cohortOption.textContent = status.cohortId;
+    cohortSelect.appendChild(cohortOption);
+  }
 
   var btn = document.getElementById('paper-toggle');
   var lbl = document.getElementById('paper-mode-lbl');
@@ -4345,7 +4549,7 @@ function applyServerPaperStatus(status, announce) {
   var perScan = document.getElementById('bot-per-scan');
   if(perScan) perScan.textContent = status.perScan || 3;
   var maxConc = document.getElementById('bot-max-conc');
-  if(maxConc) maxConc.textContent = status.maxConcurrent || 30;
+  if(maxConc) maxConc.textContent = status.maxConcurrent || 80;
   var slots = document.getElementById('bot-new-slots');
   if(slots) {
     slots.textContent = (status.availableSlots != null ? status.availableSlots : '--');
@@ -4473,11 +4677,26 @@ function pollPaperHistory() {
 
 function pollPaperStats() {
   if(!PAPER_API || !G.paperServer) return;
-  fetch(PAPER_API + '/stats', {cache:'no-store'})
+  var params = [];
+  function addParam(id, key, upper) {
+    var el = document.getElementById(id);
+    var value = el && el.value ? String(el.value).trim() : '';
+    if(upper) value = value.toUpperCase();
+    if(value) params.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
+  }
+  addParam('vps-st-strategy', 'strategyVersion', false);
+  addParam('vps-st-cohort', 'cohortId', false);
+  addParam('vps-st-symbol', 'symbol', true);
+  addParam('vps-st-direction', 'direction', true);
+  addParam('vps-st-tf', 'timeframe', true);
+  addParam('vps-st-from', 'from', false);
+  addParam('vps-st-to', 'to', false);
+  fetch(PAPER_API + '/stats' + (params.length ? '?' + params.join('&') : ''), {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(data){
       if(data && data.ok) {
         G.vpsStats = data;
+        renderVpsStats(data);
         var eqPage = document.getElementById('p-eq');
         if(eqPage && eqPage.classList.contains('on')) {
           try { renderEquity(); } catch(e) {}
@@ -4485,6 +4704,149 @@ function pollPaperStats() {
       }
     })
     .catch(function(){ /* statistics are auxiliary; keep the last known view */ });
+}
+
+function vpsFmtMs(ms) {
+  var n = Number(ms || 0);
+  if(!n) return '--';
+  var mins = Math.round(n / 60000);
+  if(mins < 60) return mins + 'm';
+  var hours = Math.floor(mins / 60);
+  return hours + 'h ' + (mins % 60) + 'm';
+}
+function vpsFmtAt(value) {
+  if(!value) return '--';
+  var date = new Date(value);
+  return isNaN(date.getTime()) ? String(value) : date.toLocaleString('id-ID');
+}
+function vpsKpi(label, value, color) {
+  return '<div class="kpi"><div class="l">' + sourceEsc(label) + '</div><div class="v" style="font-size:14px;color:' + (color || '#c9d1d9') + ';">' + sourceEsc(value) + '</div></div>';
+}
+function vpsGroupTable(groups, columns) {
+  if(!Array.isArray(groups) || !groups.length) return '<div class="muted">Belum ada closed trade pada filter ini.</div>';
+  return '<div class="tbl-wrap"><table><thead><tr>' + columns.map(function(c){return '<th>' + sourceEsc(c.label) + '</th>';}).join('') + '</tr></thead><tbody>'
+    + groups.slice(0, 12).map(function(row){
+      return '<tr>' + columns.map(function(c){
+        var value = typeof c.value === 'function' ? c.value(row) : row[c.key];
+        return '<td>' + sourceEsc(value == null ? '--' : String(value)) + '</td>';
+      }).join('') + '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+function renderVpsStats(data) {
+  var kpiEl = document.getElementById('vps-stats-kpis');
+  var breakdownEl = document.getElementById('vps-stats-breakdown');
+  var qualityEl = document.getElementById('vps-stats-quality');
+  var asOf = document.getElementById('vps-stats-asof');
+  if(!data || !data.ok) return;
+  var sample = data.sample || {}, m = data.metrics || {};
+  if(asOf) asOf.textContent = 'As of ' + vpsFmtAt(data.asOf) + ' · ' + (data.filters && data.filters.strategyVersion || 'all');
+  var pf = m.profitFactor == null ? '--' : Number(m.profitFactor).toFixed(2);
+  var kpis = [
+    ['Closed', sample.closed || 0, '#c9d1d9'], ['Filled', (sample.filled || 0) + ' / ' + (sample.orders || 0), '#58a6ff'],
+    ['Win rate', Number(m.winRate || 0).toFixed(1) + '%', Number(m.winRate || 0) >= 50 ? '#3fb950' : '#f85149'],
+    ['Profit factor', pf, Number(m.profitFactor || 0) >= 1 ? '#3fb950' : '#f85149'],
+    ['Expectancy', Number(m.expectancyR || 0).toFixed(3) + 'R', Number(m.expectancyR || 0) >= 0 ? '#3fb950' : '#f85149'],
+    ['Net / Max DD', Number(m.netR || 0).toFixed(2) + 'R / ' + Number(m.maxDrawdownR || 0).toFixed(2) + 'R', Number(m.netR || 0) >= 0 ? '#3fb950' : '#f85149'],
+    ['TP1 / TP2 / SL', (m.tp1Hits || 0) + ' / ' + (m.tp2Hits || 0) + ' / ' + (m.stopLosses || 0), '#e3b341'],
+    ['Expired', (sample.pendingExpired || 0) + ' (' + Number(m.pendingExpiredRate || 0).toFixed(1) + '%)', '#e3b341'],
+    ['Avg / Median R', Number(m.averageR || 0).toFixed(3) + ' / ' + Number(m.medianR || 0).toFixed(3), '#c9d1d9'],
+    ['Fill time', vpsFmtMs(m.averageTimeToFillMs) + ' / ' + vpsFmtMs(m.medianTimeToFillMs), '#c9d1d9'],
+    ['MFE / MAE', '$' + Number(m.averageMfePnl || 0).toFixed(2) + ' / $' + Number(m.averageMaePnl || 0).toFixed(2), '#c9d1d9'],
+    ['PnL', '$' + Number(m.pnl || 0).toFixed(2), Number(m.pnl || 0) >= 0 ? '#3fb950' : '#f85149']
+  ];
+  if(kpiEl) kpiEl.innerHTML = kpis.map(function(k){return vpsKpi(k[0], k[1], k[2]);}).join('');
+  if(breakdownEl) breakdownEl.innerHTML = vpsGroupTable(data.bySymbol, [
+    {label:'Symbol',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}, {label:'PnL',value:function(r){return '$' + Number(r.pnl || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By direction</div>' + vpsGroupTable(data.byDirection, [
+    {label:'Direction',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]);
+  if(qualityEl) qualityEl.innerHTML = vpsGroupTable(data.byConfluence, [
+    {label:'Confluence',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By score / close reason</div>' + vpsGroupTable(data.byScore, [
+    {label:'Score',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + vpsGroupTable(data.closeReasons, [
+    {label:'Close reason',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]);
+}
+
+function renderPaperDiagnostics(data) {
+  var el = document.getElementById('bot-ops');
+  if(!el || !data || !data.ok) return;
+  var source = data.sources && data.sources.bitget ? data.sources.bitget : {};
+  var runtime = data.runtime || {};
+  var bot = data.bot || {};
+  var state = data.state || {};
+  var lastError = data.lastError || bot.lastError || runtime.lastScanError || runtime.lastMonitorError || '';
+  var status = source.displayStatus || source.status || 'UNKNOWN';
+  var statusColor = status === 'LIVE' ? '#3fb950' : status === 'DELAYED' ? '#f0883e' : '#f85149';
+  el.innerHTML = '<b>VPS operations</b> · scan ' + sourceEsc(data.strategyVersion || '--')
+    + ' · <span style="color:' + statusColor + ';">Bitget ' + sourceEsc(status) + '</span>'
+    + ' · last ' + sourceEsc(vpsFmtAt(data.lastScanAt || bot.lastScanAt))
+    + ' · next ' + sourceEsc(vpsFmtAt(data.nextScanAt || bot.nextScanAt))
+    + ' · monitor ' + sourceEsc(vpsFmtAt(data.lastMonitorAt || bot.lastMonitorAt))
+    + ' · latency ' + sourceEsc(source.lastLatencyMs == null ? '--' : source.lastLatencyMs + 'ms')
+    + ' · requests ' + sourceEsc(source.requestCount == null ? '--' : String(source.requestCount))
+    + ' · scans ' + sourceEsc(String(runtime.scansSucceeded || 0)) + '/' + sourceEsc(String(runtime.scanAttempts || 0))
+    + ' · monitors ' + sourceEsc(String(runtime.monitorsSucceeded || 0)) + '/' + sourceEsc(String(runtime.monitorAttempts || 0))
+    + ' · backup ' + sourceEsc(state.backupFile || '--')
+    + (lastError ? ' · <span style="color:#f85149;">error: ' + sourceEsc(lastError) + '</span>' : ' · <span style="color:#3fb950;">no error</span>');
+}
+function pollPaperDiagnostics() {
+  if(!PAPER_API || !G.paperServer) return;
+  fetch(PAPER_API + '/diagnostics', {cache:'no-store'})
+    .then(function(r){return r.ok ? r.json() : null;})
+    .then(function(data){if(data && data.ok) renderPaperDiagnostics(data);})
+    .catch(function(){
+      var el = document.getElementById('bot-ops');
+      if(el) el.innerHTML = '<span style="color:#f85149;">VPS diagnostics unavailable</span>';
+    });
+}
+
+function renderVpsReplay(data) {
+  var status = document.getElementById('vps-replay-status');
+  var note = document.getElementById('vps-replay-note');
+  var kpiEl = document.getElementById('vps-replay-kpis');
+  var auditEl = document.getElementById('vps-replay-audit');
+  var s = data.summary || {}, m = data.metrics || {}, sample = data.sample || {};
+  if(status) { status.textContent = 'Completed ' + vpsFmtAt(data.to); status.style.color = '#3fb950'; }
+  if(note) note.textContent = (data.note || '') + ' · ' + (data.derivativesMode || '');
+  if(kpiEl) kpiEl.innerHTML = [
+    ['Scans / eligible', (s.scans || 0) + ' / ' + (s.eligibleSignals || 0), '#c9d1d9'],
+    ['Placed / closed', (s.placed || 0) + ' / ' + (s.closed || 0), '#58a6ff'],
+    ['Win rate', Number(m.winRate || 0).toFixed(1) + '%', Number(m.winRate || 0) >= 50 ? '#3fb950' : '#f85149'],
+    ['PF / expectancy', (m.profitFactor == null ? '--' : Number(m.profitFactor).toFixed(2)) + ' / ' + Number(m.expectancyR || 0).toFixed(3) + 'R', '#e3b341'],
+    ['Net R / DD', Number(m.netR || 0).toFixed(2) + 'R / ' + Number(m.maxDrawdownR || 0).toFixed(2) + 'R', Number(m.netR || 0) >= 0 ? '#3fb950' : '#f85149'],
+    ['TP1 / TP2 / SL', (m.tp1Hits || 0) + ' / ' + (m.tp2Hits || 0) + ' / ' + (m.stopLosses || 0), '#e3b341'],
+    ['Filled / expired', (sample.filled || 0) + ' / ' + (sample.pendingExpired || 0), '#c9d1d9'],
+    ['PnL', '$' + Number(m.pnl || 0).toFixed(2), Number(m.pnl || 0) >= 0 ? '#3fb950' : '#f85149']
+  ].map(function(k){return vpsKpi(k[0], k[1], k[2]);}).join('');
+  var curve = Array.isArray(data.equityCurve) ? data.equityCurve : [];
+  if(G.charts.vpsReplay) { try{G.charts.vpsReplay.destroy();}catch(e){} }
+  if(curve.length && document.getElementById('vps-replay-equity')) {
+    var cumulative = 0;
+    var points = curve.map(function(p){ cumulative += Number(p.r || 0); return [Date.parse(p.at) || Date.now(), Number(cumulative.toFixed(3))]; });
+    G.charts.vpsReplay = hcChart('vps-replay-equity', {chart:{backgroundColor:'transparent',style:{fontFamily:'inherit'}},title:{text:null},xAxis:{type:'datetime',labels:{style:{color:'#8b949e',fontSize:'9px'}}},yAxis:{title:{text:'R'},gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'9px'}}},legend:{enabled:false},tooltip:{shared:true},series:[{name:'Replay cumulative R',data:points,color:'#58a6ff',lineWidth:2,marker:{enabled:false}}],credits:{enabled:false}});
+  }
+  var rejectText = Object.keys(data.rejectionCounts || {}).map(function(k){return k + ': ' + data.rejectionCounts[k];}).join(' · ') || 'none';
+  var scans = Array.isArray(data.scans) ? data.scans : [];
+  if(auditEl) auditEl.innerHTML = '<b>Replay audit</b> · source ' + sourceEsc(data.source || '--') + ' · candles ' + sourceEsc(JSON.stringify(data.candles || {})) + '<br>Rejections: ' + sourceEsc(rejectText) + '<br>First/last scan: ' + sourceEsc(scans.length ? vpsFmtAt(scans[0].at) + ' → ' + vpsFmtAt(scans[scans.length - 1].at) : 'none') + '<br>Strict model: closed candles · MTF · ATR/structure · 1M high/low · stop-first · TP1 partial · expiry 120m';
+}
+function runVpsReplay() {
+  if(!PAPER_API || !G.paperServer) return;
+  var btn = document.getElementById('vps-replay-btn');
+  var status = document.getElementById('vps-replay-status');
+  var sym = String((document.getElementById('vps-replay-symbol') || {}).value || 'BTC').toUpperCase().replace(/[^A-Z0-9]/g,'') || 'BTC';
+  var days = Number((document.getElementById('vps-replay-days') || {}).value || 3);
+  if(btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+  if(status) { status.textContent = 'Loading historical candles...'; status.style.color = '#e3b341'; }
+  fetch(PAPER_API + '/replay?symbol=' + encodeURIComponent(sym) + '&days=' + encodeURIComponent(days), {cache:'no-store'})
+    .then(function(r){return r.json().then(function(data){if(!r.ok || !data.ok) throw new Error(data.error || 'Replay failed'); return data;});})
+    .then(renderVpsReplay)
+    .catch(function(error){
+      if(status) { status.textContent = 'Replay error: ' + error.message; status.style.color = '#f85149'; }
+      var note = document.getElementById('vps-replay-note'); if(note) note.textContent = 'Replay belum tersedia: ' + error.message;
+    })
+    .then(function(){if(btn){btn.disabled=false;btn.innerHTML='<i class="fa-solid fa-play"></i> Run replay';}});
 }
 
 function pollTelegramStatus() {
@@ -4529,8 +4891,11 @@ function detectPaperBot() {
         if(!paperBotStatusTimer) paperBotStatusTimer = setInterval(pollPaperBotStatus, 15000);
         pollPaperHistory();
         pollPaperStats();
+        pollPaperDiagnostics();
+        setTimeout(loadVpsSignalChart, 1200);
         if(!paperHistoryTimer) paperHistoryTimer = setInterval(pollPaperHistory, 60000);
         if(!paperStatsTimer) paperStatsTimer = setInterval(pollPaperStats, 60000);
+        if(!paperDiagnosticsTimer) paperDiagnosticsTimer = setInterval(pollPaperDiagnostics, 30000);
       } else {
         markPaperServerUnavailable('status endpoint error');
         sLog('PAPER VPS belum aktif — browser fallback dimatikan agar sumber data tetap tunggal');
@@ -4937,7 +5302,7 @@ function updateActiveTradesPanel() {
     var conf = t.confluencePct != null ? ' · Conf '+t.confluencePct+'%' : '';
     var mtf = t.mtfAlignment ? ' · MTF '+t.mtfAlignment+'/4' : '';
     var reasonTitle = Array.isArray(t.signalReasons) ? t.signalReasons.join(' · ') : '';
-    return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;">'
+    return '<div onclick="openVpsChartForTrade(\'' + sourceEsc(t.sym || '') + '\')" style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;cursor:pointer;" title="Klik untuk membuka chart VPS '+sourceEsc(t.sym || '')+'">'
       + '<span style="color:'+statusCol+';font-size:9px;min-width:50px;">'+t.status+'</span>'
       + '<span style="color:'+classColor+';font-size:8px;min-width:38px;">'+(t.strategyVersion==='PRE_UPGRADE'?'PRE-UP':isLegacy(t)?'LEGACY':'MTF V2')+'</span>'
       + '<b>'+t.sym+'</b>'
