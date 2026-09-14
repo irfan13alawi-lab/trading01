@@ -9,6 +9,25 @@ const PAPER_SCAN_CHECK_MS = 15000;
 const PAPER_MONITOR_MS = 30000;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_PER_SCAN = 3;
+// The VPS bot uses the same intraday structure as the CryptoEx-style view:
+// 4H/1H define the bias, 30M confirms the structure, and 15M is the trigger.
+// Keep the candle request bounded so a 15-minute scan cannot overwhelm the
+// upstream exchange API while still providing enough history for indicators.
+const PAPER_CANDLE_LIMIT = Math.max(80, Math.min(250,
+  Number.isFinite(Number(process.env.PAPER_CANDLE_LIMIT))
+    ? Number(process.env.PAPER_CANDLE_LIMIT) : 120));
+const PAPER_MTF_MIN_ALIGNMENT = Math.max(3, Math.min(4,
+  Number.isFinite(Number(process.env.PAPER_MTF_MIN_ALIGNMENT))
+    ? Number(process.env.PAPER_MTF_MIN_ALIGNMENT) : 3));
+const PAPER_MIN_CONFLUENCE = Math.max(50, Math.min(95,
+  Number.isFinite(Number(process.env.PAPER_MIN_CONFLUENCE))
+    ? Number(process.env.PAPER_MIN_CONFLUENCE) : 60));
+const PAPER_MTF_CONCURRENCY = Math.max(2, Math.min(12,
+  Number.isFinite(Number(process.env.PAPER_MTF_CONCURRENCY))
+    ? Number(process.env.PAPER_MTF_CONCURRENCY) : 6));
+const PAPER_MTF_MAX_CANDIDATES = Math.max(8, Math.min(40,
+  Number.isFinite(Number(process.env.PAPER_MTF_MAX_CANDIDATES))
+    ? Number(process.env.PAPER_MTF_MAX_CANDIDATES) : 24));
 const PAPER_MAX_ACTIVE = Math.max(3, Math.min(100,
   Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE))
     ? Number(process.env.PAPER_MAX_ACTIVE) : 30));
@@ -499,6 +518,154 @@ function paperSignal(changePct, oiDeltaPct, funding) {
   return 'NEU';
 }
 
+function paperClamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function paperMean(values) {
+  const valid = values.filter(value => Number.isFinite(value));
+  return valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : 0;
+}
+
+function paperEmaSeries(values, period) {
+  if (!values.length) return [];
+  const alpha = 2 / (period + 1);
+  let ema = values[0];
+  return values.map((value, index) => {
+    ema = index === 0 ? value : (value * alpha) + (ema * (1 - alpha));
+    return ema;
+  });
+}
+
+function paperRsiSeries(values, period) {
+  const result = Array(values.length).fill(null);
+  if (values.length <= period) return result;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index++) {
+    const delta = values[index] - values[index - 1];
+    if (delta >= 0) gains += delta;
+    else losses -= delta;
+  }
+  let averageGain = gains / period;
+  let averageLoss = losses / period;
+  result[period] = averageLoss === 0 ? 100 : 100 - (100 / (1 + averageGain / averageLoss));
+  for (let index = period + 1; index < values.length; index++) {
+    const delta = values[index] - values[index - 1];
+    const gain = delta > 0 ? delta : 0;
+    const loss = delta < 0 ? -delta : 0;
+    averageGain = ((averageGain * (period - 1)) + gain) / period;
+    averageLoss = ((averageLoss * (period - 1)) + loss) / period;
+    result[index] = averageLoss === 0 ? 100 : 100 - (100 / (1 + averageGain / averageLoss));
+  }
+  return result;
+}
+
+function paperAtrSeries(rows, period) {
+  const trueRanges = rows.map((row, index) => {
+    if (index === 0) return row.high - row.low;
+    const previousClose = rows[index - 1].close;
+    return Math.max(row.high - row.low,
+      Math.abs(row.high - previousClose), Math.abs(row.low - previousClose));
+  });
+  const result = Array(rows.length).fill(null);
+  if (trueRanges.length < period) return result;
+  let atr = trueRanges.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+  result[period - 1] = atr;
+  for (let index = period; index < trueRanges.length; index++) {
+    atr = ((atr * (period - 1)) + trueRanges[index]) / period;
+    result[index] = atr;
+  }
+  return result;
+}
+
+function paperSupertrend(rows, atrSeries, period, factor) {
+  let finalUpper = null;
+  let finalLower = null;
+  let direction = 1;
+  for (let index = 0; index < rows.length; index++) {
+    const atr = atrSeries[index];
+    if (!Number.isFinite(atr)) continue;
+    const midpoint = (rows[index].high + rows[index].low) / 2;
+    const basicUpper = midpoint + factor * atr;
+    const basicLower = midpoint - factor * atr;
+    if (finalUpper == null) {
+      finalUpper = basicUpper;
+      finalLower = basicLower;
+      continue;
+    }
+    const previousClose = rows[index - 1].close;
+    finalUpper = basicUpper < finalUpper || previousClose > finalUpper
+      ? basicUpper : finalUpper;
+    finalLower = basicLower > finalLower || previousClose < finalLower
+      ? basicLower : finalLower;
+    if (direction === 1 && rows[index].close < finalLower) direction = -1;
+    else if (direction === -1 && rows[index].close > finalUpper) direction = 1;
+  }
+  return finalUpper == null ? null : direction === 1 ? 'LONG' : 'SHORT';
+}
+
+function paperIndicatorSnapshot(rows) {
+  if (!Array.isArray(rows) || rows.length < 60) return null;
+  const closes = rows.map(row => row.close);
+  const ema9 = paperEmaSeries(closes, 9);
+  const ema21 = paperEmaSeries(closes, 21);
+  const ema50 = paperEmaSeries(closes, 50);
+  const rsi = paperRsiSeries(closes, 14);
+  const ema12 = paperEmaSeries(closes, 12);
+  const ema26 = paperEmaSeries(closes, 26);
+  const macdSeries = closes.map((_, index) => ema12[index] - ema26[index]);
+  const macdSignal = paperEmaSeries(macdSeries, 9);
+  const atrSeries = paperAtrSeries(rows, 14);
+  const supertrend = paperSupertrend(rows, atrSeries, 10, 3);
+  const lastIndex = rows.length - 1;
+  const last = rows[lastIndex];
+  const previous = rows.slice(Math.max(0, lastIndex - 20), lastIndex);
+  const support = previous.length ? Math.min(...previous.map(row => row.low)) : last.low;
+  const resistance = previous.length ? Math.max(...previous.map(row => row.high)) : last.high;
+  const averageVolume = paperMean(previous.map(row => row.volume));
+  const volumeRatio = averageVolume > 0 ? last.volume / averageVolume : null;
+  const longVotes = [
+    ema9[lastIndex] > ema21[lastIndex] && ema21[lastIndex] > ema50[lastIndex],
+    last.close > ema21[lastIndex],
+    macdSeries[lastIndex] > macdSignal[lastIndex],
+    rsi[lastIndex] != null && rsi[lastIndex] >= 50 && rsi[lastIndex] <= 75,
+    supertrend === 'LONG'
+  ].filter(Boolean).length;
+  const shortVotes = [
+    ema9[lastIndex] < ema21[lastIndex] && ema21[lastIndex] < ema50[lastIndex],
+    last.close < ema21[lastIndex],
+    macdSeries[lastIndex] < macdSignal[lastIndex],
+    rsi[lastIndex] != null && rsi[lastIndex] >= 25 && rsi[lastIndex] < 50,
+    supertrend === 'SHORT'
+  ].filter(Boolean).length;
+  const direction = longVotes >= 3 && longVotes > shortVotes ? 'LONG'
+    : shortVotes >= 3 && shortVotes > longVotes ? 'SHORT' : 'NEUTRAL';
+  const strengthPct = Math.round(Math.max(longVotes, shortVotes) / 5 * 100);
+  return {
+    direction,
+    strengthPct,
+    change: Number(((last.close - rows[Math.max(0, lastIndex - 3)].close) /
+      rows[Math.max(0, lastIndex - 3)].close * 100).toFixed(3)),
+    candleAt: Number.isFinite(last.ts) ? new Date(last.ts).toISOString() : null,
+    sampleSize: rows.length,
+    support: paperRoundPrice(support),
+    resistance: paperRoundPrice(resistance),
+    atr: paperRoundPrice(atrSeries[lastIndex] || 0),
+    atrPct: Number(((atrSeries[lastIndex] || 0) / last.close * 100).toFixed(3)),
+    volumeRatio: volumeRatio == null ? null : Number(volumeRatio.toFixed(2)),
+    indicators: {
+      ema9: paperRoundPrice(ema9[lastIndex]),
+      ema21: paperRoundPrice(ema21[lastIndex]),
+      ema50: paperRoundPrice(ema50[lastIndex]),
+      rsi: rsi[lastIndex] == null ? null : Number(rsi[lastIndex].toFixed(1)),
+      macd: Number(macdSeries[lastIndex].toFixed(6)),
+      macdSignal: Number(macdSignal[lastIndex].toFixed(6)),
+      supertrend
+    }
+  };
+}
+
 function paperTickerSymbol(row) {
   return String(row.symbol || '').replace(/[_-]?USDT$/i, '').toUpperCase();
 }
@@ -536,11 +703,14 @@ function buildPaperPairs(payload) {
   return Object.values(pairs).map(pair => {
     pair.volumeRatio = medianVolume > 0 && pair.volume > 0
       ? Number((pair.volume / medianVolume).toFixed(2)) : null;
-    pair.scoreBreakdown = paperScoreDetails(pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
-    pair.sc = pair.scoreBreakdown.total;
+    pair.contextScoreBreakdown = paperScoreDetails(pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
+    pair.scoreBreakdown = pair.contextScoreBreakdown;
+    pair.sc = pair.contextScoreBreakdown.total;
     pair.tier = paperTier(pair.sc);
-    if (pair.tier === 'C' || pair.fund >= 0.005 ||
-        Math.abs(pair.chg) > 3.5 || pair.sc < 7 || pair.volume <= 0 || pair.price <= 0) return null;
+    // Do not discard a candidate before MTF analysis. A weak 24H move can
+    // still be a valid pullback when the four intraday timeframes agree.
+    if (pair.fund >= 0.005 || Math.abs(pair.chg) > 3.5 ||
+        pair.volume <= 0 || pair.price <= 0) return null;
     let rank = pair.sc * 0.4;
     const fundingBonus = pair.fund <= -0.0005 ? 3
       : pair.fund < 0 ? 2
@@ -561,13 +731,42 @@ function buildPaperPairs(payload) {
 }
 
 function paperSetup(pair) {
-  const dir = pair.chg < 0 ? 'SHORT' : 'LONG';
-  const entry = paperRoundPrice(pair.price * (dir === 'LONG' ? 0.997 : 1.003));
-  const sl = paperRoundPrice(entry * (dir === 'LONG' ? 0.97 : 1.03));
-  const tp1 = paperRoundPrice(entry * (dir === 'LONG' ? 1.06 : 0.94));
-  const tp2 = paperRoundPrice(entry * (dir === 'LONG' ? 1.10 : 0.90));
+  const dir = pair.mtfDirection || (pair.chg < 0 ? 'SHORT' : 'LONG');
+  const m15 = pair.mtf && pair.mtf.M15;
+  const h1 = pair.mtf && pair.mtf.H1;
+  const snapshot = m15 || h1 || null;
+  const indicators = snapshot && snapshot.indicators || {};
+  const price = pair.price;
+  const atr = Math.max(
+    paperNumber(snapshot && snapshot.atr),
+    price * Math.max(0.0025, paperNumber(snapshot && snapshot.atrPct) / 100),
+    price * 0.005
+  );
+  const minimumOffset = Math.max(price * 0.001, atr * 0.25);
+  const support = paperNumber(snapshot && snapshot.support);
+  const resistance = paperNumber(snapshot && snapshot.resistance);
+  const ema21 = paperNumber(indicators.ema21);
+  const pullbackLevel = dir === 'LONG'
+    ? [support, ema21].filter(level => level > 0 && level < price).sort((a, b) => b - a)[0]
+    : [resistance, ema21].filter(level => level > price).sort((a, b) => a - b)[0];
+  const entryBase = dir === 'LONG' ? price - minimumOffset : price + minimumOffset;
+  const entry = paperRoundPrice(dir === 'LONG'
+    ? (pullbackLevel && pullbackLevel <= entryBase ? pullbackLevel : entryBase)
+    : (pullbackLevel && pullbackLevel >= entryBase ? pullbackLevel : entryBase));
+  const stopDistance = Math.min(price * 0.06, Math.max(atr * 1.5, price * 0.005));
+  const sl = paperRoundPrice(dir === 'LONG' ? entry - stopDistance : entry + stopDistance);
+  const riskDistance = Math.abs(entry - sl);
+  const tp1Level = dir === 'LONG'
+    ? (resistance > entry ? resistance : 0)
+    : (support > 0 && support < entry ? support : 0);
+  const minimumTp1 = dir === 'LONG' ? entry + riskDistance * 2 : entry - riskDistance * 2;
+  const tp1 = paperRoundPrice(dir === 'LONG'
+    ? Math.max(minimumTp1, tp1Level || 0)
+    : Math.min(minimumTp1, tp1Level || Number.POSITIVE_INFINITY));
+  const tp2 = paperRoundPrice(dir === 'LONG'
+    ? Math.max(entry + riskDistance * 3, tp1 * 1.01)
+    : Math.min(entry - riskDistance * 3, tp1 * 0.99));
   const riskDollar = Math.max(0, paperEquity() * PAPER_RISK_PCT / 100);
-  const stopDistance = Math.abs(entry - sl);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
@@ -680,6 +879,14 @@ function paperTradeView(trade) {
     dataAt: trade.dataAt || null,
     source: trade.source || 'Bitget Futures',
     dataQuality: trade.dataQuality || null,
+    confluencePct: trade.confluencePct == null ? null : trade.confluencePct,
+    mtfDirection: trade.mtfDirection || null,
+    mtfAlignment: trade.mtfAlignment || 0,
+    mtfSummary: trade.mtfSummary || null,
+    indicators: trade.indicators || null,
+    support: trade.support || null,
+    resistance: trade.resistance || null,
+    atr: trade.atr || null,
     signalReasons: Array.isArray(trade.signalReasons) ? trade.signalReasons : [],
     scoreBreakdown: trade.scoreBreakdown || null,
     setupValidation: trade.setupValidation || null,
@@ -689,8 +896,10 @@ function paperTradeView(trade) {
 
 function paperCandidateView(pair) {
   const reasons = [];
-  if (pair.chg < 0) reasons.push('24H turun -> kandidat SHORT pullback');
-  else if (pair.chg > 0) reasons.push('24H naik -> kandidat LONG pullback');
+  if (pair.mtfDirection === 'SHORT') reasons.push('MTF bearish -> kandidat SHORT pullback');
+  else if (pair.mtfDirection === 'LONG') reasons.push('MTF bullish -> kandidat LONG pullback');
+  else if (pair.chg < 0) reasons.push('24H turun -> konteks bearish');
+  else if (pair.chg > 0) reasons.push('24H naik -> konteks bullish');
   if (pair.fund < 0) reasons.push('funding negatif');
   if (pair.oi > 0) reasons.push('OI meningkat ' + pair.oi.toFixed(2) + '%');
   if (pair.oiUSD > 0 && !pair.oiReady) reasons.push('OI baseline tersimpan; delta menunggu scan berikutnya');
@@ -699,20 +908,34 @@ function paperCandidateView(pair) {
   if (pair.volumeRatio != null && pair.volumeRatio < 1) reasons.push('volume di bawah median');
   if (!pair.oiReady) reasons.push('OI belum punya baseline pembanding');
   if (pair.mtf) {
-    ['H4', 'H1', 'M15'].forEach(tf => {
+    ['H4', 'H1', 'M30', 'M15'].forEach(tf => {
       const item = pair.mtf[tf];
-      if (item && item.direction !== 'NEUTRAL') reasons.push(tf + ' ' + item.direction);
+      if (item && item.direction !== 'NEUTRAL') {
+        reasons.push(tf + ' ' + item.direction + (item.strengthPct ? ' (' + item.strengthPct + '%)' : ''));
+      } else if (item && item.status !== 'FULL') {
+        reasons.push(tf + ' data tidak lengkap');
+      }
     });
+  }
+  if (pair.confluencePct != null) reasons.push('confluence ' + pair.confluencePct + '%');
+  if (pair.mtfStatus && pair.mtfStatus !== 'FULL') reasons.push('MTF ' + pair.mtfStatus);
+  if (pair.mtf && pair.mtf.M15 && pair.mtf.M15.indicators) {
+    const m15 = pair.mtf.M15.indicators;
+    if (m15.rsi != null) reasons.push('RSI 15M ' + m15.rsi);
+    if (m15.supertrend) reasons.push('Supertrend 15M ' + m15.supertrend);
   }
   return {
     sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
-    sig: pair.sig, rank: pair.rank, direction: pair.chg < 0 ? 'SHORT' : 'LONG',
+    sig: pair.sig, rank: pair.rank, direction: pair.mtfDirection || 'NEUTRAL',
     dataAt: pair.dataAt || null, source: pair.source || 'Bitget Futures',
     mtf: pair.mtf || null, dataQuality: pair.dataQuality || 'PARTIAL',
     scoreBreakdown: pair.scoreBreakdown || null, mtfAvailable: pair.mtfAvailable || 0,
-    mtfStatus: pair.mtfStatus || 'UNAVAILABLE',
+    mtfStatus: pair.mtfStatus || 'UNAVAILABLE', mtfDirection: pair.mtfDirection || 'NEUTRAL',
+    mtfAlignment: pair.mtfAlignment || 0, confluencePct: pair.confluencePct || 0,
+    mtfSummary: pair.mtfSummary || null, support: pair.support || null,
+    resistance: pair.resistance || null, atr: pair.atr || null,
     evidence: reasons
   };
 }
@@ -721,7 +944,7 @@ async function fetchPaperCandles(sym, granularity) {
   const target = APIS['/bitget'] +
     '/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=' +
     encodeURIComponent(sym + 'USDT') + '&granularity=' +
-    encodeURIComponent(granularity) + '&limit=3';
+    encodeURIComponent(granularity) + '&limit=' + PAPER_CANDLE_LIMIT;
   const startedAt = Date.now();
   let result;
   try {
@@ -749,37 +972,121 @@ async function fetchPaperCandles(sym, granularity) {
     throw error;
   }
   return payload.data.map(row => ({
-    ts: Number(row[0]), open: Number(row[1]), close: Number(row[4])
-  })).filter(row => row.open > 0 && row.close > 0).sort((a, b) => a.ts - b.ts);
+    ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
+    low: Number(row[3]), close: Number(row[4]),
+    volume: Number(row[6] || row[5] || 0)
+  })).filter(row => row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
+    .sort((a, b) => a.ts - b.ts);
 }
 
-function paperCandleEvidence(rows) {
-  if (!rows || !rows.length) return null;
-  const last = rows[rows.length - 1];
-  const change = (last.close - last.open) / last.open * 100;
+function paperTimeframeEvidence(rows, timeframe) {
+  const indicators = paperIndicatorSnapshot(rows);
+  if (!indicators) {
+    return {
+      timeframe, direction: 'NEUTRAL', verdict: 'NO_DATA', status: 'UNAVAILABLE',
+      sampleSize: Array.isArray(rows) ? rows.length : 0, indicators: null
+    };
+  }
   return {
-    change: Number(change.toFixed(3)),
-    direction: change > 0.05 ? 'LONG' : change < -0.05 ? 'SHORT' : 'NEUTRAL',
-    candleAt: Number.isFinite(last.ts) ? new Date(last.ts).toISOString() : null,
-    candles: rows.length
+    timeframe, direction: indicators.direction,
+    verdict: indicators.direction === 'NEUTRAL' ? 'WAIT' : 'CONFIRM',
+    status: 'FULL', sampleSize: indicators.sampleSize,
+    strengthPct: indicators.strengthPct, change: indicators.change,
+    candleAt: indicators.candleAt, support: indicators.support,
+    resistance: indicators.resistance, atr: indicators.atr, atrPct: indicators.atrPct,
+    volumeRatio: indicators.volumeRatio, indicators: indicators.indicators
   };
+}
+
+function paperMtfSummary(mtf) {
+  const names = ['H4', 'H1', 'M30', 'M15'];
+  const available = names.map(name => mtf[name]).filter(item => item && item.status === 'FULL');
+  const longCount = available.filter(item => item.direction === 'LONG').length;
+  const shortCount = available.filter(item => item.direction === 'SHORT').length;
+  const alignmentCount = Math.max(longCount, shortCount);
+  const direction = alignmentCount >= PAPER_MTF_MIN_ALIGNMENT && longCount !== shortCount
+    ? (longCount > shortCount ? 'LONG' : 'SHORT') : 'NEUTRAL';
+  const alignmentPct = available.length ? alignmentCount / names.length * 100 : 0;
+  const higher = [mtf.H4, mtf.H1].filter(item => item && item.status === 'FULL');
+  const higherAligned = direction !== 'NEUTRAL' && higher.length === 2 &&
+    higher.every(item => item.direction === direction);
+  const triggerAligned = direction !== 'NEUTRAL' && mtf.M15 && mtf.M15.direction === direction;
+  const averageStrength = available.length
+    ? paperMean(available.map(item => item.strengthPct || 0)) : 0;
+  const confluencePct = Math.round(paperClamp(
+    alignmentPct * 0.7 + (triggerAligned ? 10 : 0) + (higherAligned ? 8 : 0) +
+      averageStrength * 0.1, 0, 100));
+  return {
+    direction, available: available.length, alignmentCount,
+    longCount, shortCount, confluencePct,
+    higherAligned, triggerAligned,
+    status: available.length === names.length ? 'FULL' : available.length ? 'PARTIAL' : 'UNAVAILABLE'
+  };
+}
+
+function applyPaperMtf(pair) {
+  const summary = paperMtfSummary(pair.mtf || {});
+  pair.mtfAvailable = summary.available;
+  pair.mtfStatus = summary.status;
+  pair.mtfDirection = summary.direction;
+  pair.mtfAlignment = summary.alignmentCount;
+  pair.confluencePct = summary.confluencePct;
+  pair.mtfSummary = summary;
+  pair.dataQuality = summary.status === 'FULL' && pair.oiReady && pair.volume > 0
+    ? 'FULL' : summary.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'PARTIAL';
+  const context = pair.contextScoreBreakdown || paperScoreDetails(
+    pair.chg, pair.fund, pair.oi, pair.oiReady, pair.volumeRatio);
+  const mtfScore = summary.confluencePct / 100 * 12;
+  const total = Number((context.total * 0.45 + mtfScore * 0.55).toFixed(1));
+  pair.scoreBreakdown = {
+    ...context,
+    mtf: Number(mtfScore.toFixed(1)),
+    confluencePct: summary.confluencePct,
+    mtfAlignment: summary.alignmentCount,
+    dataQuality: pair.dataQuality,
+    total: Math.min(12, total)
+  };
+  pair.sc = pair.scoreBreakdown.total;
+  pair.tier = paperTier(pair.sc);
+  pair.rank = Number((pair.sc * 0.5 + summary.confluencePct * 0.05 +
+    (pair.dataQuality === 'FULL' ? 0.5 : 0)).toFixed(3));
+  return pair;
 }
 
 async function enrichPaperMtf(pair) {
-  // One failed timeframe must not erase the other valid timeframes.
-  const rows = await Promise.all([
-    fetchPaperCandles(pair.sym, '4H').catch(() => []),
-    fetchPaperCandles(pair.sym, '1H').catch(() => []),
-    fetchPaperCandles(pair.sym, '15m').catch(() => [])
-  ]);
+  // Fetch a symbol's timeframes in sequence. The batch worker pool below keeps
+  // the overall request rate bounded while retaining useful parallelism across
+  // symbols.
+  const rowsByTimeframe = [];
+  for (const granularity of ['4H', '1H', '30m', '15m']) {
+    rowsByTimeframe.push(await fetchPaperCandles(pair.sym, granularity).catch(() => []));
+  }
   pair.mtf = {
-    H4: paperCandleEvidence(rows[0]),
-    H1: paperCandleEvidence(rows[1]),
-    M15: paperCandleEvidence(rows[2])
+    H4: paperTimeframeEvidence(rowsByTimeframe[0], 'H4'),
+    H1: paperTimeframeEvidence(rowsByTimeframe[1], 'H1'),
+    M30: paperTimeframeEvidence(rowsByTimeframe[2], 'M30'),
+    M15: paperTimeframeEvidence(rowsByTimeframe[3], 'M15')
   };
-  pair.mtfAvailable = Object.values(pair.mtf).filter(Boolean).length;
-  pair.mtfStatus = pair.mtfAvailable === 3 ? 'FULL' : pair.mtfAvailable ? 'PARTIAL' : 'UNAVAILABLE';
-  return pair;
+  const trigger = pair.mtf.M15;
+  pair.support = trigger.support || null;
+  pair.resistance = trigger.resistance || null;
+  pair.atr = trigger.atr || null;
+  pair.atrPct = trigger.atrPct || null;
+  return applyPaperMtf(pair);
+}
+
+async function enrichPaperMtfBatch(pairs) {
+  // Limit the number of symbols processed concurrently so a scan cannot open
+  // an unbounded burst against Bitget.
+  let cursor = 0;
+  const workers = Array.from({length: Math.min(PAPER_MTF_CONCURRENCY, pairs.length)}, async () => {
+    while (cursor < pairs.length) {
+      const pair = pairs[cursor++];
+      await enrichPaperMtf(pair);
+    }
+  });
+  await Promise.all(workers);
+  return pairs;
 }
 
 function closePaperTrade(trade, exitPrice, outcome, reason) {
@@ -847,7 +1154,12 @@ async function runPaperScan(reason, requestedCycleKey) {
   paperBusy = true;
   try {
     const payload = await fetchPaperTickers();
-    const ranked = buildPaperPairs(payload);
+    let ranked = buildPaperPairs(payload);
+    // MTF is part of eligibility, not a post-selection decoration. Enrich the
+    // strongest market-context candidates before choosing the three orders.
+    const mtfCandidates = ranked.slice(0, PAPER_MTF_MAX_CANDIDATES);
+    await enrichPaperMtfBatch(mtfCandidates);
+    ranked = mtfCandidates.sort((a, b) => b.rank - a.rank);
     const activeSymbols = new Map();
     paperState.activeTrades
       .filter(t => t.status === 'PENDING' || t.status === 'OPEN')
@@ -867,6 +1179,29 @@ async function runPaperScan(reason, requestedCycleKey) {
     for (const pair of ranked) {
       if (selected.length >= targetCount) break;
       if ((activeSymbols.get(pair.sym) || 0) >= PAPER_MAX_PER_SYMBOL) continue;
+      if (pair.mtfStatus !== 'FULL') {
+        rejected.push({sym: pair.sym, reasons: ['MTF data ' + (pair.mtfStatus || 'UNAVAILABLE')]});
+        continue;
+      }
+      if (pair.mtfDirection === 'NEUTRAL') {
+        rejected.push({sym: pair.sym, reasons: ['MTF tidak memiliki arah dominan']});
+        continue;
+      }
+      if (!pair.mtfSummary || !pair.mtfSummary.higherAligned || !pair.mtfSummary.triggerAligned) {
+        rejected.push({sym: pair.sym, reasons: ['timeframe besar atau trigger 15M berlawanan']});
+        continue;
+      }
+      if ((pair.mtfAlignment || 0) < PAPER_MTF_MIN_ALIGNMENT ||
+          (pair.confluencePct || 0) < PAPER_MIN_CONFLUENCE) {
+        rejected.push({sym: pair.sym, reasons: [
+          'konfluensi MTF ' + (pair.confluencePct || 0) + '% di bawah ' + PAPER_MIN_CONFLUENCE + '%'
+        ]});
+        continue;
+      }
+      if (pair.dataQuality !== 'FULL') {
+        rejected.push({sym: pair.sym, reasons: ['data quality ' + pair.dataQuality]});
+        continue;
+      }
       const setup = paperSetup(pair);
       const setupValidation = validatePaperSetup(pair, setup);
       if (!setupValidation.ok) {
@@ -876,7 +1211,6 @@ async function runPaperScan(reason, requestedCycleKey) {
       selected.push({pair, setup, setupValidation});
       activeSymbols.set(pair.sym, (activeSymbols.get(pair.sym) || 0) + 1);
     }
-    await Promise.all(selected.map(item => enrichPaperMtf(item.pair)));
     const placed = selected.map(item => {
       const pair = item.pair;
       const setup = item.setup;
@@ -892,6 +1226,10 @@ async function runPaperScan(reason, requestedCycleKey) {
         volume: pair.volume, mtf: pair.mtf,
         timeframe: '15M', tf: '15M', dataQuality: pair.dataQuality,
         dataAt: pair.dataAt, source: pair.source,
+        confluencePct: pair.confluencePct, mtfDirection: pair.mtfDirection,
+        mtfAlignment: pair.mtfAlignment, mtfSummary: pair.mtfSummary,
+        indicators: pair.mtf && pair.mtf.M15 ? pair.mtf.M15.indicators : null,
+        support: pair.support, resistance: pair.resistance, atr: pair.atr,
         signalReasons: candidate.evidence, scoreBreakdown: candidate.scoreBreakdown,
         setupValidation: item.setupValidation,
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
@@ -907,10 +1245,14 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.lastScanAt = new Date().toISOString();
     paperState.lastError = null;
     const strictActiveCount = paperActiveCount();
+    const hasMtfEligible = ranked.some(pair => pair.mtfStatus === 'FULL' &&
+      pair.mtfDirection !== 'NEUTRAL' && pair.mtfAlignment >= PAPER_MTF_MIN_ALIGNMENT &&
+      pair.confluencePct >= PAPER_MIN_CONFLUENCE && pair.dataQuality === 'FULL' &&
+      pair.mtfSummary && pair.mtfSummary.higherAligned && pair.mtfSummary.triggerAligned);
     const blockReason = !capacity
       ? (paperActiveCount() >= PAPER_MAX_ACTIVE ? 'MAX_ACTIVE_REACHED'
         : activeRisk >= riskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
-      : (!placed.length ? 'NO_VALID_UNALLOCATED_SETUP' :
+      : (!placed.length ? (hasMtfEligible ? 'NO_VALID_UNALLOCATED_SETUP' : 'NO_VALID_MTF_SETUP') :
         placed.length < PAPER_PER_SCAN ? 'PARTIAL_CAPACITY' : null);
     paperState.lastBlockReason = blockReason;
     paperState.recentScans.unshift({
@@ -1076,6 +1418,8 @@ function paperStatus() {
     running: paperStarted, interval: '15M', perScan: PAPER_PER_SCAN,
     pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: PAPER_MAX_ACTIVE,
     maxPerSymbol: PAPER_MAX_PER_SYMBOL,
+    candleLimit: PAPER_CANDLE_LIMIT, mtfMinAlignment: PAPER_MTF_MIN_ALIGNMENT,
+    minConfluence: PAPER_MIN_CONFLUENCE, mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
     strictActiveCount, legacyActiveCount, availableSlots,
     startingEquity: paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY),
     realizedPnl: Number(realizedPnl.toFixed(2)),

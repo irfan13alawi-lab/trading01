@@ -6,7 +6,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 
 - **Scanner V4.4** — 40+ pairs, funding real dari Bitget+BingX+Gate.io saat Futures
 - **Market selector** — Bitget Futures, Bitget Spot, dan CoinGecko Spot
-- **Paper Bot** — auto-scan 15 menit, limit order otomatis, monitor SL/TP, dan batas risiko agregat
+- **Paper Bot** — auto-scan 15 menit, MTF 4H/1H/30M/15M, indikator server-side, confluence gate, limit order otomatis, monitor SL/TP, dan batas risiko agregat
 - **Phase 2 Analysis** — MTF D1→H4→H1→M15, order flow, best setup
 - **Backtest Engine** — single pair + multi 10 pairs dari market yang dipilih
 - **Trading Journal** — equity curve, lesson wall, Kelly Criterion
@@ -22,7 +22,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 | Harga Spot | Bitget API v2 Spot atau CoinGecko Spot | Real-time/cached |
 | Funding backup | BingX + Gate.io | Real-time |
 | Fear & Greed | Alternative.me | Harian |
-| MTF klines | Bitget futures candles | Real-time |
+| MTF klines + indikator | Bitget futures candles 120 bar, EMA/RSI/MACD/Supertrend/ATR | Real-time |
 | OHLC chart + RSI/MACD | Bitget futures candles | Cached 1 menit |
 | OHLC Spot | Bitget Spot candles atau CoinGecko Spot OHLC | Sesuai market yang dipilih |
 
@@ -62,11 +62,28 @@ market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
 
 Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 `paper-bot-state.json`. Restart normal tidak menghapus trade aktif maupun riwayat.
+Sebelum order dibuat, kandidat wajib memiliki candle MTF 4H/1H/30M/15M lengkap,
+minimal 3 dari 4 timeframe searah, dan confluence default minimal 60%. Arah order
+ditentukan oleh MTF, bukan hanya perubahan 24 jam. Server menyimpan indikator,
+support/resistance, ATR, kualitas data, dan alasan sinyal pada trade.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
 dibatasi 15%; posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak
 mengambil slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak
 menambah exposure yang tidak disengaja. Setup dengan entry/SL/TP invalid tidak
 akan dibuat menjadi paper order.
+
+Parameter MTF dapat disesuaikan melalui environment service bila diperlukan:
+
+```bash
+PAPER_CANDLE_LIMIT=120
+PAPER_MTF_MIN_ALIGNMENT=3
+PAPER_MIN_CONFLUENCE=60
+PAPER_MTF_MAX_CANDIDATES=24
+PAPER_MTF_CONCURRENCY=6
+```
+
+Status `/paper/status` juga menampilkan parameter tersebut, `mtfStatus`,
+`mtfAlignment`, `confluencePct`, `dataQuality`, dan detail indikator per kandidat.
 
 Konfigurasi alert dilakukan hanya pada service VPS, bukan di browser:
 

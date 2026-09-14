@@ -243,6 +243,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">New Slots</span><span class="v" id="bot-new-slots">--</span></div>
   <div class="hstat"><span class="l">Risk Guard</span><span class="v" id="bot-risk-guard">--</span></div>
   <div id="bot-guard" class="muted" style="flex:1 1 100%;color:#e3b341;">Checking capacity guard...</div>
+  <div id="bot-last-scan" class="muted" style="flex:1 1 100%;padding:6px 0;border-top:1px solid rgba(255,255,255,.05);">Last VPS scan: checking...</div>
   <div id="bot-trades-list" style="flex:1 1 100%;display:flex;gap:8px;flex-wrap:wrap;"></div>
 </div>
 
@@ -4164,6 +4165,35 @@ function applyServerClosedTrades(closedTrades) {
   });
 }
 
+function renderServerPaperScan(status) {
+  var el = document.getElementById('bot-last-scan');
+  if(!el) return;
+  var scan = status && Array.isArray(status.recentScans) ? status.recentScans[0] : null;
+  if(!scan) {
+    el.textContent = 'Last VPS scan: belum ada scan';
+    return;
+  }
+  var at = scan.at ? new Date(scan.at).toLocaleTimeString('id-ID') : '--';
+  var candidates = Array.isArray(scan.selected) ? scan.selected.slice(0, 3) : [];
+  var cards = candidates.map(function(c) {
+    var dir = c.direction || c.mtfDirection || 'NEUTRAL';
+    var dirColor = dir === 'LONG' ? '#3fb950' : dir === 'SHORT' ? '#f85149' : '#e3b341';
+    var mtf = (c.mtfAlignment || 0) + '/4 TF';
+    var conf = c.confluencePct != null ? c.confluencePct + '%' : '--';
+    var reasons = Array.isArray(c.evidence) ? c.evidence.slice(0, 4).join(' · ') : '';
+    return '<div style="display:inline-block;vertical-align:top;min-width:180px;max-width:31%;margin:4px 6px 0 0;padding:5px 7px;border:1px solid #21262d;border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
+      + '<b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
+      + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span>'
+      + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + sourceEsc(reasons || c.dataQuality || '') + '</div></div>';
+  }).join('');
+  var placed = Array.isArray(scan.placed) ? scan.placed.length : 0;
+  var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
+  el.innerHTML = '<div><b style="color:#8b949e;">Last VPS scan ' + sourceEsc(scan.cycleKey || '') + '</b>'
+    + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · candidates ' + (scan.candidates || 0)
+    + ' · placed ' + placed + ' · ' + sourceEsc(reason) + '</span></div>'
+    + (cards || '<span style="color:#484f58;">No candidate detail</span>');
+}
+
 function applyServerPaperStatus(status, announce) {
   if(!status || !status.ok) return;
   var wasServer = G.paperServer;
@@ -4215,6 +4245,7 @@ function applyServerPaperStatus(status, announce) {
       RISK_BUDGET_REACHED: 'risk budget bot baru tercapai',
       NO_CAPACITY: 'kapasitas belum tersedia',
       NO_VALID_UNALLOCATED_SETUP: 'tidak ada setup baru yang valid',
+      NO_VALID_MTF_SETUP: 'tidak ada setup MTF yang memenuhi syarat',
       PARTIAL_CAPACITY: 'sebagian slot tersedia'
     };
     var guardReason = !serverRunning ? 'service VPS berhenti'
@@ -4241,6 +4272,7 @@ function applyServerPaperStatus(status, announce) {
     }
   }
   applyServerClosedTrades(status.closedTrades);
+  renderServerPaperScan(status);
   updateActiveTradesPanel();
   try { renderPositionsWidget(); } catch(e) {}
   var eqPage = document.getElementById('p-eq');
@@ -4754,10 +4786,14 @@ function updateActiveTradesPanel() {
     var cancelBtn = G.paperServer ? '' : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
     var classLabel = isLegacy(t) ? 'LEGACY' : 'STRICT';
     var classColor = isLegacy(t) ? '#8b949e' : '#58a6ff';
+    var conf = t.confluencePct != null ? ' · Conf '+t.confluencePct+'%' : '';
+    var mtf = t.mtfAlignment ? ' · MTF '+t.mtfAlignment+'/4' : '';
+    var reasonTitle = Array.isArray(t.signalReasons) ? t.signalReasons.join(' · ') : '';
     return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;">'
       + '<span style="color:'+statusCol+';font-size:9px;min-width:50px;">'+t.status+'</span>'
       + '<span style="color:'+classColor+';font-size:8px;min-width:38px;">'+classLabel+'</span>'
       + '<b>'+t.sym+'</b>'
+      + '<span style="color:#8b949e;" title="'+sourceEsc(reasonTitle)+'">'+sourceEsc(t.dir||'')+sourceEsc(mtf)+sourceEsc(conf)+'</span>'
       + '<span style="color:#484f58;">Lmt: '+entryStr+'</span>'
       + '<span style="color:#484f58;">SL: <span style="color:#f85149;">$'+t.sl+'</span></span>'
       + '<span style="color:#484f58;">TP: <span style="color:#3fb950;">$'+t.tp1+'</span></span>'
