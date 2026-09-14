@@ -201,7 +201,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .skeleton{background:linear-gradient(90deg,var(--bg3),#202735,var(--bg3));background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:5px;min-height:12px;}
 @keyframes shimmer{to{background-position:-200% 0;}}
 @media(max-width:720px){.vps-log-card{max-width:100%;width:100%;}.hstats{gap:8px;}.hright{width:100%;}.market-picker{flex:1;}.market-picker select{flex:1;}.card{padding:10px;}.page{padding:10px;}}
-@media print{#hdr,#nav,#ticker,#active-trades-panel,.btn,.market-picker{display:none!important;} .page{display:none!important;} #p-eq{display:block!important;background:#fff;color:#111;} .card,.kpi{border-color:#ddd;background:#fff;color:#111;}}
+@media print{#hdr,#nav,#ticker,#active-trades-panel,.btn,.market-picker{display:none!important;} .page{display:none!important;} body:not(.print-backtest) #p-eq,body.print-backtest #p-bt{display:block!important;background:#fff;color:#111;} .card,.kpi{border-color:#ddd;background:#fff;color:#111;}}
 </style>
 </head>
 <body>
@@ -6367,6 +6367,8 @@ function printBacktestReport() {
     return;
   }
   sLog('Opening print dialog for the visible backtest report. Choose Save as PDF in the browser.');
+  document.body.classList.add('print-backtest');
+  window.addEventListener('afterprint', function clearBacktestPrintMode(){ document.body.classList.remove('print-backtest'); }, {once:true});
   window.print();
 }
 
