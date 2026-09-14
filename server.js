@@ -332,6 +332,8 @@ function defaultPaperState() {
   };
 }
 
+let paperRecoveredFromBackup = false;
+
 function loadPaperState() {
   let parsed;
   let usedBackup = false;
@@ -341,6 +343,7 @@ function loadPaperState() {
     try {
       parsed = JSON.parse(fs.readFileSync(PAPER_STATE_BACKUP_FILE, 'utf8'));
       usedBackup = true;
+      paperRecoveredFromBackup = true;
       console.error('[paper] main state unreadable; recovered from backup');
     } catch (_) {
       return defaultPaperState();
@@ -436,11 +439,12 @@ function savePaperState() {
       lastSavedAt: new Date().toISOString()
     };
     fs.writeFileSync(tempFile, JSON.stringify(nextState, null, 2));
-    if (fs.existsSync(PAPER_STATE_FILE)) {
+    if (fs.existsSync(PAPER_STATE_FILE) && !paperRecoveredFromBackup) {
       try { fs.copyFileSync(PAPER_STATE_FILE, PAPER_STATE_BACKUP_FILE); } catch (_) {}
     }
     fs.renameSync(tempFile, PAPER_STATE_FILE);
     paperState.lastSavedAt = nextState.lastSavedAt;
+    paperRecoveredFromBackup = false;
   } catch (error) {
     console.error('[paper] state save failed:', error.message);
     try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (_) {}
