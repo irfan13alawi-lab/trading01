@@ -2,13 +2,14 @@
 set -euo pipefail
 
 BASE_URL="https://raw.githubusercontent.com/irfan13alawi-lab/trading01/main"
+CACHE_BUST="$(date +%s)"
 PROXY_DIR="/home/ubuntu/nexora-proxy"
 TMP_DIR="$(mktemp -d /tmp/nexora-deploy.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 download() {
   curl -fL --retry 3 --connect-timeout 10 --max-time 60 \
-    "$BASE_URL/$1" -o "$TMP_DIR/$1"
+    -H 'Cache-Control: no-cache' "$BASE_URL/$1?cb=$CACHE_BUST" -o "$TMP_DIR/$1"
 }
 
 download server.js
