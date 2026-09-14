@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# SSH/systemd shells may not load the interactive Node environment. Keep the
+# deploy script usable from both an interactive shell and a non-interactive SSH
+# command, where npm/node otherwise appear to be missing.
+export PATH="/home/ubuntu/.local/bin:/home/ubuntu/.hermes/node/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
 BASE_URL="https://raw.githubusercontent.com/irfan13alawi-lab/trading01/main"
 CACHE_BUST="$(date +%s)"
 PROXY_DIR="/home/ubuntu/nexora-proxy"
