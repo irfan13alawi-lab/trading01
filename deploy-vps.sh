@@ -15,6 +15,7 @@ download() {
 download server.js
 download package.json
 download Nexora_V4_Clean.html
+download nexora-mobile.html
 download nexora-proxy.service
 download nexora-watchdog.sh
 download nexora-watchdog.service
@@ -26,6 +27,7 @@ install -m 0644 "$TMP_DIR/package.json" package.json
 npm install --omit=dev
 
 sudo install -m 0644 "$TMP_DIR/Nexora_V4_Clean.html" /var/www/html/nexora/index.html
+sudo install -m 0644 "$TMP_DIR/nexora-mobile.html" /var/www/html/nexora/mobile.html
 sudo install -m 0644 "$TMP_DIR/nexora-proxy.service" /etc/systemd/system/nexora-proxy.service
 sudo install -m 0755 "$TMP_DIR/nexora-watchdog.sh" "$PROXY_DIR/nexora-watchdog.sh"
 sudo install -m 0644 "$TMP_DIR/nexora-watchdog.service" /etc/systemd/system/nexora-watchdog.service

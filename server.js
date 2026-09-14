@@ -49,7 +49,7 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 3;
+const PAPER_SCHEMA_VERSION = 4;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -92,6 +92,10 @@ const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
+// This service is paper-only, but the operational endpoints can still pause
+// the bot or create/close paper records. Set PAPER_ADMIN_TOKEN in the service
+// environment when the dashboard is exposed beyond a trusted network.
+const PAPER_ADMIN_TOKEN = String(process.env.PAPER_ADMIN_TOKEN || '').trim();
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 const PAPER_STATE_BACKUP_FILE = PAPER_STATE_FILE + '.bak';
@@ -110,7 +114,10 @@ const APIS = {
   '/gate': 'https://api.gateio.ws',
   '/altme': 'https://api.alternative.me',
   '/coingecko': 'https://api.coingecko.com',
-  '/coinpaprika': 'https://api.coinpaprika.com'
+  '/coinpaprika': 'https://api.coinpaprika.com',
+  '/binance': 'https://fapi.binance.com',
+  '/okx': 'https://www.okx.com',
+  '/macro': 'https://nfs.faireconomy.media'
 };
 
 const sourceHealth = {};
@@ -496,6 +503,25 @@ function defaultPaperState() {
   return {
     schemaVersion: PAPER_SCHEMA_VERSION,
     enabled: true,
+    paused: false,
+    killSwitch: false,
+    settings: {
+      perScan: PAPER_PER_SCAN,
+      maxActive: PAPER_MAX_ACTIVE,
+      maxPerSymbol: PAPER_MAX_PER_SYMBOL,
+      riskPct: PAPER_RISK_PCT,
+      maxDailyLossR: PAPER_MAX_DAILY_LOSS_R,
+      minConfluence: PAPER_MIN_CONFLUENCE,
+      minSignalScore: PAPER_MIN_SIGNAL_SCORE,
+      minRR: PAPER_MIN_RR,
+      tp1ClosePct: PAPER_TP1_CLOSE_PCT,
+      strategyEnabled: true,
+      tradingHoursEnabled: false,
+      tradingStartUtc: '00:00',
+      tradingEndUtc: '23:59',
+      whitelist: [],
+      blacklist: []
+    },
     startingEquity: PAPER_STARTING_EQUITY,
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: PAPER_DEFAULT_COHORT_ID,
@@ -538,6 +564,7 @@ function loadPaperState() {
     const state = {
       ...defaultPaperState(),
       ...parsed,
+      settings: {...defaultPaperState().settings, ...(parsed.settings || {})},
       oiSnapshot: parsed.oiSnapshot || {},
       activeTrades: Array.isArray(parsed.activeTrades) ? parsed.activeTrades.map(normalisePaperTrade) : [],
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades.map(normalisePaperTrade) : [],
@@ -628,6 +655,51 @@ let paperStarted = false;
 if (paperState._needsSave) {
   delete paperState._needsSave;
   savePaperState();
+}
+
+function paperSettingNumber(name, fallback, min, max) {
+  const raw = paperState && paperState.settings ? Number(paperState.settings[name]) : NaN;
+  return Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : fallback;
+}
+
+function paperSettings() {
+  const raw = paperState && paperState.settings || {};
+  const list = value => Array.isArray(value)
+    ? [...new Set(value.map(item => String(item || '').trim().toUpperCase()).filter(Boolean))].slice(0, 200)
+    : [];
+  return {
+    perScan: Math.round(paperSettingNumber('perScan', PAPER_PER_SCAN, 1, 5)),
+    maxActive: Math.round(paperSettingNumber('maxActive', PAPER_MAX_ACTIVE, 3, 100)),
+    maxPerSymbol: Math.round(paperSettingNumber('maxPerSymbol', PAPER_MAX_PER_SYMBOL, 1, 3)),
+    riskPct: paperSettingNumber('riskPct', PAPER_RISK_PCT, 0.1, 2),
+    maxDailyLossR: paperSettingNumber('maxDailyLossR', PAPER_MAX_DAILY_LOSS_R, 1, 20),
+    minConfluence: paperSettingNumber('minConfluence', PAPER_MIN_CONFLUENCE, 50, 95),
+    minSignalScore: paperSettingNumber('minSignalScore', PAPER_MIN_SIGNAL_SCORE, 50, 95),
+    minRR: paperSettingNumber('minRR', PAPER_MIN_RR, 1.5, 5),
+    tp1ClosePct: paperSettingNumber('tp1ClosePct', PAPER_TP1_CLOSE_PCT, 10, 90),
+    strategyEnabled: raw.strategyEnabled !== false,
+    tradingHoursEnabled: raw.tradingHoursEnabled === true,
+    tradingStartUtc: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(raw.tradingStartUtc || '')) ? String(raw.tradingStartUtc) : '00:00',
+    tradingEndUtc: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(raw.tradingEndUtc || '')) ? String(raw.tradingEndUtc) : '23:59',
+    whitelist: list(raw.whitelist),
+    blacklist: list(raw.blacklist)
+  };
+}
+
+function paperWithinTradingHours(settings, timestamp) {
+  if (!settings.tradingHoursEnabled) return true;
+  const now = new Date(timestamp || Date.now());
+  const current = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const parse = value => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const start = parse(settings.tradingStartUtc);
+  const end = parse(settings.tradingEndUtc);
+  return start <= end ? current >= start && current <= end : current >= start || current <= end;
+}
+
+function paperSymbolAllowed(sym, settings) {
+  const symbol = String(sym || '').toUpperCase();
+  if (settings.blacklist.includes(symbol)) return false;
+  return !settings.whitelist.length || settings.whitelist.includes(symbol);
 }
 
 function savePaperState() {
@@ -1017,6 +1089,7 @@ function buildPaperPairs(payload) {
 
 function paperSetup(pair, options) {
   const setupOptions = options || {};
+  const cfg = paperSettings();
   const roundPrice = value => paperRoundPriceForPair(value, pair);
   const dir = pair.mtfDirection || (pair.chg < 0 ? 'SHORT' : 'LONG');
   const m15 = pair.mtf && pair.mtf.M15;
@@ -1068,7 +1141,7 @@ function paperSetup(pair, options) {
     : Math.min(entry - riskDistance * 3, tp1 * 0.99, nextTarget || Number.POSITIVE_INFINITY));
   const sizingEquity = Number.isFinite(Number(setupOptions.equity))
     ? Number(setupOptions.equity) : paperEquity();
-  const riskDollar = Math.max(0, sizingEquity * PAPER_RISK_PCT / 100);
+  const riskDollar = Math.max(0, sizingEquity * cfg.riskPct / 100);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
@@ -1078,12 +1151,13 @@ function paperSetup(pair, options) {
     atr: Number(atr.toFixed(8)),
     contracts: Number(contracts.toFixed(6)),
     size: Number((contracts * entry).toFixed(2)),
-    riskPct: PAPER_RISK_PCT,
+    riskPct: cfg.riskPct,
     riskDollar: Number(riskDollar.toFixed(2))
   };
 }
 
 function validatePaperSetup(pair, setup) {
+  const cfg = paperSettings();
   const reasons = [];
   const reasonCodes = [];
   const price = paperNumber(pair && pair.price);
@@ -1121,7 +1195,7 @@ function validatePaperSetup(pair, setup) {
   if (stopPct <= 0.25) {
     reasons.push('jarak SL terlalu kecil'); reasonCodes.push('STOP_TOO_CLOSE');
   }
-  if (rr < PAPER_MIN_RR) {
+  if (rr < cfg.minRR) {
     reasons.push('risk/reward di bawah batas minimum'); reasonCodes.push('RR_TOO_LOW');
   }
   const expectedLoss = entry > 0 ? Math.abs(entry - sl) / entry * Math.abs(setup.size || 0) : 0;
@@ -1759,7 +1833,7 @@ function partialClosePaperTrade(trade, exitPrice) {
   if (trade.tp1Hit) return false;
   const currentSize = paperTradeRemainingSize(trade);
   if (!currentSize) return false;
-  const closePct = Math.max(10, Math.min(90, paperNumber(trade.tp1ClosePct || PAPER_TP1_CLOSE_PCT)));
+  const closePct = Math.max(10, Math.min(90, paperNumber(trade.tp1ClosePct || paperSettings().tp1ClosePct)));
   const closeSize = currentSize * closePct / 100;
   const pnlPart = paperTradePnl(trade, exitPrice, closeSize);
   trade.realizedPnlTp1 = paperNumber(trade.realizedPnlTp1) + pnlPart;
@@ -1873,7 +1947,9 @@ function applyPaperInstrumentMetadata(pairs, instruments) {
 }
 
 async function runPaperScan(reason, requestedCycleKey) {
-  if (!paperState.enabled || paperBusy) return;
+  const cfg = paperSettings();
+  if (!paperState.enabled || paperState.paused || paperState.killSwitch || !cfg.strategyEnabled ||
+      !paperWithinTradingHours(cfg) || paperBusy) return;
   const cycleKey = requestedCycleKey || paperCycleKey(Date.now());
   if (paperState.lastCycleKey === cycleKey) return;
   paperBusy = true;
@@ -1898,14 +1974,14 @@ async function runPaperScan(reason, requestedCycleKey) {
     const equity = paperEquity();
     const activeRisk = paperActiveRiskDollar();
     const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
-    const perTradeRisk = equity * PAPER_RISK_PCT / 100;
+    const perTradeRisk = equity * cfg.riskPct / 100;
     const dailyLossR = paperDailyLossR();
-    const dailyGuard = dailyLossR <= -PAPER_MAX_DAILY_LOSS_R;
+    const dailyGuard = dailyLossR <= -cfg.maxDailyLossR;
     const riskSlots = perTradeRisk > 0
       ? Math.floor(Math.max(0, riskBudget - activeRisk) / perTradeRisk)
       : 0;
     const capacity = Math.min(
-      dailyGuard ? 0 : Math.max(0, PAPER_MAX_ACTIVE - paperActiveCount()), riskSlots);
+      dailyGuard ? 0 : Math.max(0, cfg.maxActive - paperActiveCount()), riskSlots);
     const directionRisk = {LONG: 0, SHORT: 0};
     const directionCount = {LONG: 0, SHORT: 0};
     paperState.activeTrades
@@ -1918,10 +1994,14 @@ async function runPaperScan(reason, requestedCycleKey) {
       .filter(t => paperIsActive(t) && paperIsTrialTrade(t)).length;
     const selected = [];
     const rejected = [];
-    const targetCount = Math.min(PAPER_PER_SCAN, capacity);
+    const targetCount = Math.min(cfg.perScan, capacity);
     for (const pair of ranked) {
       if (selected.length >= targetCount) break;
-      if ((activeSymbols.get(pair.sym) || 0) >= PAPER_MAX_PER_SYMBOL) continue;
+      if (!paperSymbolAllowed(pair.sym, cfg)) {
+        paperReject(rejected, pair, ['SYMBOL_FILTERED'], ['symbol whitelist/blacklist filter']);
+        continue;
+      }
+      if ((activeSymbols.get(pair.sym) || 0) >= cfg.maxPerSymbol) continue;
       if (pair.mtfStatus !== 'FULL') {
         paperReject(rejected, pair,
           [pair.mtfStatus === 'STALE' ? 'MTF_STALE' : pair.mtfStatus === 'PARTIAL' ? 'MTF_PARTIAL' : 'MTF_UNAVAILABLE'],
@@ -1954,15 +2034,15 @@ async function runPaperScan(reason, requestedCycleKey) {
         continue;
       }
       if ((pair.mtfAlignment || 0) < PAPER_MTF_MIN_ALIGNMENT ||
-          (pair.confluencePct || 0) < PAPER_MIN_CONFLUENCE) {
+          (pair.confluencePct || 0) < cfg.minConfluence) {
         paperReject(rejected, pair, ['CONFLUENCE_LOW'], [
-          'konfluensi MTF ' + (pair.confluencePct || 0) + '% di bawah ' + PAPER_MIN_CONFLUENCE + '%'
+          'konfluensi MTF ' + (pair.confluencePct || 0) + '% di bawah ' + cfg.minConfluence + '%'
         ]);
         continue;
       }
-      if (!pair.signalScores || (pair.signalScores.total || 0) < PAPER_MIN_SIGNAL_SCORE) {
+      if (!pair.signalScores || (pair.signalScores.total || 0) < cfg.minSignalScore) {
         paperReject(rejected, pair, ['SIGNAL_SCORE_LOW'], [
-          'signal score ' + ((pair.signalScores && pair.signalScores.total) || 0) + '/' + PAPER_MIN_SIGNAL_SCORE
+          'signal score ' + ((pair.signalScores && pair.signalScores.total) || 0) + '/' + cfg.minSignalScore
         ]);
         continue;
       }
@@ -2012,7 +2092,7 @@ async function runPaperScan(reason, requestedCycleKey) {
         originalSize: setup.size, remainingSize: setup.size,
         originalContracts: setup.contracts, remainingContracts: setup.contracts,
         riskPct: setup.riskPct, riskDollar: setup.riskDollar,
-        riskDollarAtEntry: setup.riskDollar, tp1ClosePct: PAPER_TP1_CLOSE_PCT,
+        riskDollarAtEntry: setup.riskDollar, tp1ClosePct: cfg.tp1ClosePct,
         tp1Hit: false, tp1HitAt: null, slAfterTp1: null,
         realizedPnlTp1: 0, realizedPnl: 0, realizedPnlFinal: 0,
         fillMethod: null, lastProcessedCandleAt: null,
@@ -2057,16 +2137,16 @@ async function runPaperScan(reason, requestedCycleKey) {
     const strictActiveCount = paperActiveCount();
     const hasMtfEligible = ranked.some(pair => pair.mtfStatus === 'FULL' &&
       pair.mtfDirection !== 'NEUTRAL' && pair.mtfAlignment >= PAPER_MTF_MIN_ALIGNMENT &&
-      pair.confluencePct >= PAPER_MIN_CONFLUENCE &&
-      pair.signalScores && pair.signalScores.total >= PAPER_MIN_SIGNAL_SCORE &&
+      pair.confluencePct >= cfg.minConfluence &&
+      pair.signalScores && pair.signalScores.total >= cfg.minSignalScore &&
       pair.dataQuality === 'FULL' &&
       pair.mtfSummary && pair.mtfSummary.higherAligned &&
       pair.mtfSummary.confirmAligned && pair.mtfSummary.triggerAligned);
     const blockReason = dailyGuard ? 'DAILY_DRAWDOWN_GUARD' : !capacity
-      ? (paperActiveCount() >= PAPER_MAX_ACTIVE ? 'MAX_ACTIVE_REACHED'
+      ? (paperActiveCount() >= cfg.maxActive ? 'MAX_ACTIVE_REACHED'
         : activeRisk >= riskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
       : (!placed.length ? (hasMtfEligible ? 'NO_VALID_UNALLOCATED_SETUP' : 'NO_VALID_MTF_SETUP') :
-        placed.length < PAPER_PER_SCAN ? 'PARTIAL_CAPACITY' : null);
+        placed.length < cfg.perScan ? 'PARTIAL_CAPACITY' : null);
     paperState.lastBlockReason = blockReason;
     paperState.recentScans.unshift({
       cycleKey, at: paperState.lastScanAt, reason: reason || '15M close',
@@ -2075,8 +2155,8 @@ async function runPaperScan(reason, requestedCycleKey) {
       placed,
       rejected: rejected.slice(0, 20),
       capacity: {
-        requested: PAPER_PER_SCAN, placed: placed.length,
-        availableSlots: Math.max(0, PAPER_MAX_ACTIVE - strictActiveCount),
+        requested: cfg.perScan, placed: placed.length,
+        availableSlots: Math.max(0, cfg.maxActive - strictActiveCount),
         availableRisk: Number(Math.max(0, riskBudget - activeRisk).toFixed(2)),
         dailyLossR: Number(dailyLossR.toFixed(2)),
         blockReason
@@ -2572,6 +2652,7 @@ async function paperReplay(query) {
 }
 
 function paperStatus() {
+  const cfg = paperSettings();
   const active = paperState.activeTrades.map(paperTradeView);
   const open = active.filter(t => t.status === 'OPEN').length;
   const partial = active.filter(t => t.status === 'TP1_PARTIAL').length;
@@ -2611,7 +2692,7 @@ function paperStatus() {
       return counts;
     }, {LONG: 0, SHORT: 0});
   const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
-  const availableSlots = Math.max(0, PAPER_MAX_ACTIVE - strictActiveCount);
+  const availableSlots = Math.max(0, cfg.maxActive - strictActiveCount);
   const availableRisk = Math.max(0, riskBudget - activeRisk);
   const stats = paperStats();
   const trialStats = paperStats({
@@ -2619,24 +2700,28 @@ function paperStatus() {
     cohortId: paperState.cohortId
   });
   const dailyLossR = paperDailyLossR();
-  const blockReason = paperState.lastBlockReason ||
-    (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * PAPER_RISK_PCT / 100
+  const blockReason = paperState.killSwitch ? 'KILL_SWITCH' : paperState.paused ? 'PAUSED' :
+    !cfg.strategyEnabled ? 'STRATEGY_DISABLED' : !paperWithinTradingHours(cfg) ? 'OUTSIDE_TRADING_HOURS' :
+    paperState.lastBlockReason ||
+    (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * cfg.riskPct / 100
       ? 'RISK_BUDGET_REACHED' : null);
   return {
     ok: true, service: 'nexora-paper-bot', enabled: paperState.enabled,
-    running: paperStarted, interval: '15M', perScan: PAPER_PER_SCAN,
-    pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: PAPER_MAX_ACTIVE,
-    maxPerSymbol: PAPER_MAX_PER_SYMBOL,
+    running: paperStarted, paused: !!paperState.paused, killSwitch: !!paperState.killSwitch,
+    interval: '15M', perScan: cfg.perScan,
+    pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: cfg.maxActive,
+    maxPerSymbol: cfg.maxPerSymbol,
     candleLimit: PAPER_CANDLE_LIMIT, mtfMinAlignment: PAPER_MTF_MIN_ALIGNMENT,
-    minConfluence: PAPER_MIN_CONFLUENCE, signalMode: PAPER_SIGNAL_MODE,
-    minSignalScore: PAPER_MIN_SIGNAL_SCORE,
+    minConfluence: cfg.minConfluence, signalMode: PAPER_SIGNAL_MODE,
+    minSignalScore: cfg.minSignalScore,
     strategyVersion: PAPER_STRATEGY_VERSION, cohortId: paperState.cohortId,
     minCandles: PAPER_MIN_CANDLES, monitorGranularity: '1m',
-    tp1ClosePct: PAPER_TP1_CLOSE_PCT, maxDailyLossR: PAPER_MAX_DAILY_LOSS_R,
+    tp1ClosePct: cfg.tp1ClosePct, maxDailyLossR: cfg.maxDailyLossR,
     maxDirectionRiskPct: PAPER_MAX_DIRECTION_RISK_PCT,
     maxPerDirection: PAPER_MAX_PER_DIRECTION,
     maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
     mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
+    settings: cfg,
     freshnessMaxAgeSec: Object.fromEntries(Object.entries(PAPER_TIMEFRAME_MAX_AGE_MS)
       .map(([tf, ms]) => [tf, Math.round(ms / 1000)])),
     strictActiveCount, trialActiveCount: strictActiveCount,
@@ -2651,7 +2736,7 @@ function paperStatus() {
     legacyUnrealizedPnl: Number((totalUnrealizedPnl - unrealizedPnl).toFixed(2)),
     totalEquity: Number((paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
       totalRealizedPnl + totalUnrealizedPnl).toFixed(2)),
-    riskPct: PAPER_RISK_PCT,
+    riskPct: cfg.riskPct,
     maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
     activeRisk: Number(activeRisk.toFixed(2)),
     legacyActiveRisk: Number(Math.max(0, legacyActiveRisk).toFixed(2)),
@@ -2659,7 +2744,7 @@ function paperStatus() {
     riskBudget: Number(riskBudget.toFixed(2)),
     availableRisk: Number(availableRisk.toFixed(2)),
     dailyLossR: Number(dailyLossR.toFixed(2)),
-    dailyGuard: dailyLossR <= -PAPER_MAX_DAILY_LOSS_R,
+    dailyGuard: dailyLossR <= -cfg.maxDailyLossR,
     blockReason,
     alerts: {
       telegram: TELEGRAM_ALERTS_ENABLED,
@@ -2706,6 +2791,7 @@ function paperStatus() {
 }
 
 function paperDiagnostics() {
+  const cfg = paperSettings();
   const status = paperStatus();
   return {
     ok: true,
@@ -2717,16 +2803,16 @@ function paperDiagnostics() {
     nextScanAt: status.nextScanAt,
     lastMonitorAt: status.lastMonitorAt,
     config: {
-      interval: '15M', perScan: PAPER_PER_SCAN, pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000,
+      interval: '15M', perScan: cfg.perScan, pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000,
       minCandles: PAPER_MIN_CANDLES, candleLimit: PAPER_CANDLE_LIMIT,
-      mtfMinAlignment: PAPER_MTF_MIN_ALIGNMENT, minConfluence: PAPER_MIN_CONFLUENCE,
-      minSignalScore: PAPER_MIN_SIGNAL_SCORE,
-      minRR: PAPER_MIN_RR, riskPct: PAPER_RISK_PCT,
+      mtfMinAlignment: PAPER_MTF_MIN_ALIGNMENT, minConfluence: cfg.minConfluence,
+      minSignalScore: cfg.minSignalScore,
+      minRR: cfg.minRR, riskPct: cfg.riskPct,
       maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
       maxDirectionRiskPct: PAPER_MAX_DIRECTION_RISK_PCT,
       maxPerDirection: PAPER_MAX_PER_DIRECTION,
       maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
-      maxDailyLossR: PAPER_MAX_DAILY_LOSS_R, tp1ClosePct: PAPER_TP1_CLOSE_PCT,
+      maxDailyLossR: cfg.maxDailyLossR, tp1ClosePct: cfg.tp1ClosePct,
       monitorGranularity: '1m'
     },
     runtime: {
@@ -2735,7 +2821,8 @@ function paperDiagnostics() {
     },
     sources: sourceHealthView(),
     bot: {
-      enabled: paperState.enabled, running: paperStarted,
+      enabled: paperState.enabled, running: paperStarted, paused: !!paperState.paused,
+      killSwitch: !!paperState.killSwitch, settings: cfg,
       lastScanAt: status.lastScanAt, lastMonitorAt: status.lastMonitorAt,
       nextScanAt: status.nextScanAt,
       lastPriceAt: status.lastPriceAt, lastError: status.lastError,
@@ -2745,6 +2832,153 @@ function paperDiagnostics() {
       dailyLossR: status.dailyLossR, dailyGuard: status.dailyGuard
     }
   };
+}
+
+function paperAdminAuthorized(req, requestUrl) {
+  if (!PAPER_ADMIN_TOKEN) return true;
+  const header = String(req.headers.authorization || '');
+  const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
+  const queryToken = requestUrl && requestUrl.searchParams.get('token');
+  return bearer === PAPER_ADMIN_TOKEN || queryToken === PAPER_ADMIN_TOKEN;
+}
+
+function readJsonBody(req, maxBytes) {
+  const limit = maxBytes || 64 * 1024;
+  return new Promise((resolve, reject) => {
+    let body = '';
+    let size = 0;
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      size += Buffer.byteLength(chunk);
+      if (size > limit) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
+    req.on('end', () => {
+      if (!body.trim()) return resolve({});
+      try { resolve(JSON.parse(body)); }
+      catch (_) { reject(new Error('Invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function paperControlError(res, status, message) {
+  send(res, status, JSON.stringify({ok: false, error: message}));
+}
+
+function paperFindTrade(id) {
+  const target = String(id || '').trim();
+  return paperState.activeTrades.find(trade => String(trade.id) === target) || null;
+}
+
+function cancelPaperTrade(trade, reason) {
+  if (!trade || !paperIsActive(trade)) return false;
+  const at = new Date().toISOString();
+  const closeReason = reason || 'Cancelled from dashboard';
+  trade.status = 'CANCELLED';
+  trade.closedAt = at;
+  trade.exitPrice = paperNumber(trade.currentPrice || trade.entryLimit) || trade.entryLimit;
+  trade.outcome = 'CANCELLED';
+  trade.closeReason = closeReason;
+  trade.r = 0;
+  trade.pnl = Number((trade.realizedPnl || 0).toFixed(2));
+  trade.unrealPnl = 0;
+  paperSetRemainingSize(trade, 0);
+  paperAddTradeEvent(trade, 'CANCELLED', {price: trade.exitPrice, reason: closeReason});
+  paperState.closedTrades.unshift({...paperTradeView(trade), exitPrice: trade.exitPrice,
+    closedAt: at, outcome: 'CANCELLED', closeReason, r: 0, pnl: trade.pnl});
+  paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
+  void sendTelegramMessage(paperCloseAlert({...paperTradeView(trade), exitPrice: trade.exitPrice,
+    outcome: 'CANCELLED', r: 0, pnl: trade.pnl, closeReason}));
+  return true;
+}
+
+async function closePaperTradeFromDashboard(trade, reason) {
+  if (!trade || !paperIsActive(trade)) return false;
+  if (trade.status === 'PENDING') return cancelPaperTrade(trade, reason || 'Pending cancelled from dashboard');
+  let price = paperNumber(trade.currentPrice || trade.entryActual || trade.entryLimit);
+  try {
+    const payload = await fetchPaperTickers();
+    const row = Array.isArray(payload.data) ? payload.data.find(item => paperTickerSymbol(item) === trade.sym) : null;
+    price = paperNumber(row && (row.lastPr || row.last || row.close || row.markPrice)) || price;
+  } catch (_) {}
+  if (!price) return false;
+  closePaperTrade(trade, price, undefined, reason || 'Closed from dashboard');
+  return true;
+}
+
+function updatePaperSettings(input) {
+  const current = paperSettings();
+  const body = input && typeof input === 'object' ? input : {};
+  const next = {...current};
+  const numeric = ['perScan', 'maxActive', 'maxPerSymbol', 'riskPct', 'maxDailyLossR',
+    'minConfluence', 'minSignalScore', 'minRR', 'tp1ClosePct'];
+  numeric.forEach(name => {
+    if (body[name] != null && Number.isFinite(Number(body[name]))) next[name] = Number(body[name]);
+  });
+  ['strategyEnabled', 'tradingHoursEnabled'].forEach(name => {
+    if (body[name] != null) next[name] = body[name] === true || body[name] === 'true';
+  });
+  ['tradingStartUtc', 'tradingEndUtc'].forEach(name => {
+    if (body[name] != null) next[name] = String(body[name]);
+  });
+  ['whitelist', 'blacklist'].forEach(name => {
+    if (Array.isArray(body[name])) next[name] = body[name];
+  });
+  paperState.settings = next;
+  paperState.settingsUpdatedAt = new Date().toISOString();
+  savePaperState();
+  return paperSettings();
+}
+
+function manualPaperTrade(input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const sym = String(body.sym || body.symbol || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const dir = String(body.dir || body.direction || '').toUpperCase();
+  const entry = paperNumber(body.entry || body.entryLimit);
+  const sl = paperNumber(body.sl);
+  const tp1 = paperNumber(body.tp1);
+  const tp2 = paperNumber(body.tp2);
+  if (!sym || !['LONG', 'SHORT'].includes(dir) || !entry || !sl || !tp1 || !tp2) {
+    throw new Error('Manual trade butuh symbol, direction, entry, SL, TP1, dan TP2');
+  }
+  if (!paperSymbolAllowed(sym, paperSettings())) throw new Error('Symbol diblokir oleh whitelist/blacklist');
+  const currentPrice = paperNumber(body.currentPrice || entry);
+  const equity = paperEquity();
+  const cfg = paperSettings();
+  const riskDollar = Math.max(0, equity * cfg.riskPct / 100);
+  const size = paperNumber(body.size) || (Math.abs(entry - sl) > 0
+    ? riskDollar / (Math.abs(entry - sl) / entry) : 0);
+  const contracts = paperNumber(body.contracts) || (entry > 0 ? size / entry : 0);
+  const pair = {price: currentPrice, minTradeNum: 0};
+  const validation = validatePaperSetup(pair, {dir, entry, sl, tp1, tp2, size, contracts, riskDollar});
+  if (!validation.ok) throw new Error(validation.reasons.join('; '));
+  const id = 'MAN-' + String(++paperState.nextId).padStart(6, '0');
+  const trade = {
+    id, sym, dir, entryLimit: entry, entryActual: null, currentPrice,
+    sl, tp1, tp2, size, contracts, originalSize: size, remainingSize: size,
+    originalContracts: contracts, remainingContracts: contracts, status: 'PENDING',
+    riskPct: cfg.riskPct, riskDollar, riskDollarAtEntry: riskDollar,
+    tp1ClosePct: cfg.tp1ClosePct, tp1Hit: false, realizedPnlTp1: 0,
+    realizedPnl: 0, realizedPnlFinal: 0, createdAt: Date.now(), openedAt: null,
+    cycleKey: 'manual-' + paperCycleKey(Date.now()), score: null, tier: 'MANUAL',
+    fund: null, oi: null, volume: 0, timeframe: '15M', tf: '15M',
+    mode: 'MANUAL', signalMode: 'MANUAL', strategyVersion: 'MANUAL',
+    cohortId: 'manual-' + new Date().toISOString().slice(0, 10),
+    signalCreatedAt: new Date().toISOString(), dataAt: new Date().toISOString(),
+    source: 'Nexora Operations manual paper', dataQuality: 'MANUAL',
+    reason: String(body.reason || 'Manual paper limit'), signalReasons: [],
+    setupValidation: validation, executionModel: 'LIMIT_STRICT', executionClass: 'STRICT',
+    events: []
+  };
+  paperAddTradeEvent(trade, 'ORDER_PLACED', {price: entry, reason: trade.reason, size});
+  paperState.activeTrades.push(trade);
+  savePaperState();
+  return paperTradeView(trade);
 }
 
 function paperHistoryFilters(query) {
@@ -2965,6 +3199,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperStatus()));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/settings') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    send(res, 200, JSON.stringify({ok: true, settings: paperSettings(), updatedAt: paperState.settingsUpdatedAt || null}));
     return;
   }
   if (requestUrl.pathname === '/paper/diagnostics') {

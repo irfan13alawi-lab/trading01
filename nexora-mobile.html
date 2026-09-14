@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nexora Mobile</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07090f;--card:#0d1117;--border:#21262d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--blue:#58a6ff;--yellow:#e3b341}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:16px}
+    main{max-width:680px;margin:auto}.brand{font-weight:800;font-size:18px;letter-spacing:.4px;margin:8px 0 4px}.sub{color:var(--muted);font-size:12px;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}.label{font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.5px}.value{font-size:24px;font-weight:800;margin-top:5px}.status{margin:14px 0;padding:12px;border-radius:8px;border:1px solid var(--border)}.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}button,a{display:inline-block;border:1px solid var(--border);border-radius:7px;background:#161b25;color:var(--text);padding:8px 12px;text-decoration:none;font-weight:700;cursor:pointer}button{margin-right:6px}.foot{color:var(--muted);font-size:11px;margin-top:16px}@media(max-width:420px){body{padding:10px}.value{font-size:20px}}
+  </style>
+</head>
+<body><main>
+  <div class="brand">⚡ NEXORA <span style="color:var(--muted);font-size:10px">MOBILE MONITOR</span></div>
+  <div class="sub">Paper bot VPS · read-only quick view · refresh otomatis 15 detik</div>
+  <div id="status" class="status">Menghubungkan ke VPS...</div>
+  <div class="grid">
+    <div class="card"><div class="label">Equity</div><div class="value" id="equity">--</div></div>
+    <div class="card"><div class="label">uPnL</div><div class="value" id="upnl">--</div></div>
+    <div class="card"><div class="label">Open / Pending</div><div class="value" id="open">--</div></div>
+    <div class="card"><div class="label">Daily R</div><div class="value" id="daily">--</div></div>
+    <div class="card"><div class="label">Closed</div><div class="value" id="closed">--</div></div>
+    <div class="card"><div class="label">Next scan</div><div class="value" style="font-size:14px" id="next">--</div></div>
+  </div>
+  <div style="margin-top:14px"><button onclick="refresh()">Refresh</button><a href="/">Full dashboard</a></div>
+  <div class="foot">Kontrol yang mengubah state order tidak ditempatkan di halaman mobile tanpa token admin server. Riwayat tetap tersimpan di VPS.</div>
+</main>
+<script>
+  var api=(location.protocol+'//'+location.hostname+':18085')+'/paper/status';
+  function set(id,value,color){var e=document.getElementById(id);if(e)e.textContent=value;if(e&&color)e.style.color=color;}
+  function refresh(){fetch(api,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    if(!d.ok)throw Error(d.error||'status unavailable');
+    var paused=d.paused||d.killSwitch, label=d.killSwitch?'KILL SWITCH':d.paused?'PAUSED':d.running?'PAPER ON':'STOPPED';
+    var cls=d.killSwitch||!d.running?'bad':d.paused?'warn':'ok';
+    var box=document.getElementById('status');box.className='status '+cls;box.textContent=label+' · '+(d.strategyVersion||'--')+' · '+(d.blockReason||'ready');
+    set('equity','$'+Number(d.equity||0).toFixed(2));set('upnl',(Number(d.unrealizedPnl||0)>=0?'+':'')+'$'+Number(d.unrealizedPnl||0).toFixed(2),Number(d.unrealizedPnl||0)>=0?'var(--green)':'var(--red)');
+    set('open',Number(d.summary&&d.summary.open||0)+' / '+Number(d.summary&&d.summary.pending||0));set('daily',(Number(d.dailyLossR||0)>=0?'+':'')+Number(d.dailyLossR||0).toFixed(2)+'R',d.dailyGuard?'var(--red)':'var(--text)');set('closed',String(d.summary&&d.summary.closed||0));set('next',d.nextScanAt?new Date(d.nextScanAt).toLocaleTimeString('id-ID'):'--');
+  }).catch(function(e){var box=document.getElementById('status');box.className='status bad';box.textContent='VPS offline · '+e.message;});}
+  refresh();setInterval(refresh,15000);
+</script></body></html>
