@@ -3150,20 +3150,25 @@ function fetchMTFFromBitget(sym) {
   var cacheKey = marketLabel() + ':' + sym;
   if(MTF_CACHE[cacheKey] && now-MTF_CACHE[cacheKey].ts<120000) return Promise.resolve(MTF_CACHE[cacheKey]);
 
-  // Fetch completed 15M, 1H, 4H and 1D candles for the MTF percentage cards.
+  // Fetch completed 15M, 30M, 1H, 4H and 1D candles for the MTF cards.
   return Promise.all([
     fetchBitgetCandles(sym, '15m', 6).catch(function(){return [];}),
+    fetchBitgetCandles(sym, '30m', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '1H', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '4H', 6).catch(function(){return [];}),
     fetchBitgetCandles(sym, '1D', 7).catch(function(){return [];} )
   ]).then(function(res){
-    var m15data=res[0], h1data=res[1], h4data=res[2], d1data=res[3];
-    var result = {ts: Date.now(), p15m:null, p1h:null, p4h:null, p7d:null};
+    var m15data=res[0], m30data=res[1], h1data=res[2], h4data=res[3], d1data=res[4];
+    var result = {ts: Date.now(), p15m:null, p30m:null, p1h:null, p4h:null, p7d:null};
 
     // 15M change: (close - open) / open * 100
     if(m15data.length>=2){
       var lastM15=m15data[m15data.length-1];
       result.p15m = (parseFloat(lastM15[4])-parseFloat(lastM15[1]))/parseFloat(lastM15[1])*100;
+    }
+    if(m30data.length>=2){
+      var lastM30=m30data[m30data.length-1];
+      result.p30m = (parseFloat(lastM30[4])-parseFloat(lastM30[1]))/parseFloat(lastM30[1])*100;
     }
 
     // 1H change: (close - open) / open * 100
@@ -3184,7 +3189,7 @@ function fetchMTFFromBitget(sym) {
     }
     MTF_CACHE[cacheKey] = result;
     return result;
-  }).catch(function(){return {ts:Date.now(),p1h:null,p4h:null,p7d:null};});
+  }).catch(function(){return {ts:Date.now(),p15m:null,p30m:null,p1h:null,p4h:null,p7d:null};});
 }
 
 // Batch MTF fetch for top pairs
@@ -3195,6 +3200,7 @@ function fetchTopMTF() {
       fetchMTFFromBitget(p.s).then(function(mtf){
         p.p1h  = mtf.p1h == null ? undefined : mtf.p1h;
         p.p4h  = mtf.p4h == null ? undefined : mtf.p4h;
+        p.p30m = mtf.p30m == null ? undefined : mtf.p30m;
         p.p7d  = mtf.p7d == null ? undefined : mtf.p7d;
         p.p15m = mtf.p15m == null ? undefined : mtf.p15m;
         p.mtfReal = mtf.p15m !== null || mtf.p1h !== null || mtf.p4h !== null || mtf.p7d !== null;
@@ -3242,7 +3248,7 @@ function runAllUpgrades(pairs) {
       if(G.pairs.some(function(p){return p.p1h!==undefined;})){
         renderTable();
         computeTop5(G.pairs);
-         sLog('MTF data loaded from ' + marketLabel() + ' (15M/1H/4H/7D)');
+          sLog('MTF data loaded from ' + marketLabel() + ' (15M/30M/1H/4H/7D)');
       }
     }, 8000);
   }, 4000);
@@ -3974,10 +3980,23 @@ function renderOrderFlowAndSetup(pair, mtfResult, containerId) {
 // ============================================================
 // TOP 5 BEST SETUP RECOMMENDATIONS
 // Auto-computed after each scan
-// Ranking: V4.4 score * 0.4 + funding bonus * 0.3 + signal bonus * 0.2 + tier bonus * 0.1
+// Ranking: V4.4/context score plus derivatives, volume, and aligned MTF bonus.
 // ============================================================
+function mtfSnapshotFromPair(pair) {
+  if(!pair) return {direction:null, aligned:0, available:0, confluencePct:0};
+  var values = [pair.p4h, pair.p1h, pair.p30m, pair.p15m].filter(function(v){return Number.isFinite(Number(v));});
+  var longCount = values.filter(function(v){return Number(v)>0.05;}).length;
+  var shortCount = values.filter(function(v){return Number(v)<-0.05;}).length;
+  var aligned = Math.max(longCount, shortCount);
+  var direction = values.length>=3 && aligned>=3 && longCount!==shortCount
+    ? (longCount>shortCount?'LONG':'SHORT') : null;
+  return {direction:direction, aligned:aligned, available:values.length, confluencePct:Math.round(aligned/4*100)};
+}
+
 function directionForPair(pair) {
   if(!pair) return 'LONG';
+  var mtf = mtfSnapshotFromPair(pair);
+  if(mtf.direction) return mtf.direction;
   for(var i=0;i<G.wl.length;i++) {
     if(G.wl[i].sym === pair.s || G.wl[i].sym === pair.s+'USDT') return G.wl[i].dir || 'LONG';
   }
@@ -3990,6 +4009,7 @@ function computeTop5(pairs) {
   // Score each pair
   var ranked = pairs.map(function(p) {
     var totalScore = 0;
+    var mtf = mtfSnapshotFromPair(p);
     // Base V4.4 score (0-12)
     totalScore += (p.sc || 0) * 0.4;
     // Funding bonus: negative = better
@@ -4006,6 +4026,9 @@ function computeTop5(pairs) {
     // OI rising bonus
     if(hasDerivatives(p) && p.oi > 0) totalScore += 0.3;
     if(p.volRatio != null) totalScore += (p.volRatio >= 2 ? 0.4 : p.volRatio >= 1.5 ? 0.25 : p.volRatio >= 1 ? 0.1 : 0);
+    // Once the asynchronous MTF cards arrive, give aligned timeframes a
+    // visible ranking advantage without hiding candidates before data loads.
+    if(mtf.direction) totalScore += (mtf.confluencePct / 100) * 1.2;
     return { p: p, rank: totalScore };
   }).filter(function(r){ return r.p.tier !== 'C'; })
     .sort(function(a,b){ return b.rank - a.rank; })
@@ -4018,6 +4041,7 @@ function computeTop5(pairs) {
   var html = ranked.map(function(r, i) {
     var p = r.p;
     var derivatives = hasDerivatives(p);
+    var mtfState = mtfSnapshotFromPair(p);
     var fundCol = !derivatives ? '#484f58' : p.fund < 0 ? '#3fb950' : '#f85149';
     var fundStr = derivatives ? fundingText(p, 4) : 'N/A (Spot)';
     var chgCol  = p.chg >= 0 ? '#3fb950' : '#f85149';
@@ -4028,6 +4052,7 @@ function computeTop5(pairs) {
     var tp1Est   = topSetup ? topSetup.tp.tp1.toFixed(entryEst >= 1 ? 3 : 5) : (entryEst * (setupDir==='SHORT'?0.94:1.06)).toFixed(entryEst >= 1 ? 3 : 5);
     var mtfBits  = [];
     if(p.p15m != null) mtfBits.push('15M ' + fC(p.p15m));
+    if(p.p30m != null) mtfBits.push('30M ' + fC(p.p30m));
     if(p.p4h != null) mtfBits.push('4H ' + fC(p.p4h));
     if(p.p1h != null) mtfBits.push('1H ' + fC(p.p1h));
     if(p.p7d != null) mtfBits.push('7D ' + fC(p.p7d));
@@ -4036,6 +4061,7 @@ function computeTop5(pairs) {
     if(derivatives && p.oi > 0) evidence.push('OI naik');
     if(Math.abs(p.chg) <= 2) evidence.push('Belum extended');
     if(p.volSpike && p.volSpike.isSpike) evidence.push('Volume ' + p.volSpike.ratio + 'x');
+    if(mtfState.direction) evidence.push('MTF ' + mtfState.aligned + '/4 ' + mtfState.direction);
     var medals   = ['#e3b341','#8b949e','#cd7f32','#484f58','#484f58'];
     var priceStr = entryEst >= 1000 ? '$'+Math.round(entryEst).toLocaleString('en') : '$'+entryEst.toFixed(entryEst>=1?3:5);
 
@@ -4063,6 +4089,7 @@ function computeTop5(pairs) {
       + '</div>'
       + '<div style="font-size:9px;color:#8b949e;margin-bottom:4px;">'
       + '<span style="color:#484f58;">MTF: </span>' + (mtfBits.length ? mtfBits.join(' · ') : (marketIsBitget() ? 'loading...' : 'N/A for CoinGecko Spot'))
+      + (mtfState.available ? ' <span style="color:' + (mtfState.direction ? '#3fb950' : '#e3b341') + ';">· ' + mtfState.aligned + '/4 · ' + mtfState.confluencePct + '%</span>' : '')
       + '</div>'
       + '<div style="font-size:9px;color:#3fb950;margin-bottom:5px;">'
       + (evidence.length ? evidence.join(' · ') : 'Evidence limited')
