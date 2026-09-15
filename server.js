@@ -111,6 +111,9 @@ const PAPER_WATCHLIST_ALERTS_ENABLED = String(process.env.PAPER_WATCHLIST_ALERTS
 // unauthenticated when the VPS is reachable from the public internet.
 const PAPER_ADMIN_TOKEN = String(process.env.PAPER_ADMIN_TOKEN || '').trim();
 const DISCORD_WEBHOOK_URL = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
+// Daily summaries are available as a VPS scheduler, but remain opt-in so a
+// deployment never starts recurring outbound notifications unexpectedly.
+const PAPER_DAILY_SUMMARY_SCHEDULER = String(process.env.PAPER_DAILY_SUMMARY_SCHEDULER || '').toLowerCase() === 'true';
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 const PAPER_STATE_BACKUP_FILE = PAPER_STATE_FILE + '.bak';
@@ -3425,7 +3428,7 @@ function paperStatus() {
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError,
       discord: Boolean(DISCORD_WEBHOOK_URL),
-      dailySummary: 'dashboard-only until scheduler is explicitly enabled',
+      dailySummary: PAPER_DAILY_SUMMARY_SCHEDULER ? 'scheduler opt-in; requires Telegram or Discord configuration' : 'dashboard-only until scheduler is explicitly enabled',
       riskGuard: 'guard notifications are emitted for configured alert channels',
       watchlistNearEntry: PAPER_WATCHLIST_ALERTS_ENABLED &&
         (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))
@@ -3962,6 +3965,11 @@ function startPaperBot() {
   paperRuntime.startedAt = new Date().toISOString();
   console.log('[paper] VPS Paper Bot ON: scan every 15M, top 3, pending expiry 120m');
   void sendConfiguredAlert('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
+  if (PAPER_DAILY_SUMMARY_SCHEDULER) {
+    console.log('[paper] Daily alert scheduler opt-in:', TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL) ? 'configured' : 'no alert channel configured');
+    setTimeout(maybeSendPaperOperationalAlerts, 15000);
+    setInterval(maybeSendPaperOperationalAlerts, 60 * 1000);
+  }
   setTimeout(() => runPaperScan('startup', paperCycleKey(Date.now())), 5000);
   setInterval(() => {
     // Do not depend on a 30-second wall-clock window: a busy event loop or a
