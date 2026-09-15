@@ -4842,6 +4842,10 @@ function applyServerPaperStatus(status, announce) {
   if(eqPage && eqPage.classList.contains('on')) {
     try { renderEquity(); } catch(e) {}
   }
+  var regimePage = document.getElementById('p-rg');
+  if(regimePage && regimePage.classList.contains('on')) {
+    try { renderCorr(); } catch(e) {}
+  }
   if(announce && !wasServer) {
     if(serverRunning) {
       sLog('PAPER BOT VPS CONNECTED — scan 15M, top 3, pending expiry 120m');
