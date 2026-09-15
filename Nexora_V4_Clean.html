@@ -192,7 +192,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .status-live{color:var(--green);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08);}
 .status-warn{color:var(--yellow);border-color:rgba(227,179,65,.35);background:rgba(227,179,65,.08);}
 .status-error{color:var(--red);border-color:rgba(248,81,73,.35);background:rgba(248,81,73,.08);}
-.vps-log-card{display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:9px 10px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02);}
+.vps-log-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:6px;margin:7px 0;}
+.vps-log-card{min-width:0;padding:8px 9px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:2px;}
+.vps-log-label{color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:.35px;}
+.vps-log-value{font-size:14px;font-weight:800;}
+.vps-log-detail{color:var(--text3);font-size:9px;}
 .mtf-dots{display:inline-flex;gap:3px;vertical-align:middle;}
 .mtf-dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--text3);}
 .mtf-dot.long{background:var(--green);box-shadow:0 0 4px rgba(63,185,80,.6);}
@@ -253,6 +257,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">Bot Trades (STRICT)</span><span class="v" id="bot-trade-cnt">0</span></div>
   <div class="hstat"><span class="l">Legacy</span><span class="v" id="bot-legacy-count">0</span></div>
   <div class="hstat"><span class="l">uPnL</span><span class="v" id="bot-upnl">$0</span></div>
+  <div class="hstat"><span class="l">Daily PnL (UTC)</span><span class="v" id="bot-daily-pnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
   <div class="hstat"><span class="l">Equity</span><span class="v" id="bot-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
@@ -4932,18 +4937,36 @@ function renderServerPaperScan(status) {
   var trialInfo = (status.strategyVersion || 'MTF_ATR_V2') + ' · cohort ' + (status.cohortId || '--');
   var capacity = scan.capacity || {};
   var queueCount = Array.isArray(status.watchlistQueue) ? status.watchlistQueue.length : 0;
-  var guardInfo = 'daily ' + Number(status.dailyLossR || capacity.dailyLossR || 0).toFixed(2) + 'R/' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R'
-    + ' · risk $' + Number(capacity.availableRisk == null ? status.availableRisk || 0 : capacity.availableRisk).toFixed(2)
-    + ' · slots ' + Number(capacity.availableSlots == null ? status.availableSlots || 0 : capacity.availableSlots)
-    + ' · watchlist queue ' + queueCount;
   var rejectionCodes = [];
   (Array.isArray(scan.rejected) ? scan.rejected : []).forEach(function(item){
     (Array.isArray(item.codes) ? item.codes : []).forEach(function(code){ rejectionCodes.push(code); });
   });
-  var rejectionInfo = rejectionCodes.length ? ' · rejected ' + rejectionCodes.length + ' (' + rejectionCodes.slice(0, 5).join(', ') + ')' : '';
+  var rejectionInfo = rejectionCodes.length ? rejectionCodes.slice(0, 8).join(', ') : 'No rejection codes';
+  var rejectedCount = Array.isArray(scan.rejected) ? scan.rejected.length : 0;
+  var dailyPnl = Number(status.dailyRealizedPnl || 0);
+  var dailyR = Number(status.dailyLossR || capacity.dailyLossR || 0);
+  var maxDailyR = Number(status.maxDailyLossR || 3);
+  var slotsNow = Number(status.availableSlots == null ? capacity.availableSlots || 0 : status.availableSlots);
+  var riskUsed = Number(status.activeRisk || 0);
+  var riskLimit = Number(status.riskBudget || 0);
+  function logCard(label, value, color, detail, title) {
+    return '<div class="vps-log-card" title="' + sourceEsc(title || detail || '') + '">'
+      + '<span class="vps-log-label">' + sourceEsc(label) + '</span>'
+      + '<b class="vps-log-value" style="color:' + color + ';">' + sourceEsc(String(value)) + '</b>'
+      + '<span class="vps-log-detail">' + sourceEsc(detail || '') + '</span></div>';
+  }
+  var logCards = [
+    logCard('Candidates', scan.candidates || 0, '#c9d1d9', candidates.length + ' detailed'),
+    logCard('Orders placed', placed, placed ? '#3fb950' : '#8b949e', reason),
+    logCard('Rejected', rejectedCount, rejectedCount ? '#f0883e' : '#3fb950', rejectionInfo, rejectionInfo),
+    logCard('Daily realized PnL', (dailyPnl >= 0 ? '+' : '') + '$' + dailyPnl.toFixed(2), dailyPnl >= 0 ? '#3fb950' : '#f85149', 'UTC ' + (status.dailyPnlDate || '--')),
+    logCard('Daily loss R', dailyR.toFixed(2) + 'R / -' + maxDailyR.toFixed(2) + 'R', dailyR <= -maxDailyR ? '#f85149' : dailyR < 0 ? '#e3b341' : '#3fb950', 'drawdown guard'),
+    logCard('New slots', slotsNow, slotsNow > 0 ? '#58a6ff' : '#f0883e', 'risk ' + '$' + riskUsed.toFixed(2) + ' / $' + riskLimit.toFixed(2)),
+    logCard('Watchlist queue', queueCount, queueCount ? '#58a6ff' : '#8b949e', queueCount ? 'priority on next VPS scan' : 'none queued')
+  ].join('');
   el.innerHTML = '<div><b style="color:#8b949e;">Last VPS scan ' + sourceEsc(scan.cycleKey || '') + '</b>'
-    + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · candidates ' + (scan.candidates || 0)
-    + ' · top ' + candidates.length + ' · placed ' + placed + ' · ' + sourceEsc(reason) + ' · ' + sourceEsc(trialInfo) + ' · ' + sourceEsc(guardInfo) + sourceEsc(rejectionInfo) + '</span></div>'
+    + ' <span style="color:#484f58;">(' + sourceEsc(at) + ') · ' + sourceEsc(trialInfo) + ' · ' + sourceEsc(reason) + '</span></div>'
+    + '<div class="vps-log-strip">' + logCards + '</div>'
     + (cards || '<span style="color:#484f58;">No candidate detail</span>');
   var rejectionHost = document.getElementById('bot-rejection-chart');
   if(rejectionHost) {
@@ -5071,6 +5094,13 @@ function applyServerPaperStatus(status, announce) {
     if(equityInput && document.activeElement !== equityInput) {
       equityInput.value = equity.toFixed(2);
     }
+  }
+  var dailyPnlEl = document.getElementById('bot-daily-pnl');
+  if(dailyPnlEl && status.dailyRealizedPnl != null) {
+    var dailyPnlValue = Number(status.dailyRealizedPnl || 0);
+    dailyPnlEl.textContent = (dailyPnlValue >= 0 ? '+' : '') + '$' + dailyPnlValue.toFixed(2);
+    dailyPnlEl.style.color = dailyPnlValue >= 0 ? '#3fb950' : '#f85149';
+    dailyPnlEl.title = 'Realized paper PnL for UTC ' + (status.dailyPnlDate || '--') + '; closed trial trades only';
   }
   applyServerClosedTrades(status.closedTrades);
   renderServerPaperScan(status);
