@@ -472,6 +472,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- ============ PUMP RADAR ============ -->
 <div class="page" id="p-pump">
+  <div class="card" id="pump-vps-sync">
+    <div class="card-h"><div class="card-t"><i class="fa-solid fa-link"></i> VPS Signal Sync</div><a class="btn btn-sm" href="https://pumpradar.id" target="_blank" rel="noopener">Open PumpRadar</a></div>
+    <div class="muted" id="pump-vps-sync-status">Menunggu status VPS...</div>
+    <div class="muted" style="font-size:10px;line-height:1.6;margin-top:5px;">Pumping/Dumping di bawah dihitung dari market data yang sama; status order dibaca dari Paper Bot VPS. Panel ini tidak membuat atau mengarang data eksternal PumpRadar.</div>
+  </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-circle-info"></i> PumpRadar Legend</div><div class="muted" style="margin-top:6px;line-height:1.8;"><span class="badge ba">A</span> score ≥ 8/12 · <span class="badge bb">B</span> score 6.5–7.9/12 · <span class="badge bn">C</span> score &lt; 6.5/12 · <span class="badge bn">L2</span> lower-liquidity universe segment. Volume bar compares the scanner's relative volume reading; IN POSITION means a VPS paper order exists. Hidden Gems requires derivatives data, L2, negative funding and rising OI; informational only—not an entry signal.</div></div>
   <div class="g2">
     <div class="card"><div class="card-t"><i class="fa-solid fa-fire" style="color:#f0883e;"></i> Pumping</div><div id="pump-l"><div class="ld">--</div></div></div>
@@ -488,6 +493,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div id="news-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
       <button class="pill on" onclick="setNewsFilter('all',this)">Semua</button><button class="pill" onclick="setNewsFilter('btc',this)">BTC</button><button class="pill" onclick="setNewsFilter('trending',this)">Trending</button>
     </div>
+    <div id="news-risk-banner"></div>
     <div id="news-list" class="g2"><div class="ld">Memuat berita...</div></div>
   </div>
 </div>
@@ -953,6 +959,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="kpi"><div class="l">Pending</div><div class="v" id="ops-summary-pending">--</div><div class="s">waiting for entry</div></div>
       <div class="kpi"><div class="l">Guard</div><div class="v" id="ops-summary-guard">--</div><div class="s">daily loss limit</div></div>
       <div class="kpi"><div class="l">Drawdown</div><div class="v" id="ops-summary-dd">--</div><div class="s">peak-to-equity · max 2.5%</div></div>
+      <div class="kpi"><div class="l">Open PnL</div><div class="v" id="ops-summary-open-pnl">--</div><div class="s">unrealized · strict</div></div>
+      <div class="kpi"><div class="l">Win rate</div><div class="v" id="ops-summary-winrate">--</div><div class="s">current trial cohort</div></div>
     </div>
   </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-shield-halved"></i> Trial safety status</div><div class="muted" style="line-height:1.8;margin-top:8px;">Paper trading berjalan sebagai service VPS dan tidak bergantung pada tab browser. Posisi PENDING menunggu candle 1M tertutup, kadaluarsa setelah 120 menit, dan histori tersimpan dengan backup atomik. Kontrol yang dapat mengubah state sengaja memerlukan otorisasi server; halaman ini hanya memonitor agar tidak ada tombol palsu yang terlihat aktif.</div></div>
@@ -1739,6 +1747,12 @@ function setNewsFilter(filter, btn) {
 function renderNewsPage() {
   var host=document.getElementById('news-list'); if(!host) return;
   var filter=G.newsFilter||'all', rows=Array.isArray(G.news)?G.news.slice():[];
+  var riskHost=document.getElementById('news-risk-banner');
+  if(riskHost) {
+    var openSymbols=BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';}).map(function(t){return String(t.sym||'').replace('USDT','').toUpperCase();});
+    var risks=G.news.filter(function(n){return n.sentiment==='NEGATIVE' && n.symbols.some(function(sym){return openSymbols.indexOf(sym)>=0;});}).slice(0,3);
+    riskHost.innerHTML=risks.length ? '<div class="card" style="border-color:rgba(248,81,73,.45);background:rgba(248,81,73,.06);margin-bottom:10px;"><b style="color:#f85149;"><i class="fa-solid fa-triangle-exclamation"></i> Negative news dekat posisi aktif</b><div class="muted" style="font-size:10px;line-height:1.6;margin-top:4px;">Peringatan dashboard berbasis judul berita dan tidak otomatis menutup atau menghentikan Paper Bot. Tinjau posisi secara manual.</div><div style="margin-top:5px;">'+risks.map(function(n){return '<div style="font-size:11px;margin-top:3px;">'+sourceEsc(n.symbols.join(', '))+' · '+sourceEsc(n.title)+'</div>';}).join('')+'</div></div>' : '';
+  }
   if(filter==='btc') rows=rows.filter(function(n){return n.symbols.indexOf('BTC')>=0;});
   if(filter==='trending') rows=rows.slice(0,12);
   rows=rows.slice(0,24);
@@ -1948,11 +1962,12 @@ function renderTable() {
     var scColor = p.sc >= 8 ? '#3fb950' : p.sc >= 6.5 ? '#58a6ff' : '#484f58';
     var realTag = !hasDerivatives(p) ? '<span style="color:#484f58;font-size:8px;">S</span>' : p.fundReal ? '<span style="color:#3fb950;font-size:8px;">R</span>' : '<span style="color:#484f58;font-size:8px;">e</span>';
     row += '<td><b style="color:' + scColor + ';">' + p.sc + '</b>' + realTag + '<div class="sb"><div class="sf" style="width:' + pct + '%;background:' + scColor + ';"></div></div></td>';
-    row += '<td><span class="badge ' + tc + '">' + p.tier + '-T</span></td>';
+    var tierTitle = p.tier==='A' ? 'Tier A: score tinggi (≥ 8/12), kandidat prioritas setelah filter MTF dan risk guard.' : p.tier==='B' ? 'Tier B: score menengah (6.5–7.9/12), perlu konfirmasi tambahan.' : 'Tier C: score rendah (< 6.5/12), informasional dan bukan prioritas auto-order.';
+    row += '<td><span class="badge ' + tc + '" title="' + tierTitle + '">' + p.tier + '-T</span></td>';
     // Check if paper trade active for this coin
-    var hasPaperTrade = BOT.activeTrades.some(function(t){return t.sym===p.s&&(t.status==='OPEN'||t.status==='PENDING');});
+    var hasPaperTrade = BOT.activeTrades.some(function(t){return t.sym===p.s&&(t.status==='OPEN'||t.status==='PENDING'||t.status==='TP1_PARTIAL');});
     var sigBadge = '<span class="badge ' + (sm[p.sig]||'bn') + '">' + p.sig + '</span>';
-    if(hasPaperTrade) sigBadge += ' <span style="font-size:8px;background:rgba(63,185,80,.15);color:#3fb950;border:1px solid rgba(63,185,80,.3);padding:1px 4px;border-radius:3px;">PAPER</span>';
+    if(hasPaperTrade) sigBadge += ' <span class="status-chip status-warn" title="Coin ini sudah memiliki order paper VPS; scanner tidak boleh menambah posisi duplikat.">⚠ IN POSITION</span>';
     row += '<td>' + sigBadge + '</td>';
     var mtfItems = ['H4','H1','M30','M15'];
     var mtfDots = mtfItems.map(function(tf){
@@ -2432,6 +2447,13 @@ function loadVpsSignalChart() {
 
 function renderPump() {
   var pairs = G.pairs;
+  var sync = document.getElementById('pump-vps-sync-status');
+  if (sync) {
+    var ps = G.paperStatus || {};
+    var activeCount = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';}).length;
+    var pendingCount = BOT.activeTrades.filter(function(t){return t.status==='PENDING';}).length;
+    sync.innerHTML = ps.running ? '<span class="status-chip status-live">LIVE VPS</span> · scan terakhir ' + sourceEsc(vpsFmtAt(ps.lastScanAt)) + ' · berikutnya ' + sourceEsc(vpsFmtAt(ps.nextScanAt)) + ' · ' + activeCount + ' open · ' + pendingCount + ' pending · ' + sourceEsc(ps.strategyVersion || 'MTF') : '<span class="status-chip status-warn">VPS STATUS WAITING</span> · buka Operations atau jalankan Refresh untuk mengambil status terbaru.';
+  }
   if (!pairs || !pairs.length) { ['pump-l','dump-l','gems-l'].forEach(function(id){ document.getElementById(id).innerHTML='<div class="ld"><span>Run scan first</span></div>'; }); return; }
   var sorted = pairs.slice().sort(function(a,b){return b.chg-a.chg;});
   function row(p, rank) {
@@ -2476,6 +2498,7 @@ function renderWL() {
     var prox = w.st;
     var proxCol = '#484f58';
     var proxPct = null;
+    var hasEntryZone = false;
     if (lc !== null && lp !== null) {
       // Try to use actual entry zone price from watchlist
       var entryNum = null;
@@ -2487,6 +2510,7 @@ function renderWL() {
       }
       if (entryNum && !isNaN(entryNum) && entryNum > 0) {
         // Real proximity: distance from current price to entry zone
+        hasEntryZone = true;
         proxPct = Math.abs(lp - entryNum) / entryNum * 100;
       } else {
         // Fallback: use 24h change as proxy
@@ -2514,6 +2538,7 @@ function renderWL() {
     html.push('<span class="' + dc + '" style="font-size:11px;font-weight:700;">' + w.dir + '</span>');
     html.push('<span class="status-chip ' + statusClass + '">' + statusText + '</span>');
     html.push('<span style="color:' + proxCol + ';font-size:11px;font-weight:700;">' + prox + '</span>');
+    if (hasEntryZone && proxPct <= 2) html.push('<span class="status-chip status-warn" title="Harga live sudah berada maksimal 2% dari zona entry watchlist.">⚠ NEAR ENTRY</span>');
     html.push('</div>');
     html.push('<div style="display:flex;gap:4px;">');
     html.push('<button class="btn btn-sm btn-blue" onclick="openGC(\'' + w.sym.replace('USDT','') + '\')"><i class="fa-solid fa-chart-line"></i> Chart</button>');
@@ -5725,6 +5750,8 @@ function refreshOpsPage() {
     var summaryPending = document.getElementById('ops-summary-pending');
     var summaryGuard = document.getElementById('ops-summary-guard');
     var summaryDd = document.getElementById('ops-summary-dd');
+    var summaryOpenPnl = document.getElementById('ops-summary-open-pnl');
+    var summaryWinrate = document.getElementById('ops-summary-winrate');
     if(summaryDate) summaryDate.textContent = summary.date || '--';
     if(summaryTrades) summaryTrades.textContent = String(Number(summary.trades || 0));
     if(summaryWl) summaryWl.textContent = 'W/L ' + Number(summary.wins || 0) + '/' + Number(summary.losses || 0) + (summary.breakeven ? ' · BE ' + Number(summary.breakeven) : '');
@@ -5734,6 +5761,8 @@ function refreshOpsPage() {
     if(summaryPending) summaryPending.textContent = String(Number(status.summary && status.summary.pending || 0));
     if(summaryGuard) { summaryGuard.textContent = summary.guard ? 'ON' : 'OK'; summaryGuard.style.color = summary.guard ? '#f85149' : '#3fb950'; }
     if(summaryDd) { var dd = Number(status.drawdownPct || 0), ddMax = Number(status.maxDrawdownPct || 2.5); summaryDd.textContent = dd.toFixed(2) + '%'; summaryDd.style.color = status.drawdownGuard ? '#f85149' : dd >= ddMax * .8 ? '#e3b341' : '#3fb950'; summaryDd.title = 'Peak $' + Number(status.equityPeak || 0).toFixed(2) + ' · limit ' + ddMax.toFixed(2) + '%'; }
+    if(summaryOpenPnl) { var openPnl = Number(status.unrealizedPnl || 0); summaryOpenPnl.textContent = (openPnl >= 0 ? '+' : '') + '$' + openPnl.toFixed(2); summaryOpenPnl.style.color = openPnl > 0 ? '#3fb950' : openPnl < 0 ? '#f85149' : '#8b949e'; }
+    if(summaryWinrate) { var cohort = status.trialStats || {}, winRate = Number(cohort.winRate || 0); summaryWinrate.textContent = winRate.toFixed(1) + '%'; summaryWinrate.style.color = winRate >= 50 ? '#3fb950' : winRate > 0 ? '#e3b341' : '#f85149'; summaryWinrate.title = 'Wins ' + Number(cohort.wins || 0) + ' · losses ' + Number(cohort.losses || 0) + ' · closed ' + Number(cohort.closed || 0); }
     var runtime = diag.runtime || {};
     var errorCount = Number(runtime.scansFailed || 0) + Number(runtime.monitorsFailed || 0);
     if(opsErrors) { opsErrors.textContent = String(errorCount); opsErrors.style.color = errorCount ? '#f85149' : '#3fb950'; }
