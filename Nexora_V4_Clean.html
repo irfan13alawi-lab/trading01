@@ -524,7 +524,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </div>
     <div class="frow" style="grid-template-columns:repeat(7,1fr);">
       <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
-      <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option><option value="pre_upgrade">PRE_UPGRADE</option><option value="legacy">LEGACY</option></select></div>
+      <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option></select></div>
       <div class="fg"><label>Symbol</label><input id="vps-st-symbol" placeholder="All" onchange="pollPaperStats()"></div>
       <div class="fg"><label>Direction</label><select id="vps-st-direction" onchange="pollPaperStats()"><option value="">All</option><option>LONG</option><option>SHORT</option></select></div>
       <div class="fg"><label>Timeframe</label><select id="vps-st-tf" onchange="pollPaperStats()"><option value="">All</option><option>15M</option><option>1H</option><option>4H</option></select></div>
@@ -532,9 +532,10 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="fg"><label>To</label><input id="vps-st-to" type="date" onchange="pollPaperStats()"></div>
     </div>
     <div class="g6" id="vps-stats-kpis" style="margin-bottom:10px;"></div>
+    <div id="vps-stats-sample-note" class="muted" style="margin:0 0 10px;line-height:1.6;"></div>
     <div class="g2" style="margin-bottom:0;">
       <div><div class="muted" style="margin-bottom:4px;">By symbol / direction</div><div id="vps-stats-breakdown"></div></div>
-      <div><div class="muted" style="margin-bottom:4px;">By confluence / score / outcome</div><div id="vps-stats-quality"></div></div>
+      <div><div class="muted" style="margin-bottom:4px;">By strategy/cohort &amp; signal quality</div><div id="vps-stats-quality"></div></div>
     </div>
   </div>
 
@@ -1000,6 +1001,7 @@ var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
   refreshing: false, derivsLoading: false, top5: [], paperServer: false, paperStatus: null, vpsEquity: null, vpsClosed: [], vpsCancelled: [], vpsStats: null,
+  vpsStatsFiltersInitialized: false,
   scanView: 'grid', scanFocus: 'BTC', posSort: 'status', marketExchange: 'bitget', marketType: 'futures',
   charts: {btEq: null, btMon: null, vpsPrice: null, vpsRsi: null, vpsMacd: null, vpsReplay: null},
   eq: [], trades: [],
@@ -4968,6 +4970,18 @@ function applyServerPaperStatus(status, announce) {
     cohortOption.textContent = status.cohortId;
     cohortSelect.appendChild(cohortOption);
   }
+  var strategySelect = document.getElementById('vps-st-strategy');
+  if(strategySelect && status.strategyVersion && !Array.prototype.some.call(strategySelect.options, function(opt){return opt.value === status.strategyVersion;})) {
+    var strategyOption = document.createElement('option');
+    strategyOption.value = status.strategyVersion;
+    strategyOption.textContent = status.strategyVersion;
+    strategySelect.appendChild(strategyOption);
+  }
+  if(!G.vpsStatsFiltersInitialized) {
+    if(strategySelect && status.strategyVersion) strategySelect.value = status.strategyVersion;
+    if(cohortSelect && status.cohortId) cohortSelect.value = status.cohortId;
+    G.vpsStatsFiltersInitialized = true;
+  }
 
   var btn = document.getElementById('paper-toggle');
   var lbl = document.getElementById('paper-mode-lbl');
@@ -5231,9 +5245,19 @@ function renderVpsStats(data) {
   var breakdownEl = document.getElementById('vps-stats-breakdown');
   var qualityEl = document.getElementById('vps-stats-quality');
   var asOf = document.getElementById('vps-stats-asof');
+  var sampleNote = document.getElementById('vps-stats-sample-note');
   if(!data || !data.ok) return;
   var sample = data.sample || {}, m = data.metrics || {};
   if(asOf) asOf.textContent = 'As of ' + vpsFmtAt(data.asOf) + ' · ' + (data.filters && data.filters.strategyVersion || 'all');
+  if(sampleNote) {
+    var closedCount = Number(sample.closed || 0);
+    var strategyLabel = data.filters && data.filters.strategyVersion || 'all strategies';
+    var cohortLabel = data.filters && data.filters.cohortId || 'all cohorts';
+    sampleNote.textContent = (closedCount < 50
+      ? 'Sampel masih kecil: ' + closedCount + '/50 trade tertutup. Jangan simpulkan edge atau ubah strategi dari sampel ini; lanjutkan paper trial.'
+      : 'Sampel mencapai ' + closedCount + ' trade tertutup. Tetap evaluasi per periode dan kondisi market sebelum menyimpulkan performa.')
+      + ' Filter aktif: ' + strategyLabel + ' · ' + cohortLabel + '.';
+  }
   var pf = m.profitFactor == null ? '--' : Number(m.profitFactor).toFixed(2);
   var kpis = [
     ['Closed', sample.closed || 0, '#c9d1d9'], ['Filled', (sample.filled || 0) + ' / ' + (sample.orders || 0), '#58a6ff'],
@@ -5254,7 +5278,11 @@ function renderVpsStats(data) {
   ]) + '<div class="muted" style="margin:8px 0 4px;">By direction</div>' + vpsGroupTable(data.byDirection, [
     {label:'Direction',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]);
-  if(qualityEl) qualityEl.innerHTML = vpsGroupTable(data.byConfluence, [
+  if(qualityEl) qualityEl.innerHTML = '<div class="muted" style="margin:0 0 4px;">By strategy / cohort</div>' + vpsGroupTable(data.byStrategyVersion, [
+    {label:'Strategy',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + vpsGroupTable(data.byCohort, [
+    {label:'Cohort',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By confluence</div>' + vpsGroupTable(data.byConfluence, [
     {label:'Confluence',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + '<div class="muted" style="margin:8px 0 4px;">By score / close reason</div>' + vpsGroupTable(data.byScore, [
     {label:'Score',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
