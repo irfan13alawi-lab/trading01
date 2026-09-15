@@ -256,10 +256,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 <div id="active-trades-panel">
   <div class="hstat"><span class="l">Bot Trades (STRICT)</span><span class="v" id="bot-trade-cnt">0</span></div>
   <div class="hstat"><span class="l">Legacy</span><span class="v" id="bot-legacy-count">0</span></div>
-  <div class="hstat"><span class="l">uPnL</span><span class="v" id="bot-upnl">$0</span></div>
+  <div class="hstat"><span class="l">Total uPnL (all paper)</span><span class="v" id="bot-upnl">$0</span></div>
   <div class="hstat"><span class="l">Daily PnL (UTC)</span><span class="v" id="bot-daily-pnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
-  <div class="hstat"><span class="l">Equity</span><span class="v" id="bot-equity">$285</span></div>
+  <div class="hstat"><span class="l">Strict Equity</span><span class="v" id="bot-equity">$285</span></div>
+  <div class="hstat"><span class="l">Total Paper Equity</span><span class="v" id="bot-total-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
   <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">80</span></div>
   <div class="hstat"><span class="l">New Slots</span><span class="v" id="bot-new-slots">--</span></div>
@@ -542,6 +543,19 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div><div class="muted" style="margin-bottom:4px;">By symbol / direction</div><div id="vps-stats-breakdown"></div></div>
       <div><div class="muted" style="margin-bottom:4px;">By strategy/cohort &amp; signal quality</div><div id="vps-stats-quality"></div></div>
     </div>
+  </div>
+
+  <div class="card" style="padding:10px 12px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+      <div class="card-t"><i class="fa-solid fa-calendar-days"></i> Equity window <span class="muted">(UTC)</span></div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;">
+        <button class="btn btn-sm btn-blue" id="eq-range-all" onclick="setJournalRange('all')">All</button>
+        <button class="btn btn-sm" id="eq-range-7d" onclick="setJournalRange('7d')">7D</button>
+        <button class="btn btn-sm" id="eq-range-30d" onclick="setJournalRange('30d')">30D</button>
+        <button class="btn btn-sm" id="eq-range-90d" onclick="setJournalRange('90d')">90D</button>
+      </div>
+    </div>
+    <div class="muted" id="eq-range-note" style="margin-top:5px;font-size:10px;">All available closed trades</div>
   </div>
 
   <div class="g2">
@@ -2376,6 +2390,7 @@ var TJ_TF = 'all';
 var TJ_OUTCOME = 'all';
 var TJ_FROM = '';
 var TJ_TO = '';
+var TJ_RANGE = 'all';
 
 // Ensure trades array has full journal fields
 function normalizeTrade(t) {
@@ -2530,11 +2545,32 @@ function setJournalFilter() {
   TJ_OUTCOME = outcomeEl ? outcomeEl.value : 'all';
   TJ_FROM = fromEl ? fromEl.value : '';
   TJ_TO = toEl ? toEl.value : '';
+  TJ_RANGE = 'custom';
+  renderEquity();
+}
+
+function setJournalRange(range) {
+  var allowed = {all:true, '7d':7, '30d':30, '90d':90};
+  if(!Object.prototype.hasOwnProperty.call(allowed, range)) return;
+  TJ_RANGE = range;
+  if(range === 'all') {
+    TJ_FROM = ''; TJ_TO = '';
+  } else {
+    var end = new Date();
+    var start = new Date(end.getTime() - (allowed[range] - 1) * 86400000);
+    TJ_FROM = start.toISOString().slice(0,10);
+    TJ_TO = end.toISOString().slice(0,10);
+  }
+  var fromEl = document.getElementById('tj-date-from');
+  var toEl = document.getElementById('tj-date-to');
+  if(fromEl) fromEl.value = TJ_FROM;
+  if(toEl) toEl.value = TJ_TO;
   renderEquity();
 }
 
 function clearJournalFilters() {
   TJ_SYMBOL = 'all'; TJ_TF = 'all'; TJ_OUTCOME = 'all'; TJ_FROM = ''; TJ_TO = '';
+  TJ_RANGE = 'all';
   renderEquity();
 }
 
@@ -2586,6 +2622,14 @@ function renderEquity() {
   var allTrades = useVpsEquity ? G.vpsClosed : G.trades;
   populateJournalFilters(allTrades);
   var trades = journalFilteredTrades(allTrades);
+  var rangeNames = {all:'All available closed trades', '7d':'Last 7 days', '30d':'Last 30 days', '90d':'Last 90 days', custom:'Custom date range'};
+  ['all','7d','30d','90d'].forEach(function(range){
+    var button = document.getElementById('eq-range-' + range);
+    if(button) button.classList.toggle('btn-blue', TJ_RANGE === range);
+  });
+  var rangeNote = document.getElementById('eq-range-note');
+  if(rangeNote) rangeNote.textContent = (rangeNames[TJ_RANGE] || rangeNames.custom)
+    + (TJ_FROM || TJ_TO ? ' · ' + (TJ_FROM || 'earliest') + ' → ' + (TJ_TO || 'today') + ' UTC' : '');
   var filteredCum = 0;
   var data = trades.length
     ? trades.map(function(t){ filteredCum += Number(t.r || 0); return filteredCum; })
@@ -2675,6 +2719,24 @@ function renderEquity() {
     bySymbol[t.sym].pnl += Number(t.pnl||0);
   });
   var symbolRows = Object.keys(bySymbol).sort(function(a,b){return bySymbol[b].r-bySymbol[a].r;}).slice(0,8);
+  var byStrategy = {};
+  trades.forEach(function(t){
+    var key = String(t.strategyVersion || t.mode || 'UNCLASSIFIED');
+    if(!byStrategy[key]) byStrategy[key] = {n:0,w:0,l:0,r:0,pnl:0};
+    var row = byStrategy[key];
+    row.n++;
+    if(Number(t.r || 0) > 0) row.w++;
+    if(Number(t.r || 0) < 0) row.l++;
+    row.r += Number(t.r || 0);
+    row.pnl += Number(t.pnl || 0);
+  });
+  var strategyRows = Object.keys(byStrategy).map(function(key){
+    var row = byStrategy[key];
+    return {key:key,n:row.n,w:row.w,l:row.l,r:row.r,pnl:row.pnl};
+  }).sort(function(a,b){return b.r-a.r;});
+  var pnlRanked = trades.slice().sort(function(a,b){return Number(a.pnl || 0)-Number(b.pnl || 0);});
+  var worstTrade = pnlRanked.length ? pnlRanked[0] : null;
+  var bestTrade = pnlRanked.length ? pnlRanked[pnlRanked.length-1] : null;
   function durationLabel(ms) {
     if(!ms) return '--';
     var mins = Math.round(ms/60000);
@@ -2689,9 +2751,9 @@ function renderEquity() {
   document.getElementById('e-dd').textContent = mdd.toFixed(1) + 'R';
   document.getElementById('e-nr').textContent = nr.toFixed(1) + 'R';
   document.getElementById('e-nr').className = 'kv ' + (nr>0?'up':nr===0?'nu':'dn');
-  var gate = trades.length<30 ? 'PAPER (' + trades.length + '/30)' : nr>0 ? 'LIVE READY' : 'OOS FAIL';
+  var gate = trades.length<30 ? 'PAPER OBSERVE (' + trades.length + '/30)' : nr>0 ? 'PAPER REVIEW' : 'PAPER REVIEW · NEGATIVE';
   document.getElementById('e-gate').textContent = gate;
-  document.getElementById('e-gate').style.color = nr>0&&trades.length>=30?'#3fb950':'#f0883e';
+  document.getElementById('e-gate').style.color = nr>0&&trades.length>=30?'#3fb950':nr<0&&trades.length>=30?'#f85149':'#f0883e';
   document.getElementById('e-gst').textContent = trades.length + '/30 trades';
 
   // Equity Curve
@@ -2778,7 +2840,9 @@ function renderEquity() {
      + (useVpsEquity && byMode.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By mode</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byMode.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (useVpsEquity && byScore.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By score</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + byScore.map(function(st){return '<span class="badge ' + (st.r>=0?'ba':'br') + '">' + sourceEsc(st.key) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.w/st.n*100) + '%)</span>';}).join('') + '</div></div>' : '')
      + (symbolRows.length ? '<div style="grid-column:1/-1;margin-top:5px;"><span style="color:#484f58;">By symbol</span><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;">' + symbolRows.map(function(sym){var st=bySymbol[sym];return '<span class="badge ' + (st.r>=0?'ba':'br') + '" title="' + sourceEsc(sym) + '">' + sourceEsc(sym) + ' ' + st.r.toFixed(2) + 'R (' + Math.round(st.wins/st.count*100) + '%)</span>';}).join('') + '</div></div>' : '')
-     + '</div>';
+     + '</div>'
+     + (strategyRows.length ? '<div style="margin-top:12px;border-top:1px solid #21262d;padding-top:9px;"><div style="font-size:10px;color:#8b949e;margin-bottom:6px;">Strategy comparison · current filters</div><div style="display:grid;grid-template-columns:1.3fr repeat(4,minmax(52px,1fr));gap:5px;font-size:10px;color:#8b949e;"><b>Strategy</b><b>Trades</b><b>Win rate</b><b>Net R</b><b>PnL</b>' + strategyRows.map(function(st){var wrs=st.n?Math.round(st.w/st.n*100):0;return '<span>'+sourceEsc(st.key)+'</span><span>'+st.n+'</span><span style="color:'+(wrs>=50?'#3fb950':'#e3b341')+';">'+wrs+'%</span><span style="color:'+(st.r>=0?'#3fb950':'#f85149')+';">'+st.r.toFixed(2)+'R</span><span style="color:'+(st.pnl>=0?'#3fb950':'#f85149')+';">$'+st.pnl.toFixed(2)+'</span>';}).join('')+'</div></div>' : '')
+     + (bestTrade && worstTrade ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:7px;margin-top:10px;"><div style="border:1px solid rgba(63,185,80,.25);border-radius:5px;padding:7px;"><span style="color:#8b949e;font-size:9px;">Best realized trade (PnL)</span><br><b style="color:#3fb950;">'+sourceEsc(bestTrade.sym||'?')+' · '+(Number(bestTrade.pnl||0)>=0?'+':'')+'$'+Number(bestTrade.pnl||0).toFixed(2)+'</b></div><div style="border:1px solid rgba(248,81,73,.25);border-radius:5px;padding:7px;"><span style="color:#8b949e;font-size:9px;">Worst realized trade (PnL)</span><br><b style="color:#f85149;">'+sourceEsc(worstTrade.sym||'?')+' · '+(Number(worstTrade.pnl||0)>=0?'+':'')+'$'+Number(worstTrade.pnl||0).toFixed(2)+'</b></div></div>' : '');
 
   // Lesson wall
   var lessons = trades.filter(function(t){return t.lesson&&t.lesson.length>2;}).slice(-8).reverse();
@@ -5086,9 +5150,17 @@ function applyServerPaperStatus(status, announce) {
     if(botEq) {
       botEq.textContent = '$' + equity.toFixed(2);
       botEq.style.color = equity >= Number(status.startingEquity || 285) ? '#3fb950' : '#f85149';
-      botEq.title = 'Start: $' + Number(status.startingEquity || 285).toFixed(2)
+      botEq.title = 'Strict MTF trial equity. Start: $' + Number(status.startingEquity || 285).toFixed(2)
         + ' | Realized: $' + Number(status.realizedPnl || 0).toFixed(2)
         + ' | uPnL: $' + Number(status.unrealizedPnl || 0).toFixed(2);
+    }
+    var totalEqEl = document.getElementById('bot-total-equity');
+    if(totalEqEl) {
+      var totalEq = Number(status.totalEquity == null ? equity : status.totalEquity);
+      totalEqEl.textContent = '$' + totalEq.toFixed(2);
+      totalEqEl.style.color = totalEq >= Number(status.startingEquity || 285) ? '#3fb950' : '#f85149';
+      totalEqEl.title = 'All paper strategies. Realized $' + Number(status.totalRealizedPnl || status.realizedPnl || 0).toFixed(2)
+        + ' + unrealized $' + Number(status.totalUnrealizedPnl == null ? status.unrealizedPnl || 0 : status.totalUnrealizedPnl).toFixed(2);
     }
     var equityInput = document.getElementById('p2-equity');
     if(equityInput && document.activeElement !== equityInput) {
@@ -6007,11 +6079,15 @@ function updateActiveTradesPanel() {
   if(legacyCnt) legacyCnt.textContent = legacyTrades.filter(function(t){return t.status==='OPEN'||t.status==='PENDING';}).length;
 
   // Unrealized PnL
-  var totalUnreal = open.concat(partial).reduce(function(s,t){return s+(t.unrealPnl||0);}, 0);
+  var allUnrealTrades = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';});
+  var calculatedAllUnreal = allUnrealTrades.reduce(function(s,t){return s+Number(t.unrealPnl||0);}, 0);
+  var totalUnreal = G.paperServer && G.paperStatus && G.paperStatus.totalUnrealizedPnl != null
+    ? Number(G.paperStatus.totalUnrealizedPnl) : calculatedAllUnreal;
   var upnl = document.getElementById('bot-upnl');
   if(upnl) {
     upnl.textContent = (totalUnreal>=0?'+':'') + '$' + totalUnreal.toFixed(2);
     upnl.style.color = totalUnreal>=0?'#3fb950':'#f85149';
+    upnl.title = 'Unrealized PnL across all active paper strategies; does not include pending orders.';
   }
 
   // Total exposure

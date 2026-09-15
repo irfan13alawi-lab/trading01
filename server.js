@@ -3136,6 +3136,8 @@ function paperStatus() {
     realizedPnl: Number(realizedPnl.toFixed(2)),
     unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
     equity: Number(equity.toFixed(2)),
+    totalRealizedPnl: Number(totalRealizedPnl.toFixed(2)),
+    totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(2)),
     legacyRealizedPnl: Number(legacyRealizedPnl.toFixed(2)),
     preUpgradeRealizedPnl: Number(preUpgradeRealizedPnl.toFixed(2)),
     legacyUnrealizedPnl: Number((totalUnrealizedPnl - unrealizedPnl).toFixed(2)),
