@@ -285,6 +285,12 @@ const CRYPTOCOMPARE_API_KEY = String(process.env.CRYPTOCOMPARE_API_KEY || '').tr
 const CRYPTOCOMPARE_NEWS_URL = 'https://min-api.cryptocompare.com/data/v2/news/?lang=EN' +
   (CRYPTOCOMPARE_API_KEY ? '&api_key=' + encodeURIComponent(CRYPTOCOMPARE_API_KEY) : '');
 const NEWS_RSS_URL = 'https://www.coindesk.com/arc/outboundfeeds/rss/';
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
+const ANTHROPIC_API_KEY = String(process.env.ANTHROPIC_API_KEY || '').trim();
+const NEWS_IMPACT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const NEWS_ARTICLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const newsArticleCache = new Map();
+const newsImpactCache = new Map();
 
 function decodeNewsXml(value) {
   return String(value || '')
@@ -334,6 +340,164 @@ function parseCryptoCompareNews(body, limit) {
   }
 }
 
+function newsArticleId(row) {
+  return String(row && (row.ID || row.id || row.URL || row.url || row.GUID || row.guid || row.TITLE || row.title || '') || '').trim();
+}
+
+function rememberNewsArticles(rows) {
+  if (!Array.isArray(rows)) return;
+  const expiresAt = Date.now() + NEWS_ARTICLE_CACHE_TTL_MS;
+  rows.forEach(row => {
+    const id = newsArticleId(row);
+    if (id) newsArticleCache.set(id, {row, expiresAt});
+  });
+  for (const [id, item] of newsArticleCache) {
+    if (!item || item.expiresAt <= Date.now()) newsArticleCache.delete(id);
+  }
+}
+
+function newsArticleText(row) {
+  return String(row && (row.TITLE || row.title || row.headline || '') || '').trim();
+}
+
+function newsArticleSentiment(row) {
+  const explicit = String(row && (row.sentiment || row.SENTIMENT || '') || '').toUpperCase();
+  if (explicit.includes('NEG') || explicit.includes('BEAR')) return 'NEGATIVE';
+  if (explicit.includes('POS') || explicit.includes('BULL')) return 'POSITIVE';
+  const title = newsArticleText(row).toLowerCase();
+  if (/hack|exploit|lawsuit|ban|fraud|scam|liquidat|crash|reject|outflow|sell-off/.test(title)) return 'NEGATIVE';
+  if (/surge|rally|approval|approved|adoption|inflow|partnership|launch|breakout|record high|etf/.test(title)) return 'POSITIVE';
+  return 'NEUTRAL';
+}
+
+function newsAffectedCoins(row) {
+  const text = (newsArticleText(row) + ' ' + String(row && (row.CATEGORY_DATA || row.categories || row.CATEGORIES || row.TAGS || '') || '')).toUpperCase();
+  const known = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LINK','AVAX','DOT','ARB','OP','INJ','SUI','PEPE','FET','WIF','LTC','SHIB','TRX','MATIC','ATOM','UNI'];
+  return known.filter(sym => new RegExp('\\b' + sym + '\\b').test(text) ||
+    (sym === 'BTC' && /BITCOIN/.test(text)) || (sym === 'ETH' && /ETHEREUM/.test(text))).slice(0, 8);
+}
+
+function fallbackNewsImpact(row) {
+  const title = newsArticleText(row);
+  const lower = title.toLowerCase();
+  const sentiment = newsArticleSentiment(row);
+  const majorNegative = /hack|exploit|fraud|scam|ban|crash|bankrupt|lawsuit|liquidat/.test(lower);
+  const majorPositive = /etf|approved|approval|partnership|adoption|institution|surge|record high/.test(lower);
+  const direction = sentiment === 'NEGATIVE' ? 'TURUN' : sentiment === 'POSITIVE' ? 'NAIK' : 'NETRAL';
+  const magnitude = majorNegative || majorPositive ? 'BESAR' : direction === 'NETRAL' ? 'KECIL' : 'SEDANG';
+  const confidence = direction === 'NETRAL' ? 38 : majorNegative || majorPositive ? 72 : 58;
+  const timeframe = majorNegative || majorPositive ? 'pendek (1-4j)' : 'menengah (4-24j)';
+  const affected = newsAffectedCoins(row);
+  const coinText = affected.length ? affected.join(', ') : 'pasar crypto terkait';
+  const reasoning = direction === 'TURUN'
+    ? 'Judul mengandung katalis negatif; tekanan jual berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
+    : direction === 'NAIK'
+      ? 'Judul mengandung katalis positif; minat beli berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
+      : 'Tidak ada katalis arah yang cukup jelas dari judul; dampak harga kemungkinan netral atau terbatas.';
+  return {direction, magnitude, confidence, timeframe, reasoning, affected_coins: affected.length ? affected : ['BTC']};
+}
+
+function parseImpactJson(text) {
+  const cleaned = String(text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  try { return JSON.parse(cleaned); } catch (_) {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    try { return match ? JSON.parse(match[0]) : null; } catch (_) { return null; }
+  }
+}
+
+function normaliseImpactAnalysis(value, fallback) {
+  const base = fallback || fallbackNewsImpact({TITLE: ''});
+  const raw = value && typeof value === 'object' ? value : {};
+  const directions = {UP: 'NAIK', DOWN: 'TURUN', BULLISH: 'NAIK', BEARISH: 'TURUN', NEUTRAL: 'NETRAL'};
+  const magnitudes = {HIGH: 'BESAR', MEDIUM: 'SEDANG', LOW: 'KECIL'};
+  const directionKey = String(raw.direction || '').trim().toUpperCase();
+  const magnitudeKey = String(raw.magnitude || '').trim().toUpperCase();
+  const direction = ['NAIK','TURUN','NETRAL'].includes(directionKey) ? directionKey : (directions[directionKey] || base.direction);
+  const magnitude = ['BESAR','SEDANG','KECIL'].includes(magnitudeKey) ? magnitudeKey : (magnitudes[magnitudeKey] || base.magnitude);
+  const timeframeText = String(raw.timeframe || '').trim().toLowerCase();
+  const timeframe = /pendek|short|1.?4/.test(timeframeText) ? 'pendek (1-4j)' : /panjang|long|1.?7/.test(timeframeText)
+    ? 'panjang (1-7h)' : /menengah|medium|4.?24/.test(timeframeText) ? 'menengah (4-24j)' : base.timeframe;
+  const confidenceValue = Number(raw.confidence);
+  const confidence = Number.isFinite(confidenceValue) ? Math.max(0, Math.min(100, Math.round(confidenceValue))) : base.confidence;
+  const coins = Array.isArray(raw.affected_coins) ? raw.affected_coins : base.affected_coins;
+  const affected_coins = [...new Set(coins.map(item => String(item || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(item => /^[A-Z0-9]{2,12}$/.test(item)))].slice(0, 8);
+  return {
+    direction, magnitude, confidence, timeframe,
+    reasoning: String(raw.reasoning || base.reasoning).trim().slice(0, 500),
+    affected_coins: affected_coins.length ? affected_coins : ['BTC']
+  };
+}
+
+function impactPrompt(row) {
+  const title = newsArticleText(row);
+  const sentiment = newsArticleSentiment(row);
+  const currencies = newsAffectedCoins(row).join(', ') || 'unknown';
+  return 'Analisis dampak berita crypto ini secara singkat dan konservatif.\n' +
+    'Judul: ' + title + '\nSentimen heuristik: ' + sentiment + '\nCoin terkait: ' + currencies + '\n\n' +
+    'Balas JSON valid saja dengan shape: {"direction":"NAIK|TURUN|NETRAL","magnitude":"BESAR|SEDANG|KECIL","confidence":0,"timeframe":"pendek (1-4j)|menengah (4-24j)|panjang (1-7h)","reasoning":"1-2 kalimat bahasa Indonesia","affected_coins":["BTC"]}. Jangan memberi rekomendasi finansial.';
+}
+
+async function requestNewsImpactAi(row) {
+  const prompt = impactPrompt(row);
+  if (OPENAI_API_KEY) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetchFn('https://api.openai.com/v1/chat/completions', {
+        method: 'POST', headers: {'Authorization': 'Bearer ' + OPENAI_API_KEY, 'Content-Type': 'application/json'},
+        body: JSON.stringify({model: 'gpt-4o-mini', temperature: 0.1, response_format: {type: 'json_object'}, messages: [
+          {role: 'system', content: 'Kamu analis berita crypto. Ikuti format JSON pengguna secara ketat.'},
+          {role: 'user', content: prompt}
+        ]}), signal: controller.signal
+      });
+      const body = await response.text();
+      if (!response.ok) throw new Error('OpenAI HTTP ' + response.status);
+      const payload = JSON.parse(body);
+      const content = payload && payload.choices && payload.choices[0] && payload.choices[0].message && payload.choices[0].message.content;
+      const parsed = parseImpactJson(content);
+      if (!parsed) throw new Error('OpenAI returned invalid JSON');
+      return {analysis: parsed, provider: 'OpenAI gpt-4o-mini'};
+    } finally { clearTimeout(timer); }
+  }
+  if (ANTHROPIC_API_KEY) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetchFn('https://api.anthropic.com/v1/messages', {
+        method: 'POST', headers: {'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json'},
+        body: JSON.stringify({model: 'claude-3-5-haiku-latest', max_tokens: 400, temperature: 0.1,
+          system: 'Kamu analis berita crypto. Balas JSON valid saja.', messages: [{role: 'user', content: prompt}]}), signal: controller.signal
+      });
+      const body = await response.text();
+      if (!response.ok) throw new Error('Anthropic HTTP ' + response.status);
+      const payload = JSON.parse(body);
+      const content = payload && Array.isArray(payload.content) && payload.content[0] && payload.content[0].text;
+      const parsed = parseImpactJson(content);
+      if (!parsed) throw new Error('Anthropic returned invalid JSON');
+      return {analysis: parsed, provider: 'Anthropic Claude Haiku'};
+    } finally { clearTimeout(timer); }
+  }
+  return null;
+}
+
+async function analyzeNewsImpact(row) {
+  const id = newsArticleId(row);
+  const cached = newsImpactCache.get(id);
+  if (cached && cached.expiresAt > Date.now()) return {...cached.value, cached: true};
+  const fallback = fallbackNewsImpact(row);
+  let value = {analysis: fallback, provider: 'Rule-based fallback'};
+  try {
+    const ai = await requestNewsImpactAi(row);
+    if (ai) value = {analysis: normaliseImpactAnalysis(ai.analysis, fallback), provider: ai.provider};
+  } catch (error) {
+    value = {analysis: fallback, provider: 'Rule-based fallback', fallbackReason: error.message || 'AI unavailable'};
+  }
+  value.analysis = normaliseImpactAnalysis(value.analysis, fallback);
+  const result = {news_id: id, analysis: value.analysis, provider: value.provider, generatedAt: new Date().toISOString()};
+  newsImpactCache.set(id, {value: result, expiresAt: Date.now() + NEWS_IMPACT_CACHE_TTL_MS});
+  return result;
+}
+
 async function serveNewsFeed(requestUrl, res) {
   const key = '/cryptocompare' + requestUrl.pathname + requestUrl.search;
   const hit = cache.get(key);
@@ -353,7 +517,10 @@ async function serveNewsFeed(requestUrl, res) {
     primary.path = '/data/v2/news/';
     const parsed = primary.status >= 200 && primary.status < 300
       ? parseCryptoCompareNews(primary.body, limit) : null;
-    if (parsed) body = JSON.stringify(parsed);
+    if (parsed) {
+      rememberNewsArticles(parsed.Data);
+      body = JSON.stringify(parsed);
+    }
     markSourceHealth('/cryptocompare', primary);
     if (!parsed && primary.status >= 200 && primary.status < 300) {
       markSourceError('/cryptocompare', new Error('CryptoCompare response invalid'), primary.path);
@@ -373,7 +540,9 @@ async function serveNewsFeed(requestUrl, res) {
         send(res, fallback.status, JSON.stringify({error: 'News provider HTTP ' + fallback.status}));
         return;
       }
-      body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Provider: 'CoinDesk RSS fallback', Data: parseNewsRss(fallback.body).slice(0, limit)});
+      const fallbackRows = parseNewsRss(fallback.body).slice(0, limit);
+      rememberNewsArticles(fallbackRows);
+      body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Provider: 'CoinDesk RSS fallback', Data: fallbackRows});
     } catch (error) {
       markSourceError('/cryptocompare', error, '/arc/outboundfeeds/rss/');
       send(res, 502, JSON.stringify({error: 'News provider unavailable', detail: error.message || (primaryError && primaryError.message) || 'unknown error'}));
@@ -3426,6 +3595,12 @@ function paperStatus() {
     equityPeak: Number(equityPeak.toFixed(2)),
     drawdownPct: Number(drawdownPct.toFixed(2)),
     drawdownGuard,
+    drawdown: {
+      current_pct: Number(drawdownPct.toFixed(2)),
+      limit_pct: Number(PAPER_MAX_DRAWDOWN_PCT.toFixed(2)),
+      is_breached: drawdownGuard,
+      trades_paused: drawdownGuard
+    },
     maxDirectionRiskPct: PAPER_MAX_DIRECTION_RISK_PCT,
     maxPerDirection: PAPER_MAX_PER_DIRECTION,
     maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
@@ -4052,6 +4227,15 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, JSON.stringify(paperStatus()));
     return;
   }
+  if (requestUrl.pathname === '/api/status') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    const status = paperStatus();
+    send(res, 200, JSON.stringify({ok: true, drawdown: status.drawdown, paper: status}));
+    return;
+  }
   if (requestUrl.pathname === '/paper/settings') {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       send(res, 405, JSON.stringify({error: 'Method not allowed'}));
@@ -4299,6 +4483,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperStats(requestUrl.searchParams)));
+    return;
+  }
+
+  const newsAnalyzeMatch = requestUrl.pathname.match(/^\/api\/news\/([^/]+)\/analyze$/);
+  if (newsAnalyzeMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    const newsId = decodeURIComponent(newsAnalyzeMatch[1]);
+    const cachedArticle = newsArticleCache.get(newsId);
+    if (!cachedArticle || cachedArticle.expiresAt <= Date.now()) {
+      send(res, 404, JSON.stringify({ok: false, error: 'News article expired or not loaded; refresh News first'}));
+      return;
+    }
+    try {
+      send(res, 200, JSON.stringify(await analyzeNewsImpact(cachedArticle.row)));
+    } catch (error) {
+      send(res, 502, JSON.stringify({ok: false, error: 'News impact analysis unavailable', detail: error.message || 'unknown error'}));
+    }
     return;
   }
 

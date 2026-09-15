@@ -11,6 +11,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 - **Backtest Engine** — single pair + multi 10 pairs dari market yang dipilih
 - **Trading Journal** — equity curve, lesson wall, Kelly Criterion
 - **Telegram Alert** — notifikasi server-side ke HP saat scan, limit fill, posisi ditutup, dan guard aktif
+- **News impact analysis** — badge sentimen, statistik/filter coin, dan analisis dampak per artikel dengan cache 6 jam; memakai OpenAI/Claude bila dikonfigurasi, atau fallback rule-based yang jujur
 - **Persistence** — state Paper Bot tersimpan atomik di VPS dengan backup `.bak`; jurnal browser punya export JSON/CSV
 - **Health & evidence** — status sumber `LIVE`/`DELAYED`/`ERROR`, timestamp, alasan sinyal, volume ratio, dan MTF
 - **Paper analytics** — profit factor, expectancy, drawdown, fill rate, pending expired, waktu fill, MFE/MAE, TP1/TP2, stop loss, cohort, strategy version, candle pattern, serta breakdown symbol/arah/timeframe/score
@@ -60,6 +61,22 @@ atau `npm start`.
 Saat dashboard dibuka dari port `18084`, seluruh market/API yang dipakai dashboard
 melewati proxy VPS agar browser tidak terkena CORS. CoinGecko ditampilkan sebagai
 market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
+Feed News tersedia melalui `/cryptocompare/news/v1/article/list` dan menggunakan
+CryptoCompare jika tersedia, lalu fallback ke RSS publik CoinDesk. Analisis dampak
+per artikel tersedia di `/api/news/<news_id>/analyze`; hasilnya di-cache 6 jam.
+Tanpa credential AI, dashboard tetap bekerja dengan rule-based fallback dan selalu
+menampilkan provider yang digunakan. Jika ingin mengaktifkan AI, simpan salah satu
+credential berikut di environment service VPS (jangan hardcode atau taruh di HTML):
+
+```bash
+OPENAI_API_KEY=...
+# atau
+ANTHROPIC_API_KEY=...
+```
+
+Status drawdown juga tersedia pada `/paper/status` sebagai `drawdown` dan pada
+`/api/status`; banner merah/kuning di dashboard hanya memberi peringatan dan tidak
+mengubah guard server.
 
 Paper Bot VPS hanya memakai Bitget Futures dan menyimpan state di
 `paper-bot-state.json`. Restart normal tidak menghapus trade aktif maupun riwayat.
