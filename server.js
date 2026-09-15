@@ -281,6 +281,9 @@ function cacheTtl(prefix, pathname) {
   return 5000;
 }
 
+const CRYPTOCOMPARE_API_KEY = String(process.env.CRYPTOCOMPARE_API_KEY || '').trim();
+const CRYPTOCOMPARE_NEWS_URL = 'https://min-api.cryptocompare.com/data/v2/news/?lang=EN' +
+  (CRYPTOCOMPARE_API_KEY ? '&api_key=' + encodeURIComponent(CRYPTOCOMPARE_API_KEY) : '');
 const NEWS_RSS_URL = 'https://www.coindesk.com/arc/outboundfeeds/rss/';
 
 function decodeNewsXml(value) {
@@ -321,6 +324,16 @@ function parseNewsRss(xml) {
   return items;
 }
 
+function parseCryptoCompareNews(body, limit) {
+  try {
+    const payload = JSON.parse(String(body || ''));
+    if (!payload || payload.Response === 'Error' || !Array.isArray(payload.Data)) return null;
+    return {...payload, Data: payload.Data.slice(0, limit)};
+  } catch (_) {
+    return null;
+  }
+}
+
 async function serveNewsFeed(requestUrl, res) {
   const key = '/cryptocompare' + requestUrl.pathname + requestUrl.search;
   const hit = cache.get(key);
@@ -328,24 +341,50 @@ async function serveNewsFeed(requestUrl, res) {
     send(res, hit.status, hit.body, hit.contentType);
     return;
   }
+  const limitValue = Number(requestUrl.searchParams.get('limit') || 50);
+  const limit = Number.isFinite(limitValue) ? Math.max(1, Math.min(50, Math.floor(limitValue))) : 50;
+  let primaryError = null;
+  let primary = null;
+  let body = null;
   try {
     const startedAt = Date.now();
-    const result = await requestUpstream(NEWS_RSS_URL);
-    result.latencyMs = Date.now() - startedAt;
-    result.path = '/arc/outboundfeeds/rss/';
-    markSourceHealth('/cryptocompare', result);
-    if (result.status < 200 || result.status >= 300) {
-      send(res, result.status, JSON.stringify({error: 'News provider HTTP ' + result.status}));
+    primary = await requestUpstream(CRYPTOCOMPARE_NEWS_URL + '&limit=' + limit);
+    primary.latencyMs = Date.now() - startedAt;
+    primary.path = '/data/v2/news/';
+    const parsed = primary.status >= 200 && primary.status < 300
+      ? parseCryptoCompareNews(primary.body, limit) : null;
+    if (parsed) body = JSON.stringify(parsed);
+    markSourceHealth('/cryptocompare', primary);
+    if (!parsed && primary.status >= 200 && primary.status < 300) {
+      markSourceError('/cryptocompare', new Error('CryptoCompare response invalid'), primary.path);
+    }
+  } catch (error) {
+    primaryError = error;
+    markSourceError('/cryptocompare', error, '/data/v2/news/');
+  }
+  if (!body) {
+    try {
+      const startedAt = Date.now();
+      const fallback = await requestUpstream(NEWS_RSS_URL);
+      fallback.latencyMs = Date.now() - startedAt;
+      fallback.path = '/arc/outboundfeeds/rss/';
+      markSourceHealth('/cryptocompare', fallback);
+      if (fallback.status < 200 || fallback.status >= 300) {
+        send(res, fallback.status, JSON.stringify({error: 'News provider HTTP ' + fallback.status}));
+        return;
+      }
+      body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Provider: 'CoinDesk RSS fallback', Data: parseNewsRss(fallback.body).slice(0, limit)});
+    } catch (error) {
+      markSourceError('/cryptocompare', error, '/arc/outboundfeeds/rss/');
+      send(res, 502, JSON.stringify({error: 'News provider unavailable', detail: error.message || (primaryError && primaryError.message) || 'unknown error'}));
       return;
     }
-    const limitValue = Number(requestUrl.searchParams.get('limit') || 50);
-    const limit = Number.isFinite(limitValue) ? Math.max(1, Math.min(50, Math.floor(limitValue))) : 50;
-    const body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Data: parseNewsRss(result.body).slice(0, limit)});
+  }
+  try {
     const cached = {status: 200, body, contentType: 'application/json', expiresAt: Date.now() + 1800000};
     cache.set(key, cached);
     send(res, cached.status, cached.body, cached.contentType);
   } catch (error) {
-    markSourceError('/cryptocompare', error, '/arc/outboundfeeds/rss/');
     send(res, 502, JSON.stringify({error: 'News provider unavailable', detail: error.message}));
   }
 }

@@ -1136,6 +1136,7 @@ var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
 var paperStatsTimer = null;
 var paperDiagnosticsTimer = null;
+var newsRefreshTimer = null;
 var PAPER_ADMIN_TOKEN = '';
 var VPS_CHART_TF = '15m';
 var VPS_CHART_SYMBOL = 'BTC';
@@ -1833,12 +1834,17 @@ function loadNews(force) {
   if(!NEWS_API) return Promise.resolve(null);
   var status=document.getElementById('news-updated');
   if(status && !G.news.length) status.textContent='loading via VPS…';
-  return fetch(NEWS_API+'?lang=EN&limit=50',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('News HTTP '+r.status);return r.json();}).then(function(payload){
+  var query='?lang=EN&limit=50' + (force ? '&refresh=' + Date.now() : '');
+  return fetch(NEWS_API+query,{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('News HTTP '+r.status);return r.json();}).then(function(payload){
     G.news=normaliseNewsPayload(payload);
     var count=document.getElementById('news-count'); if(count){count.textContent=G.news.length;count.style.display=G.news.length?'inline':'none';}
     if(status) status.textContent='VPS cache 30m · updated '+new Date().toLocaleTimeString('id-ID');
     renderNewsPage(); renderTicker(payload); return payload;
   }).catch(function(error){if(status)status.textContent='provider unavailable';renderNewsPage();sLog('News: '+(error.message||error));return null;});
+}
+function startNewsRefreshTimer() {
+  if (newsRefreshTimer || !NEWS_API) return;
+  newsRefreshTimer = setInterval(function() { loadNews(true); }, 30 * 60 * 1000);
 }
 function renderTicker(data) {
   var html = normaliseNewsPayload(data).slice(0,16).map(function(n) {
@@ -7063,6 +7069,7 @@ setPaperMode(false, true);
 detectPaperBot();
 pollSourceHealth();
 doRefresh();
+startNewsRefreshTimer();
 setInterval(doRefresh, 60000);
 setInterval(pollSourceHealth, 15000);
 setInterval(function(){
