@@ -6213,7 +6213,10 @@ function queuePaperExecution(cycleKey) {
 // ---- Auto Execute Top 3 Setups ----
 function autoExecuteTopSetups(cycleKey) {
   if (marketIsSpot() || !marketIsBitget()) {
-    toast('<b style="color:#e3b341;">Paper order diblokir</b> — Paper Bot hanya memakai Bitget Futures.', 'a');
+    var reason = marketIsSpot()
+      ? 'Spot tidak dipakai untuk paper futures.'
+      : 'Binance dipakai untuk analisis; Paper Bot VPS tetap memakai adapter/fallback server. Browser fallback hanya Bitget.';
+    toast('<b style="color:#e3b341;">Paper order browser diblokir</b> — ' + reason, 'a');
     sLog('BOT: auto-execute skipped because current market is ' + marketLabel());
     return;
   }
