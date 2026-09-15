@@ -92,10 +92,13 @@ const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
+const PAPER_FALLBACK_ENABLED = String(process.env.PAPER_FALLBACK_ENABLED || 'true').toLowerCase() !== 'false';
 // This service is paper-only, but the operational endpoints can still pause
-// the bot or create/close paper records. Set PAPER_ADMIN_TOKEN in the service
-// environment when the dashboard is exposed beyond a trusted network.
+// the bot or create/close paper records. A token is mandatory before any
+// state-changing endpoint is enabled; never leave the dashboard controls
+// unauthenticated when the VPS is reachable from the public internet.
 const PAPER_ADMIN_TOKEN = String(process.env.PAPER_ADMIN_TOKEN || '').trim();
+const DISCORD_WEBHOOK_URL = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
 const PAPER_STATE_FILE = process.env.PAPER_STATE_FILE ||
   path.join(__dirname, 'paper-bot-state.json');
 const PAPER_STATE_BACKUP_FILE = PAPER_STATE_FILE + '.bak';
@@ -165,7 +168,7 @@ const prefixes = Object.keys(APIS).sort((a, b) => b.length - a.length);
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization'
   };
 }
@@ -327,12 +330,55 @@ async function sendTelegramMessage(text) {
   }
 }
 
+const discordState = {
+  sent: 0,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastErrorAt: null,
+  lastError: null
+};
+
+async function sendDiscordMessage(text) {
+  if (!DISCORD_WEBHOOK_URL || !text) return false;
+  discordState.lastAttemptAt = new Date().toISOString();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetchFn(DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'User-Agent': 'NexoraPaperBot/1.0'},
+      body: JSON.stringify({content: text.slice(0, 1900)}),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error('Discord HTTP ' + response.status);
+    discordState.sent += 1;
+    discordState.lastSuccessAt = new Date().toISOString();
+    discordState.lastError = null;
+    return true;
+  } catch (error) {
+    discordState.lastErrorAt = new Date().toISOString();
+    discordState.lastError = error.message;
+    console.error('[paper] Discord alert failed:', error.message);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendConfiguredAlert(text) {
+  const results = await Promise.all([
+    sendTelegramMessage(text),
+    sendDiscordMessage(text)
+  ]);
+  return results.some(Boolean);
+}
+
 function sendRateLimitedAlert(key, text, cooldownMs) {
   const now = Date.now();
   const last = alertCooldowns.get(key) || 0;
   if (now - last < cooldownMs) return;
   alertCooldowns.set(key, now);
-  void sendTelegramMessage(text);
+  void sendConfiguredAlert(text);
 }
 
 function paperRecordRejections(codes) {
@@ -386,6 +432,54 @@ function paperPartialAlert(trade) {
     trade.sym + ' ' + trade.dir + ' @ ' + trade.tp1 +
     '\nClosed ' + trade.tp1ClosePct + '% | remaining ' + trade.remainingSize +
     '\nSL moved to breakeven';
+}
+
+function paperDailySummaryAlert(dateKey) {
+  const dayTrades = paperState.closedTrades.filter(trade =>
+    paperIsTrialTrade(trade) && String(trade.closedAt || '').slice(0, 10) === dateKey &&
+    trade.outcome !== 'CANCELLED');
+  const wins = dayTrades.filter(trade => paperNumber(trade.r) > 0).length;
+  const losses = dayTrades.filter(trade => paperNumber(trade.r) < 0).length;
+  const netR = dayTrades.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
+  const pnl = dayTrades.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
+  return 'NEXORA PAPER DAILY SUMMARY ' + dateKey + '\n' +
+    'Trades: ' + dayTrades.length + ' | Win/Loss: ' + wins + '/' + losses +
+    '\nNet: ' + netR.toFixed(2) + 'R | PnL: $' + pnl.toFixed(2) +
+    '\nEquity: $' + paperEquity().toFixed(2) + ' | Daily guard: ' +
+    (paperDailyLossR() <= -paperSettings().maxDailyLossR ? 'ON' : 'OK');
+}
+
+function paperRiskGuardAlert(status, reason) {
+  return 'NEXORA PAPER RISK GUARD\n' + reason +
+    '\nActive risk: $' + Number(status.activeRisk || 0).toFixed(2) +
+    ' / $' + Number(status.riskBudget || 0).toFixed(2) +
+    '\nDaily R: ' + Number(status.dailyLossR || 0).toFixed(2) +
+    ' / limit -' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R' +
+    '\nNew entries are being held until the guard clears.';
+}
+
+function maybeSendPaperOperationalAlerts() {
+  const today = new Date().toISOString().slice(0, 10);
+  const alertState = paperState.alertState || (paperState.alertState = {});
+  if (alertState.lastDailySummaryDate !== today) {
+    alertState.lastDailySummaryDate = today;
+    savePaperState();
+    sendRateLimitedAlert('paper-daily-summary:' + today, paperDailySummaryAlert(today), 24 * 60 * 60 * 1000);
+  }
+  const status = paperStatus();
+  const riskRatio = status.riskBudget > 0 ? status.activeRisk / status.riskBudget : 0;
+  const reason = status.dailyGuard ? 'Daily loss limit reached: new entries paused.'
+    : riskRatio >= 0.85 ? 'Active risk is at ' + Math.round(riskRatio * 100) + '% of the budget.' : null;
+  if (reason) {
+    const now = Date.now();
+    const lastAt = Date.parse(alertState.lastRiskGuardAt || '') || 0;
+    if (now - lastAt >= 30 * 60 * 1000) {
+      alertState.lastRiskGuardAt = new Date(now).toISOString();
+      savePaperState();
+      sendRateLimitedAlert('paper-risk-guard:' + (status.dailyGuard ? 'daily' : 'risk'),
+        paperRiskGuardAlert(status, reason), 30 * 60 * 1000);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +632,11 @@ function defaultPaperState() {
     activeTrades: [],
     closedTrades: [],
     invalidatedTrades: [],
-    recentScans: []
+    recentScans: [],
+    alertState: {
+      lastDailySummaryDate: null,
+      lastRiskGuardAt: null
+    }
   };
 }
 
@@ -570,6 +668,7 @@ function loadPaperState() {
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades.map(normalisePaperTrade) : [],
       invalidatedTrades: Array.isArray(parsed.invalidatedTrades) ? parsed.invalidatedTrades : [],
       recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : [],
+      alertState: {...defaultPaperState().alertState, ...(parsed.alertState || {})},
       schemaVersion: PAPER_SCHEMA_VERSION
     };
     state.strategyVersion = state.strategyVersion || PAPER_STRATEGY_VERSION;
@@ -1051,7 +1150,7 @@ function buildPaperPairs(payload) {
         paperFieldPresent(row.quoteVolume24h),
       sc: 0,
       tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL',
-      dataAt, source: 'Bitget Futures'
+      dataAt, source: payload && payload._nexoraSource || 'Bitget Futures'
     };
     pairs[sym] = pair;
   });
@@ -1478,7 +1577,34 @@ function paperGranularityMs(granularity) {
     '4h': 4 * 60 * 60 * 1000, 'h4': 4 * 60 * 60 * 1000})[key] || 15 * 60 * 1000;
 }
 
-async function fetchPaperCandles(sym, granularity, requestedLimit) {
+function paperBinanceInterval(granularity) {
+  return ({'1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+    '1h': '1h', '4h': '4h', '1H': '1h', '4H': '4h'})[String(granularity || '')] || '15m';
+}
+
+function paperOkxBar(granularity) {
+  return ({'1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+    '1h': '1H', '4h': '4H', '1H': '1H', '4H': '4H'})[String(granularity || '')] || '15m';
+}
+
+function paperFallbackSymbol(sym) {
+  return String(sym || '').toUpperCase().replace(/[^A-Z0-9]/g, '') + 'USDT';
+}
+
+function paperRowsWithMetadata(rows, fetchedAt, intervalMs, source) {
+  const clean = rows.filter(row => row && row.ts > 0 && row.open > 0 && row.high > 0 &&
+    row.low > 0 && row.close > 0).sort((a, b) => a.ts - b.ts);
+  const now = Date.now();
+  const closedRows = clean.filter(row => row.ts + intervalMs <= now);
+  closedRows._nexoraFetchedAt = fetchedAt || new Date().toISOString();
+  closedRows._nexoraCandleIntervalMs = intervalMs;
+  closedRows._nexoraLatestRawTs = clean.length ? clean[clean.length - 1].ts : null;
+  closedRows._nexoraLatestClosedTs = closedRows.length ? closedRows[closedRows.length - 1].ts : null;
+  closedRows._nexoraSource = source;
+  return closedRows;
+}
+
+async function fetchPaperCandlesFromBitget(sym, granularity, requestedLimit) {
   const limit = Math.max(3, Math.min(250,
     Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : PAPER_CANDLE_LIMIT + 1));
   const target = APIS['/bitget'] +
@@ -1518,13 +1644,78 @@ async function fetchPaperCandles(sym, granularity, requestedLimit) {
   })).filter(row => row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
     .sort((a, b) => a.ts - b.ts);
   const intervalMs = paperGranularityMs(granularity);
-  const now = Date.now();
-  const closedRows = rows.filter(row => row.ts > 0 && row.ts + intervalMs <= now);
-  closedRows._nexoraFetchedAt = new Date().toISOString();
-  closedRows._nexoraCandleIntervalMs = intervalMs;
-  closedRows._nexoraLatestRawTs = rows.length ? rows[rows.length - 1].ts : null;
-  closedRows._nexoraLatestClosedTs = closedRows.length ? closedRows[closedRows.length - 1].ts : null;
-  return closedRows;
+  return paperRowsWithMetadata(rows, new Date().toISOString(), intervalMs, 'Bitget Futures');
+}
+
+async function fetchPaperCandlesFromBinance(sym, granularity, requestedLimit) {
+  const limit = Math.max(3, Math.min(1500,
+    Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : PAPER_CANDLE_LIMIT + 1));
+  const interval = paperBinanceInterval(granularity);
+  const pathName = '/fapi/v1/klines?interval=' + interval;
+  const target = APIS['/binance'] + '/fapi/v1/klines?symbol=' +
+    encodeURIComponent(paperFallbackSymbol(sym)) + '&interval=' + interval + '&limit=' + limit;
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/binance', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  } catch (error) {
+    markSourceError('/binance', error, pathName);
+    throw error;
+  }
+  if (result.status < 200 || result.status >= 300) throw new Error('Binance candles HTTP ' + result.status);
+  let payload;
+  try { payload = JSON.parse(result.body); }
+  catch (_) { throw new Error('Binance candles returned invalid JSON'); }
+  if (!Array.isArray(payload)) throw new Error((payload && payload.msg) || 'Binance candles response invalid');
+  return paperRowsWithMetadata(payload.map(row => ({
+    ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
+    close: Number(row[4]), volume: Number(row[5] || 0)
+  })), new Date().toISOString(), paperGranularityMs(granularity), 'Binance Futures fallback');
+}
+
+async function fetchPaperCandlesFromOkx(sym, granularity, requestedLimit) {
+  const limit = Math.max(3, Math.min(300, Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : PAPER_CANDLE_LIMIT + 1));
+  const bar = paperOkxBar(granularity);
+  const pathName = '/api/v5/market/candles?bar=' + bar;
+  const target = APIS['/okx'] + '/api/v5/market/candles?instId=' +
+    encodeURIComponent(String(sym).toUpperCase() + '-USDT-SWAP') + '&bar=' + bar + '&limit=' + limit;
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/okx', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  } catch (error) {
+    markSourceError('/okx', error, pathName);
+    throw error;
+  }
+  if (result.status < 200 || result.status >= 300) throw new Error('OKX candles HTTP ' + result.status);
+  let payload;
+  try { payload = JSON.parse(result.body); }
+  catch (_) { throw new Error('OKX candles returned invalid JSON'); }
+  if (!payload || payload.code !== '0' || !Array.isArray(payload.data)) {
+    throw new Error((payload && payload.msg) || 'OKX candles response invalid');
+  }
+  return paperRowsWithMetadata(payload.data.map(row => ({
+    ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
+    close: Number(row[4]), volume: Number(row[7] || row[6] || row[5] || 0)
+  })), new Date().toISOString(), paperGranularityMs(granularity), 'OKX Swap fallback');
+}
+
+async function fetchPaperCandles(sym, granularity, requestedLimit) {
+  let bitgetError;
+  try {
+    return await fetchPaperCandlesFromBitget(sym, granularity, requestedLimit);
+  } catch (error) {
+    bitgetError = error;
+  }
+  if (!PAPER_FALLBACK_ENABLED) throw bitgetError || new Error('Bitget candles unavailable');
+  const fallbackErrors = [];
+  for (const fallback of [fetchPaperCandlesFromBinance, fetchPaperCandlesFromOkx]) {
+    try { return await fallback(sym, granularity, requestedLimit); }
+    catch (error) { fallbackErrors.push(error.message); }
+  }
+  throw new Error('Bitget candles unavailable; Binance/OKX fallback failed: ' + fallbackErrors.join(' | '));
 }
 
 // Historical candles for the replay endpoint. Bitget returns the newest page
@@ -1826,7 +2017,7 @@ function closePaperTrade(trade, exitPrice, outcome, reason) {
   });
   paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
   console.log('[paper] closed', trade.sym, outcome, reason);
-  void sendTelegramMessage(paperCloseAlert(trade));
+  void sendConfiguredAlert(paperCloseAlert(trade));
 }
 
 function partialClosePaperTrade(trade, exitPrice) {
@@ -1848,11 +2039,11 @@ function partialClosePaperTrade(trade, exitPrice) {
   trade.lastEvent = 'TP1_PARTIAL';
   paperAddTradeEvent(trade, 'TP1_PARTIAL', {price: exitPrice, size: closeSize});
   console.log('[paper] TP1 partial', trade.sym, closePct + '%', '@', exitPrice);
-  void sendTelegramMessage(paperPartialAlert(paperTradeView(trade)));
+  void sendConfiguredAlert(paperPartialAlert(paperTradeView(trade)));
   return true;
 }
 
-async function fetchPaperTickers() {
+async function fetchPaperTickersFromBitget() {
   const target = APIS['/bitget'] +
     '/api/v2/mix/market/tickers?productType=USDT-FUTURES';
   const startedAt = Date.now();
@@ -1884,7 +2075,105 @@ async function fetchPaperTickers() {
     throw error;
   }
   payload._nexoraFetchedAt = new Date().toISOString();
+  payload._nexoraSource = 'Bitget Futures';
   return payload;
+}
+
+async function fetchPaperTickersFromBinance() {
+  const pathName = '/fapi/v1/ticker/24hr';
+  const target = APIS['/binance'] + pathName;
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/binance', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  } catch (error) {
+    markSourceError('/binance', error, pathName);
+    throw error;
+  }
+  if (result.status < 200 || result.status >= 300) throw new Error('Binance tickers HTTP ' + result.status);
+  let rows;
+  try { rows = JSON.parse(result.body); }
+  catch (_) { throw new Error('Binance tickers returned invalid JSON'); }
+  if (!Array.isArray(rows)) throw new Error((rows && rows.msg) || 'Binance tickers response invalid');
+  const symbols = new Set(PAPER_SYMBOLS.map(sym => sym + 'USDT'));
+  const data = rows.filter(row => symbols.has(String(row.symbol || '').toUpperCase()))
+    .map(row => ({
+      symbol: String(row.symbol).toUpperCase(), lastPr: row.lastPrice,
+      priceChangePercent: row.priceChangePercent, quoteVolume: row.quoteVolume,
+      high24h: row.highPrice, low24h: row.lowPrice
+    }));
+  // Binance exposes the current funding snapshot in one public response. It
+  // is useful context during fallback, while OI remains unavailable and
+  // therefore still blocks strict paper entries until Bitget recovers.
+  try {
+    const fundingPath = '/fapi/v1/premiumIndex';
+    const fundingStartedAt = Date.now();
+    const fundingResult = await requestUpstream(APIS['/binance'] + fundingPath);
+    markSourceHealth('/binance', {...fundingResult, latencyMs: Date.now() - fundingStartedAt, path: fundingPath});
+    const fundingRows = JSON.parse(fundingResult.body);
+    const bySymbol = new Map((Array.isArray(fundingRows) ? fundingRows : []).map(row => [String(row.symbol || '').toUpperCase(), row.lastFundingRate]));
+    data.forEach(row => { if (bySymbol.has(row.symbol)) row.fundingRate = bySymbol.get(row.symbol); });
+  } catch (_) {}
+  if (!data.length) throw new Error('Binance tickers returned no Nexora symbols');
+  return {
+    code: '00000', msg: 'success', data,
+    _nexoraFetchedAt: new Date().toISOString(),
+    _nexoraSource: 'Binance Futures fallback'
+  };
+}
+
+async function fetchPaperTickersFromOkx() {
+  const pathName = '/api/v5/market/tickers?instType=SWAP';
+  const target = APIS['/okx'] + '/api/v5/market/tickers?instType=SWAP&uly=USDT';
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await requestUpstream(target);
+    markSourceHealth('/okx', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  } catch (error) {
+    markSourceError('/okx', error, pathName);
+    throw error;
+  }
+  if (result.status < 200 || result.status >= 300) throw new Error('OKX tickers HTTP ' + result.status);
+  let payload;
+  try { payload = JSON.parse(result.body); }
+  catch (_) { throw new Error('OKX tickers returned invalid JSON'); }
+  if (!payload || payload.code !== '0' || !Array.isArray(payload.data)) {
+    throw new Error((payload && payload.msg) || 'OKX tickers response invalid');
+  }
+  const symbols = new Set(PAPER_SYMBOLS.map(sym => sym + '-USDT-SWAP'));
+  const data = payload.data.filter(row => symbols.has(String(row.instId || '').toUpperCase()))
+    .map(row => {
+      const last = Number(row.last), open = Number(row.open24h);
+      return {
+        symbol: String(row.instId).toUpperCase().replace('-USDT-SWAP', 'USDT'),
+        lastPr: row.last,
+        priceChangePercent: open > 0 ? ((last - open) / open * 100) : 0,
+        quoteVolume: row.volCcy24h || row.vol24h,
+        high24h: row.high24h, low24h: row.low24h
+      };
+    });
+  if (!data.length) throw new Error('OKX tickers returned no Nexora symbols');
+  return {
+    code: '00000', msg: 'success', data,
+    _nexoraFetchedAt: new Date().toISOString(),
+    _nexoraSource: 'OKX Swap fallback'
+  };
+}
+
+async function fetchPaperTickers() {
+  try {
+    return await fetchPaperTickersFromBitget();
+  } catch (bitgetError) {
+    if (!PAPER_FALLBACK_ENABLED) throw bitgetError;
+    const errors = [];
+    for (const fallback of [fetchPaperTickersFromBinance, fetchPaperTickersFromOkx]) {
+      try { return await fallback(); }
+      catch (error) { errors.push(error.message); }
+    }
+    throw new Error('Bitget tickers unavailable; Binance/OKX fallback failed: ' + errors.join(' | '));
+  }
 }
 
 const paperInstrumentCache = {loadedAt: 0, items: new Map()};
@@ -2168,7 +2457,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     // Order-bearing scans are always reported. Empty-scan summaries are an
     // explicit opt-in because they create a recurring message every 15 minutes.
     if (placed.length || TELEGRAM_SCAN_SUMMARY) {
-      void sendTelegramMessage(paperScanAlert(cycleKey, placed));
+      void sendConfiguredAlert(paperScanAlert(cycleKey, placed));
     }
     if (blockReason && !placed.length) {
       sendRateLimitedAlert(
@@ -2236,7 +2525,7 @@ async function monitorPaperTrades() {
           });
           paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
           changed = true;
-          void sendTelegramMessage(paperCloseAlert({
+          void sendConfiguredAlert(paperCloseAlert({
             ...paperTradeView(trade), exitPrice: trade.currentPrice,
             outcome: 'CANCELLED', r: 0, pnl: 0, closeReason: trade.closeReason
           }));
@@ -2259,7 +2548,7 @@ async function monitorPaperTrades() {
               trade.lastEvent = 'LIMIT_FILLED';
               paperAddTradeEvent(trade, 'LIMIT_FILLED', {price: trade.entryActual, candleAt: candleKey});
               changed = true;
-              void sendTelegramMessage(paperFillAlert(trade));
+              void sendConfiguredAlert(paperFillAlert(trade));
               break;
             }
           }
@@ -2716,6 +3005,7 @@ function paperStatus() {
     minSignalScore: cfg.minSignalScore,
     strategyVersion: PAPER_STRATEGY_VERSION, cohortId: paperState.cohortId,
     minCandles: PAPER_MIN_CANDLES, monitorGranularity: '1m',
+    fallbacks: {enabled: PAPER_FALLBACK_ENABLED, order: ['Bitget', 'Binance Futures', 'OKX Swap']},
     tp1ClosePct: cfg.tp1ClosePct, maxDailyLossR: cfg.maxDailyLossR,
     maxDirectionRiskPct: PAPER_MAX_DIRECTION_RISK_PCT,
     maxPerDirection: PAPER_MAX_PER_DIRECTION,
@@ -2752,7 +3042,10 @@ function paperStatus() {
       sent: telegramState.sent,
       lastAttemptAt: telegramState.lastAttemptAt,
       lastSuccessAt: telegramState.lastSuccessAt,
-      lastError: telegramState.lastError
+      lastError: telegramState.lastError,
+      discord: Boolean(DISCORD_WEBHOOK_URL),
+      dailySummary: 'dashboard-only until explicitly enabled',
+      riskGuard: 'guard notifications are emitted for configured alert channels'
     },
     state: {
       schemaVersion: PAPER_SCHEMA_VERSION,
@@ -2835,11 +3128,25 @@ function paperDiagnostics() {
 }
 
 function paperAdminAuthorized(req, requestUrl) {
-  if (!PAPER_ADMIN_TOKEN) return true;
+  if (!PAPER_ADMIN_TOKEN) return false;
   const header = String(req.headers.authorization || '');
   const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
-  const queryToken = requestUrl && requestUrl.searchParams.get('token');
-  return bearer === PAPER_ADMIN_TOKEN || queryToken === PAPER_ADMIN_TOKEN;
+  // Do not accept tokens in query strings: URLs are commonly retained in
+  // browser history, proxy logs, and referrer headers.
+  return bearer === PAPER_ADMIN_TOKEN;
+}
+
+function requirePaperAdmin(req, requestUrl, res) {
+  if (!PAPER_ADMIN_TOKEN) {
+    paperControlError(res, 503, 'Admin controls disabled: set PAPER_ADMIN_TOKEN in /etc/nexora/nexora.env');
+    return false;
+  }
+  if (!paperAdminAuthorized(req, requestUrl)) {
+    res.writeHead(401, {...corsHeaders(), 'WWW-Authenticate': 'Bearer', 'Content-Type': 'application/json'});
+    res.end(JSON.stringify({ok: false, error: 'Admin authorization required'}));
+    return false;
+  }
+  return true;
 }
 
 function readJsonBody(req, maxBytes) {
@@ -2892,7 +3199,7 @@ function cancelPaperTrade(trade, reason) {
   paperState.closedTrades.unshift({...paperTradeView(trade), exitPrice: trade.exitPrice,
     closedAt: at, outcome: 'CANCELLED', closeReason, r: 0, pnl: trade.pnl});
   paperState.closedTrades = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
-  void sendTelegramMessage(paperCloseAlert({...paperTradeView(trade), exitPrice: trade.exitPrice,
+  void sendConfiguredAlert(paperCloseAlert({...paperTradeView(trade), exitPrice: trade.exitPrice,
     outcome: 'CANCELLED', r: 0, pnl: trade.pnl, closeReason}));
   return true;
 }
@@ -2927,8 +3234,18 @@ function updatePaperSettings(input) {
     if (body[name] != null) next[name] = String(body[name]);
   });
   ['whitelist', 'blacklist'].forEach(name => {
-    if (Array.isArray(body[name])) next[name] = body[name];
+    if (Array.isArray(body[name])) next[name] = [...new Set(body[name].map(value =>
+      String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean))].slice(0, 200);
   });
+  next.perScan = Math.max(1, Math.min(10, Math.round(Number(next.perScan) || PAPER_PER_SCAN)));
+  next.maxActive = Math.max(3, Math.min(100, Math.round(Number(next.maxActive) || PAPER_MAX_ACTIVE)));
+  next.maxPerSymbol = Math.max(1, Math.min(3, Math.round(Number(next.maxPerSymbol) || PAPER_MAX_PER_SYMBOL)));
+  next.riskPct = Math.max(0.1, Math.min(2, Number(next.riskPct) || PAPER_RISK_PCT));
+  next.maxDailyLossR = Math.max(0.5, Math.min(20, Number(next.maxDailyLossR) || PAPER_MAX_DAILY_LOSS_R));
+  next.minConfluence = Math.max(50, Math.min(95, Number(next.minConfluence) || PAPER_MIN_CONFLUENCE));
+  next.minSignalScore = Math.max(50, Math.min(95, Number(next.minSignalScore) || PAPER_MIN_SIGNAL_SCORE));
+  next.minRR = Math.max(1.5, Math.min(5, Number(next.minRR) || PAPER_MIN_RR));
+  next.tp1ClosePct = Math.max(10, Math.min(90, Number(next.tp1ClosePct) || PAPER_TP1_CLOSE_PCT));
   paperState.settings = next;
   paperState.settingsUpdatedAt = new Date().toISOString();
   savePaperState();
@@ -3154,12 +3471,38 @@ function paperHistory(query) {
   };
 }
 
+function paperCsvCell(value) {
+  return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+}
+
+function paperExportCsv(query) {
+  const filters = paperHistoryFilters(query);
+  const rows = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES)
+    .filter(trade => paperHistoryMatches(trade, filters));
+  const headers = ['closedAt', 'id', 'symbol', 'direction', 'status', 'outcome',
+    'strategyVersion', 'cohortId', 'timeframe', 'mode', 'entryLimit', 'entryActual',
+    'exitPrice', 'sl', 'tp1', 'tp2', 'score', 'confluencePct', 'r', 'pnl',
+    'closeReason', 'createdAt', 'openedAt', 'dataQuality', 'source'];
+  const lines = [headers.map(paperCsvCell).join(',')];
+  rows.forEach(trade => {
+    lines.push([
+      trade.closedAt, trade.id, trade.sym, trade.dir, trade.status, trade.outcome,
+      trade.strategyVersion || paperTradeStrategyVersion(trade), trade.cohortId,
+      trade.timeframe || trade.tf, trade.signalMode || trade.mode,
+      trade.entryLimit, trade.entryActual, trade.exitPrice, trade.sl, trade.tp1,
+      trade.tp2, trade.score, trade.confluencePct, trade.r, trade.pnl,
+      trade.closeReason, trade.createdAt, trade.openedAt, trade.dataQuality, trade.source
+    ].map(paperCsvCell).join(','));
+  });
+  return '\ufeff' + lines.join('\r\n') + '\r\n';
+}
+
 function startPaperBot() {
   if (process.env.PAPER_BOT_ENABLED === 'false') return;
   paperStarted = true;
   paperRuntime.startedAt = new Date().toISOString();
   console.log('[paper] VPS Paper Bot ON: scan every 15M, top 3, pending expiry 120m');
-  void sendTelegramMessage('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
+  void sendConfiguredAlert('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
   setTimeout(() => runPaperScan('startup', paperCycleKey(Date.now())), 5000);
   setInterval(() => {
     // Do not depend on a 30-second wall-clock window: a busy event loop or a
@@ -3189,6 +3532,7 @@ const server = http.createServer(async (req, res) => {
       strategyVersion: PAPER_STRATEGY_VERSION,
       schemaVersion: PAPER_SCHEMA_VERSION,
       time: new Date().toISOString(),
+      fallbacks: {enabled: PAPER_FALLBACK_ENABLED, order: ['Bitget', 'Binance Futures', 'OKX Swap']},
       sources: sourceHealthView()
     }));
     return;
@@ -3207,6 +3551,110 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify({ok: true, settings: paperSettings(), updatedAt: paperState.settingsUpdatedAt || null}));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/admin/status') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    send(res, 200, JSON.stringify({
+      ok: true,
+      configured: Boolean(PAPER_ADMIN_TOKEN),
+      controlsEnabled: Boolean(PAPER_ADMIN_TOKEN),
+      auth: 'Authorization: Bearer <PAPER_ADMIN_TOKEN>',
+      actions: ['pause', 'kill-switch', 'settings', 'manual-entry', 'close', 'cancel', 'close-all'],
+      alerts: {
+        telegram: TELEGRAM_ALERTS_ENABLED,
+        discord: Boolean(DISCORD_WEBHOOK_URL)
+      }
+    }));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/admin/pause' ||
+      requestUrl.pathname === '/paper/admin/kill-switch' ||
+      requestUrl.pathname === '/paper/admin/settings' ||
+      requestUrl.pathname === '/paper/admin/manual' ||
+      requestUrl.pathname === '/paper/admin/close-all' ||
+      /^\/paper\/admin\/trades\/[^/]+\/(close|cancel)$/.test(requestUrl.pathname)) {
+    if (req.method !== 'POST') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    if (!requirePaperAdmin(req, requestUrl, res)) return;
+    if (paperBusy) {
+      paperControlError(res, 409, 'Paper engine sedang memproses scan/monitor; coba lagi sebentar');
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      if (requestUrl.pathname === '/paper/admin/pause') {
+        paperState.paused = body.paused == null ? true : (body.paused === true || body.paused === 'true');
+        paperState.settingsUpdatedAt = new Date().toISOString();
+        savePaperState();
+        send(res, 200, JSON.stringify({ok: true, action: 'pause', paused: paperState.paused, status: paperStatus()}));
+        return;
+      }
+      if (requestUrl.pathname === '/paper/admin/kill-switch') {
+        paperState.killSwitch = body.enabled == null ? true : (body.enabled === true || body.enabled === 'true');
+        paperState.settingsUpdatedAt = new Date().toISOString();
+        savePaperState();
+        const label = paperState.killSwitch ? 'ON' : 'OFF';
+        void sendConfiguredAlert('NEXORA PAPER KILL-SWITCH ' + label);
+        send(res, 200, JSON.stringify({ok: true, action: 'kill-switch', killSwitch: paperState.killSwitch, status: paperStatus()}));
+        return;
+      }
+      if (requestUrl.pathname === '/paper/admin/settings') {
+        const settings = updatePaperSettings(body.settings || body.config || body);
+        send(res, 200, JSON.stringify({ok: true, action: 'settings', settings, status: paperStatus()}));
+        return;
+      }
+      if (requestUrl.pathname === '/paper/admin/manual') {
+        const trade = manualPaperTrade(body);
+        send(res, 201, JSON.stringify({ok: true, action: 'manual-entry', trade, status: paperStatus()}));
+        return;
+      }
+      if (requestUrl.pathname === '/paper/admin/close-all') {
+        if (String(body.confirm || '') !== 'CLOSE_ALL') {
+          paperControlError(res, 400, 'Double confirmation required: confirm=CLOSE_ALL');
+          return;
+        }
+        const scope = String(body.scope || 'strict').toLowerCase() === 'all' ? 'all' : 'strict';
+        const targets = paperState.activeTrades.filter(trade => paperIsActive(trade) &&
+          (scope === 'all' || paperIsTrialTrade(trade)));
+        for (const trade of targets) {
+          await closePaperTradeFromDashboard(trade, 'Close All from dashboard (' + scope + ')');
+        }
+        paperState.activeTrades = paperState.activeTrades.filter(paperIsActive);
+        savePaperState();
+        void sendConfiguredAlert('NEXORA PAPER CLOSE ALL\nScope: ' + scope + '\nTrades: ' + targets.length);
+        send(res, 200, JSON.stringify({ok: true, action: 'close-all', scope, closed: targets.length, status: paperStatus()}));
+        return;
+      }
+      const tradeMatch = requestUrl.pathname.match(/^\/paper\/admin\/trades\/([^/]+)\/(close|cancel)$/);
+      if (tradeMatch) {
+        const id = decodeURIComponent(tradeMatch[1]);
+        const action = tradeMatch[2];
+        const trade = paperFindTrade(id);
+        if (!trade || !paperIsActive(trade)) {
+          paperControlError(res, 404, 'Trade aktif tidak ditemukan');
+          return;
+        }
+        if (action === 'cancel' && trade.status !== 'PENDING') {
+          paperControlError(res, 400, 'Hanya order PENDING yang bisa dibatalkan');
+          return;
+        }
+        if (action === 'cancel') cancelPaperTrade(trade, 'Pending cancelled from dashboard');
+        else await closePaperTradeFromDashboard(trade, 'Closed from dashboard');
+        paperState.activeTrades = paperState.activeTrades.filter(paperIsActive);
+        savePaperState();
+        send(res, 200, JSON.stringify({ok: true, action, trade: paperTradeView(trade), status: paperStatus()}));
+        return;
+      }
+    } catch (error) {
+      console.error('[paper] admin action failed:', error.message);
+      paperControlError(res, 400, error.message);
+    }
     return;
   }
   if (requestUrl.pathname === '/paper/diagnostics') {
@@ -3229,7 +3677,15 @@ const server = http.createServer(async (req, res) => {
       sent: telegramState.sent,
       lastAttemptAt: telegramState.lastAttemptAt,
       lastSuccessAt: telegramState.lastSuccessAt,
-      lastError: telegramState.lastError
+      lastError: telegramState.lastError,
+      discord: {
+        enabled: Boolean(DISCORD_WEBHOOK_URL),
+        sent: discordState.sent,
+        lastAttemptAt: discordState.lastAttemptAt,
+        lastSuccessAt: discordState.lastSuccessAt,
+        lastError: discordState.lastError
+      },
+      adminControls: Boolean(PAPER_ADMIN_TOKEN)
     }));
     return;
   }

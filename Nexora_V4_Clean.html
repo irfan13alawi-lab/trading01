@@ -243,6 +243,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </button>
     <button class="btn btn-sm" onclick="doRefresh()"><i class="fa-solid fa-rotate"></i> Refresh</button>
     <button class="btn btn-sm btn-blue" onclick="runScan()"><i class="fa-solid fa-radar"></i> Scan</button>
+    <button class="btn btn-sm" onclick="sp('p-ops', document.getElementById('nt-ops'))" title="Settings &amp; operations"><i class="fa-solid fa-gear"></i> Settings</button>
+    <button class="btn btn-sm" onclick="showUserInfo()" title="User / trial profile"><i class="fa-solid fa-user"></i></button>
   </div>
 </div>
 
@@ -514,7 +516,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="card" id="vps-stats-panel">
     <div class="card-h">
       <div class="card-t"><i class="fa-solid fa-chart-pie"></i> VPS Cohort Statistics <span class="muted" id="vps-stats-asof">Waiting...</span></div>
-      <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+        <button class="btn btn-sm" onclick="exportVpsCsv(false)"><i class="fa-solid fa-file-csv"></i> VPS CSV</button>
+        <button class="btn btn-sm" onclick="exportVpsCsv(true)"><i class="fa-solid fa-calendar-days"></i> This month</button>
+        <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+      </div>
     </div>
     <div class="frow" style="grid-template-columns:repeat(7,1fr);">
       <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
@@ -875,6 +881,57 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div id="ops-sources" class="conn-grid" style="margin-top:10px;"></div>
   </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-shield-halved"></i> Trial safety status</div><div class="muted" style="line-height:1.8;margin-top:8px;">Paper trading berjalan sebagai service VPS dan tidak bergantung pada tab browser. Posisi PENDING menunggu candle 1M tertutup, kadaluarsa setelah 120 menit, dan histori tersimpan dengan backup atomik. Kontrol yang dapat mengubah state sengaja memerlukan otorisasi server; halaman ini hanya memonitor agar tidak ada tombol palsu yang terlihat aktif.</div></div>
+  <div class="card" id="ops-admin-card">
+    <div class="card-h"><div class="card-t"><i class="fa-solid fa-lock"></i> Admin controls &amp; bot settings</div><span class="muted" id="ops-admin-status">Checking configuration...</span></div>
+    <div class="muted" style="line-height:1.7;margin:6px 0 10px;">Token hanya disimpan di memori tab ini, tidak di localStorage. Semua perubahan dikirim ke VPS dengan <code>Authorization: Bearer</code>. API key exchange tidak pernah diminta di browser; paper bot memakai data publik.</div>
+    <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;">
+      <div class="fg" style="min-width:260px;flex:1;"><label>PAPER_ADMIN_TOKEN</label><input id="ops-admin-token" type="password" autocomplete="off" placeholder="Masukkan token admin VPS"></div>
+      <button class="btn btn-sm btn-blue" onclick="setAdminToken()"><i class="fa-solid fa-unlock"></i> Unlock</button>
+      <button class="btn btn-sm" onclick="checkAdminStatus()"><i class="fa-solid fa-rotate"></i> Check</button>
+    </div>
+    <div id="ops-admin-controls" style="display:none;margin-top:12px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <button class="btn btn-sm btn-blue" onclick="setAdminPause(true)"><i class="fa-solid fa-pause"></i> Pause new trades</button>
+        <button class="btn btn-sm btn-green" onclick="setAdminPause(false)"><i class="fa-solid fa-play"></i> Resume bot</button>
+        <button class="btn btn-sm" style="color:#f85149;border-color:rgba(248,81,73,.5);" onclick="setAdminKillSwitch(true)"><i class="fa-solid fa-power-off"></i> Kill-switch ON</button>
+        <button class="btn btn-sm" onclick="setAdminKillSwitch(false)"><i class="fa-solid fa-shield"></i> Clear kill-switch</button>
+        <button class="btn btn-sm" style="color:#f85149;border-color:rgba(248,81,73,.5);" onclick="confirmCloseAll()"><i class="fa-solid fa-triangle-exclamation"></i> Close all strict</button>
+      </div>
+      <div class="frow" style="grid-template-columns:repeat(4,1fr);">
+        <div class="fg"><label>Orders / scan</label><input id="ops-per-scan" type="number" min="1" max="10" value="3"></div>
+        <div class="fg"><label>Max active</label><input id="ops-max-active" type="number" min="3" max="100" value="80"></div>
+        <div class="fg"><label>Risk / trade %</label><input id="ops-risk" type="number" min="0.1" max="2" step="0.1" value="0.5"></div>
+        <div class="fg"><label>Daily loss guard R</label><input id="ops-max-loss" type="number" min="0.5" max="20" step="0.5" value="3"></div>
+        <div class="fg"><label>Min confluence %</label><input id="ops-min-conf" type="number" min="50" max="95" value="60"></div>
+        <div class="fg"><label>Min signal score</label><input id="ops-min-score" type="number" min="50" max="95" value="70"></div>
+        <div class="fg"><label>Min R:R</label><input id="ops-min-rr" type="number" min="1.5" max="5" step="0.1" value="2"></div>
+        <div class="fg"><label>TP1 close %</label><input id="ops-tp1-pct" type="number" min="10" max="90" value="50"></div>
+      </div>
+      <div class="frow" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+        <label class="muted"><input id="ops-strategy-enabled" type="checkbox" checked> MTF V2 enabled</label>
+        <label class="muted"><input id="ops-hours-enabled" type="checkbox"> Trading hours enabled</label>
+        <div class="fg"><label>Start UTC</label><input id="ops-start" value="00:00" placeholder="08:00"></div>
+        <div class="fg"><label>End UTC</label><input id="ops-end" value="23:59" placeholder="15:00"></div>
+      </div>
+      <div class="frow" style="grid-template-columns:1fr 1fr;">
+        <div class="fg"><label>Whitelist (comma separated)</label><input id="ops-whitelist" placeholder="BTC,ETH,SOL — kosong = semua"></div>
+        <div class="fg"><label>Blacklist (comma separated)</label><input id="ops-blacklist" placeholder="SHIB,PEPE"></div>
+      </div>
+      <button class="btn btn-sm btn-green" onclick="saveAdminSettings()"><i class="fa-solid fa-floppy-disk"></i> Save settings</button>
+      <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
+      <div class="card-t" style="margin-bottom:8px;"><i class="fa-solid fa-hand-pointer"></i> Manual paper limit entry</div>
+      <div class="frow" style="grid-template-columns:repeat(6,1fr);">
+        <div class="fg"><label>Symbol</label><input id="ops-man-sym" placeholder="BTC"></div>
+        <div class="fg"><label>Direction</label><select id="ops-man-dir"><option>LONG</option><option>SHORT</option></select></div>
+        <div class="fg"><label>Entry</label><input id="ops-man-entry" type="number" step="any"></div>
+        <div class="fg"><label>SL</label><input id="ops-man-sl" type="number" step="any"></div>
+        <div class="fg"><label>TP1</label><input id="ops-man-tp1" type="number" step="any"></div>
+        <div class="fg"><label>TP2</label><input id="ops-man-tp2" type="number" step="any"></div>
+      </div>
+      <button class="btn btn-sm btn-blue" onclick="createManualPaperTrade()"><i class="fa-solid fa-plus"></i> Place manual PENDING</button>
+      <div class="log" id="ops-admin-log" style="margin-top:8px;min-height:24px;"></div>
+    </div>
+  </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-calendar-days"></i> Macro / event feed</div><div id="ops-events" class="muted">Event feed belum dimuat.</div></div>
 </div>
 
@@ -936,7 +993,7 @@ function toast(msg, type) {
 var G = {
   pairs: [], filt: 'all', sKey: 'sc', sAsc: false, srch: '',
   coinId: 'bitcoin', iv: 30,
-  refreshing: false, derivsLoading: false, top5: [], paperServer: false, vpsEquity: null, vpsClosed: [], vpsCancelled: [], vpsStats: null,
+  refreshing: false, derivsLoading: false, top5: [], paperServer: false, paperStatus: null, vpsEquity: null, vpsClosed: [], vpsCancelled: [], vpsStats: null,
   scanView: 'grid', scanFocus: 'BTC', posSort: 'status', marketExchange: 'bitget', marketType: 'futures',
   charts: {btEq: null, btMon: null, vpsPrice: null, vpsRsi: null, vpsMacd: null, vpsReplay: null},
   eq: [], trades: [],
@@ -980,6 +1037,7 @@ var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
 var paperStatsTimer = null;
 var paperDiagnosticsTimer = null;
+var PAPER_ADMIN_TOKEN = '';
 var VPS_CHART_TF = '15m';
 var VPS_CHART_SYMBOL = 'BTC';
 
@@ -1086,7 +1144,7 @@ function sp(id, btn) {
   if (id === 'p-rg') setTimeout(function(){ renderRegime(); renderCorr(); }, 80);
   if (id === 'p-pump') renderPump();
   if (id === 'p-oi') { fetchOI(); setTimeout(runConnectionTest, 300); }
-  if (id === 'p-ops') refreshOpsPage();
+  if (id === 'p-ops') { refreshOpsPage(); checkAdminStatus(); }
 }
 
 function tickCD() {
@@ -2838,8 +2896,18 @@ function renderCorr() {
   var bel = document.getElementById('port-beta'); bel.textContent = 'Beta: ' + beta.toFixed(2);
   bel.style.color = beta>0.06?'#f85149':beta>0.04?'#f0883e':'#3fb950';
   var ca = document.getElementById('corr-alert');
-  if (beta>0.06) { ca.textContent = 'WARN Beta '+beta.toFixed(2)+' > 6% -- BLOCK new entries!'; ca.style.background='rgba(248,81,73,.08)'; ca.style.color='#f85149'; }
-  else if (beta>0.04) { ca.textContent = '!! Beta '+beta.toFixed(2)+' -- near limit (4%)'; ca.style.background='rgba(240,136,62,.08)'; ca.style.color='#f0883e'; }
+  var active = G.paperStatus && Array.isArray(G.paperStatus.activeTrades) ? G.paperStatus.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';}) : [];
+  var activeSyms = active.map(function(t){return String(t.sym || '').toUpperCase();});
+  var highCorr = [];
+  for(var ai=0; ai<activeSyms.length; ai++) for(var aj=ai+1; aj<activeSyms.length; aj++) {
+    var ap = fp(activeSyms[ai]), aq = fp(activeSyms[aj]);
+    if(!ap || !aq) continue;
+    var acorr = Math.max(-1, Math.min(1, 1-Math.abs(nn(ap.chg)-nn(aq.chg))/10));
+    if(acorr >= 0.75) highCorr.push(activeSyms[ai] + '/' + activeSyms[aj] + ' ' + acorr.toFixed(2));
+  }
+  var corrWarning = highCorr.length ? ' · WARN high corr active: ' + highCorr.slice(0,3).join(', ') : '';
+  if (beta>0.06) { ca.textContent = 'WARN Beta '+beta.toFixed(2)+' > 6% -- new entries blocked'+corrWarning; ca.style.background='rgba(248,81,73,.08)'; ca.style.color='#f85149'; }
+  else if (beta>0.04 || highCorr.length) { ca.textContent = (highCorr.length ? 'WARN' : '!!')+' Beta '+beta.toFixed(2)+' -- '+(highCorr.length?'correlated exposure':'near limit (4%)')+corrWarning; ca.style.background='rgba(240,136,62,.08)'; ca.style.color='#f0883e'; }
   else { ca.textContent = 'OK Beta '+beta.toFixed(2)+' -- safe (<4%)'; ca.style.background='rgba(63,185,80,.05)'; ca.style.color='#3fb950'; }
   if (G.charts.corr) { try{G.charts.corr.destroy();}catch(e){} }
   G.charts.corr = hcChart('c-corr', {
@@ -4673,6 +4741,7 @@ function renderServerPaperScan(status) {
 
 function applyServerPaperStatus(status, announce) {
   if(!status || !status.ok) return;
+  G.paperStatus = status;
   var wasServer = G.paperServer;
   var serverRunning = status.running !== false;
   var paperPaused = !!status.paused, paperKilled = !!status.killSwitch;
@@ -4867,6 +4936,56 @@ function pollPaperStats() {
     .catch(function(){ /* statistics are auxiliary; keep the last known view */ });
 }
 
+function vpsHistoryQuery(monthly) {
+  var params = [];
+  function add(id, key, upper) {
+    var el = document.getElementById(id);
+    var value = el && el.value ? String(el.value).trim() : '';
+    if(upper) value = value.toUpperCase();
+    if(value) params.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
+  }
+  add('vps-st-strategy', 'strategyVersion', false);
+  add('vps-st-cohort', 'cohortId', false);
+  add('vps-st-symbol', 'symbol', true);
+  add('vps-st-direction', 'direction', true);
+  add('vps-st-tf', 'timeframe', true);
+  if(monthly) {
+    var now = new Date();
+    var first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    params.push('from=' + encodeURIComponent(first.toISOString().slice(0,10)));
+    params.push('to=' + encodeURIComponent(now.toISOString().slice(0,10)));
+  } else {
+    add('vps-st-from', 'from', false);
+    add('vps-st-to', 'to', false);
+  }
+  return params.join('&');
+}
+
+function csvCell(value) {
+  return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+}
+
+function exportVpsCsv(monthly) {
+  if(!PAPER_API || !G.paperServer) { toast('VPS paper belum terhubung.', 'e'); return; }
+  var query = vpsHistoryQuery(!!monthly);
+  fetch(PAPER_API + '/history' + (query ? '?' + query : ''), {cache:'no-store'})
+    .then(function(r){return r.json().then(function(data){if(!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status)); return data;});})
+    .then(function(data){
+      var headers = ['closedAt','id','symbol','direction','status','outcome','strategyVersion','cohortId','timeframe','mode','entryLimit','entryActual','exitPrice','sl','tp1','tp2','score','confluencePct','r','pnl','closeReason','createdAt','openedAt','dataQuality','source'];
+      var lines = [headers.map(csvCell).join(',')];
+      (data.closedTrades || []).forEach(function(t){
+        lines.push([t.closedAt,t.id,t.sym,t.dir,t.status,t.outcome,t.strategyVersion,t.cohortId,t.timeframe || t.tf,t.mode || t.signalMode,t.entryLimit,t.entryActual,t.exitPrice,t.sl,t.tp1,t.tp2,t.score,t.confluencePct,t.r,t.pnl,t.closeReason,t.createdAt,t.openedAt,t.dataQuality,t.source].map(csvCell).join(','));
+      });
+      var blob = new Blob(['\ufeff' + lines.join('\r\n') + '\r\n'], {type:'text/csv;charset=utf-8;'});
+      var link = document.createElement('a'); link.href = URL.createObjectURL(blob);
+      link.download = 'nexora-vps-' + (monthly ? 'monthly-' : '') + new Date().toISOString().slice(0,10) + '.csv';
+      link.click(); setTimeout(function(){URL.revokeObjectURL(link.href);}, 1000);
+      sLog('VPS CSV exported: ' + (data.closedTrades || []).length + ' rows' + (monthly ? ' for current month' : ''));
+      toast('<i class="fa-solid fa-file-csv" style="color:#3fb950;"></i> VPS CSV downloaded', 'a');
+    })
+    .catch(function(error){ toast('VPS CSV gagal: ' + error.message, 'e'); });
+}
+
 function vpsFmtMs(ms) {
   var n = Number(ms || 0);
   if(!n) return '--';
@@ -5022,6 +5141,105 @@ function refreshOpsPage() {
   }
 }
 
+function adminLog(message, color) {
+  var el = document.getElementById('ops-admin-log');
+  if(!el) return;
+  el.innerHTML = '<span style="color:' + (color || '#8b949e') + ';">' + sourceEsc(message) + '</span>';
+}
+function adminHeaders() {
+  return PAPER_ADMIN_TOKEN ? {'Content-Type':'application/json','Authorization':'Bearer ' + PAPER_ADMIN_TOKEN} : {'Content-Type':'application/json'};
+}
+function adminPost(path, payload) {
+  if(!PAPER_API) return Promise.reject(new Error('VPS endpoint tidak tersedia'));
+  if(!PAPER_ADMIN_TOKEN) return Promise.reject(new Error('Masukkan PAPER_ADMIN_TOKEN terlebih dahulu'));
+  return fetch(PAPER_API + path, {method:'POST', headers:adminHeaders(), body:JSON.stringify(payload || {}), cache:'no-store'})
+    .then(function(r){return r.json().catch(function(){return {};}).then(function(data){if(!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status)); return data;});});
+}
+function fillAdminSettings(settings) {
+  var s = settings || {};
+  var values = {
+    'ops-per-scan':s.perScan, 'ops-max-active':s.maxActive, 'ops-risk':s.riskPct,
+    'ops-max-loss':s.maxDailyLossR, 'ops-min-conf':s.minConfluence,
+    'ops-min-score':s.minSignalScore, 'ops-min-rr':s.minRR, 'ops-tp1-pct':s.tp1ClosePct,
+    'ops-start':s.tradingStartUtc || '00:00', 'ops-end':s.tradingEndUtc || '23:59'
+  };
+  Object.keys(values).forEach(function(id){var el=document.getElementById(id); if(el && values[id] != null) el.value=values[id];});
+  var enabled = document.getElementById('ops-strategy-enabled'); if(enabled) enabled.checked = s.strategyEnabled !== false;
+  var hours = document.getElementById('ops-hours-enabled'); if(hours) hours.checked = !!s.tradingHoursEnabled;
+  ['whitelist','blacklist'].forEach(function(key){var el=document.getElementById('ops-' + key); if(el) el.value=Array.isArray(s[key]) ? s[key].join(',') : '';});
+}
+function applyAdminResponse(data) {
+  if(data && data.status) {
+    applyServerPaperStatus(data.status, false);
+    refreshOpsPage();
+  }
+  if(data && data.settings) fillAdminSettings(data.settings);
+  if(data && data.trade) updateActiveTradesPanel();
+}
+function checkAdminStatus() {
+  var status = document.getElementById('ops-admin-status');
+  var controls = document.getElementById('ops-admin-controls');
+  if(status) {status.textContent='Checking...'; status.style.color='#e3b341';}
+  if(!PAPER_API) {if(status) status.textContent='VPS unavailable'; return;}
+  Promise.all([
+    fetch(PAPER_API + '/admin/status', {cache:'no-store'}).then(function(r){return r.json();}),
+    fetch(PAPER_API + '/settings', {cache:'no-store'}).then(function(r){return r.json();})
+  ]).then(function(results){
+    var admin=results[0] || {}, settings=results[1] || {};
+    var configured=!!admin.controlsEnabled;
+    var unlocked=configured && !!PAPER_ADMIN_TOKEN;
+    if(status) {status.textContent = !configured ? 'Disabled on VPS — token belum diset' : unlocked ? 'Token supplied · controls ready' : 'Configured · masukkan token'; status.style.color=!configured?'#e3b341':unlocked?'#3fb950':'#e3b341';}
+    if(controls) controls.style.display=unlocked?'block':'none';
+    if(settings && settings.settings) fillAdminSettings(settings.settings);
+    if(!configured) adminLog('Set PAPER_ADMIN_TOKEN di /etc/nexora/nexora.env lalu restart service.', '#e3b341');
+    else if(unlocked) adminLog('Token hanya aktif di memori tab ini. Belum ada perubahan yang dikirim.', '#3fb950');
+  }).catch(function(error){if(status){status.textContent='Status unavailable';status.style.color='#f85149';} adminLog(error.message || error, '#f85149');});
+}
+function setAdminToken() {
+  var el=document.getElementById('ops-admin-token');
+  PAPER_ADMIN_TOKEN=String(el && el.value || '').trim();
+  checkAdminStatus();
+}
+function setAdminPause(paused) {
+  adminPost('/admin/pause', {paused:!!paused}).then(function(data){applyAdminResponse(data);adminLog(paused?'Bot dijeda: posisi lama tetap dimonitor.':'Bot dilanjutkan.','#3fb950');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function setAdminKillSwitch(enabled) {
+  adminPost('/admin/kill-switch', {enabled:!!enabled}).then(function(data){applyAdminResponse(data);adminLog(enabled?'Kill-switch aktif.':'Kill-switch dibersihkan.','#e3b341');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function saveAdminSettings() {
+  var csv=function(id){return String((document.getElementById(id)||{}).value||'').split(',').map(function(v){return v.trim().toUpperCase();}).filter(Boolean);};
+  var value=function(id){return Number((document.getElementById(id)||{}).value);};
+  var config={perScan:value('ops-per-scan'),maxActive:value('ops-max-active'),riskPct:value('ops-risk'),maxDailyLossR:value('ops-max-loss'),minConfluence:value('ops-min-conf'),minSignalScore:value('ops-min-score'),minRR:value('ops-min-rr'),tp1ClosePct:value('ops-tp1-pct'),strategyEnabled:!!(document.getElementById('ops-strategy-enabled')||{}).checked,tradingHoursEnabled:!!(document.getElementById('ops-hours-enabled')||{}).checked,tradingStartUtc:String((document.getElementById('ops-start')||{}).value||'00:00'),tradingEndUtc:String((document.getElementById('ops-end')||{}).value||'23:59'),whitelist:csv('ops-whitelist'),blacklist:csv('ops-blacklist')};
+  adminPost('/admin/settings', config).then(function(data){applyAdminResponse(data);adminLog('Settings tersimpan di VPS.','#3fb950');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function confirmCloseAll() {
+  if(!window.confirm('Tutup semua posisi STRICT dan batalkan pending STRICT di paper bot?')) return;
+  if(String(window.prompt('Ketik CLOSE_ALL untuk konfirmasi kedua:') || '') !== 'CLOSE_ALL') {adminLog('Close All dibatalkan: konfirmasi kedua tidak cocok.','#e3b341');return;}
+  adminPost('/admin/close-all', {confirm:'CLOSE_ALL',scope:'strict'}).then(function(data){applyAdminResponse(data);adminLog('Close All strict selesai: ' + (data.closed || 0) + ' trade.','#e3b341');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function closeAdminTrade(id) {
+  if(!window.confirm('Tutup trade ' + id + ' sekarang sebagai paper trade?')) return;
+  adminPost('/admin/trades/' + encodeURIComponent(id) + '/close', {}).then(function(data){applyAdminResponse(data);adminLog('Trade ' + id + ' ditutup.','#e3b341');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function cancelAdminTrade(id) {
+  if(!window.confirm('Batalkan pending order ' + id + '?')) return;
+  adminPost('/admin/trades/' + encodeURIComponent(id) + '/cancel', {}).then(function(data){applyAdminResponse(data);adminLog('Pending ' + id + ' dibatalkan.','#e3b341');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function createManualPaperTrade() {
+  var val=function(id){return String((document.getElementById(id)||{}).value||'').trim();};
+  var payload={sym:val('ops-man-sym'),dir:val('ops-man-dir'),entry:Number(val('ops-man-entry')),sl:Number(val('ops-man-sl')),tp1:Number(val('ops-man-tp1')),tp2:Number(val('ops-man-tp2')),reason:'Manual paper entry from Nexora Operations'};
+  if(!payload.sym || !payload.entry || !payload.sl || !payload.tp1 || !payload.tp2){adminLog('Lengkapi symbol, entry, SL, TP1, dan TP2.','#f85149');return;}
+  if(!window.confirm('Buat manual paper limit order ' + payload.sym + ' ' + payload.dir + '?')) return;
+  adminPost('/admin/manual', payload).then(function(data){applyAdminResponse(data);adminLog('Manual order dibuat sebagai PENDING.','#3fb950');}).catch(function(error){adminLog(error.message,'#f85149');});
+}
+function showUserInfo() {
+  var status=G.paperStatus || {};
+  var html='<div style="padding:4px;"><div style="font-size:16px;font-weight:700;margin-bottom:10px;">Nexora Paper Trial</div>'
+    +'<div class="muted" style="line-height:1.8;">Strategy: <b>'+sourceEsc(status.strategyVersion || 'MTF_ATR_V2')+'</b><br>Cohort: <b>'+sourceEsc(status.cohortId || '--')+'</b><br>Starting equity: <b>$'+Number(status.startingEquity || 285).toFixed(2)+'</b><br>Paper-only — tidak terhubung ke order live.</div>'
+    +'<button class="btn btn-sm btn-blue" style="margin-top:12px;" onclick="document.getElementById(\'modal-overlay\').style.display=\'none\';sp(\'p-ops\',document.getElementById(\'nt-ops\'));"><i class="fa-solid fa-gear"></i> Open Operations</button></div>';
+  document.getElementById('modal-body').innerHTML=html; document.getElementById('modal-overlay').style.display='flex';
+}
+
 function renderVpsReplay(data) {
   var status = document.getElementById('vps-replay-status');
   var note = document.getElementById('vps-replay-note');
@@ -5083,8 +5301,11 @@ function pollTelegramStatus() {
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(data){
       if(!data || !data.ok) throw new Error('status unavailable');
-      if(data.enabled) {
-        status.textContent = 'Server ON · ' + (data.sent || 0) + ' sent';
+      if(data.enabled || (data.discord && data.discord.enabled)) {
+        var channels = [];
+        if(data.enabled) channels.push('Telegram');
+        if(data.discord && data.discord.enabled) channels.push('Discord');
+        status.textContent = 'Server ON · ' + channels.join(' + ') + ' · ' + (data.sent || 0) + ' sent';
         status.style.color = '#3fb950';
       } else {
         status.textContent = 'Server OFF · belum dikonfigurasi';
@@ -5516,7 +5737,9 @@ function updateActiveTradesPanel() {
     var statusCol = t.status==='OPEN'?'#3fb950':t.status==='TP1_PARTIAL'?'#58a6ff':t.status==='PENDING'?'#e3b341':'#484f58';
     var unreal = t.unrealPnl || 0;
     var unrealStr = (t.status==='OPEN' || t.status==='TP1_PARTIAL') ? ' | PnL: <span style="color:'+(unreal>=0?'#3fb950':'#f85149')+'">'+(unreal>=0?'+':'')+'$'+unreal.toFixed(2)+'</span>' : '';
-    var cancelBtn = G.paperServer ? '' : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
+    var cancelBtn = G.paperServer
+      ? (PAPER_ADMIN_TOKEN ? (t.status==='PENDING' ? '<button onclick="cancelAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="margin-left:auto;background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.3);color:#e3b341;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">cancel</button>' : '<button onclick="closeAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.3);color:#f85149;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">close</button>') : '<span style="margin-left:auto;color:#484f58;">🔒</span>')
+      : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
     var classLabel = isLegacy(t) ? 'LEGACY' : 'STRICT';
     var classColor = isLegacy(t) ? '#8b949e' : '#58a6ff';
     var conf = t.confluencePct != null ? ' · Conf '+t.confluencePct+'%' : '';
@@ -6258,7 +6481,9 @@ function renderPositionsWidget() {
 
     var statusCol = isPending ? '#e3b341' : '#3fb950';
     var pnlCol    = unreal >= 0 ? '#3fb950' : '#f85149';
-    var cancelBtn = G.paperServer ? '' : '<button onclick="cancelTrade(' + t.id + ')" style="background:transparent;border:none;color:#484f58;cursor:pointer;font-size:10px;padding:0 2px;" title="Cancel">x</button>';
+    var adminAction = G.paperServer
+      ? (PAPER_ADMIN_TOKEN ? (isPending ? '<button class="btn btn-sm" onclick="cancelAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="padding:2px 5px;color:#e3b341;border-color:rgba(227,179,65,.35);">Cancel</button>' : '<button class="btn btn-sm" onclick="closeAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="padding:2px 5px;color:#f85149;border-color:rgba(248,81,73,.35);">Close</button>') : '<span title="Masukkan admin token di Operations" style="color:#484f58;font-size:10px;">🔒</span>')
+      : '<button onclick="cancelTrade(' + t.id + ')" style="background:transparent;border:none;color:#484f58;cursor:pointer;font-size:10px;padding:0 2px;" title="Cancel">x</button>';
 
     var priceStr = curPrice >= 1000 ? '$' + Math.round(curPrice).toLocaleString('en') : '$' + curPrice.toFixed(curPrice >= 1 ? 3 : 5);
     var entryStr = entryP  >= 1000 ? '$' + Math.round(entryP).toLocaleString('en')  : '$' + entryP.toFixed(entryP >= 1 ? 3 : 5);
@@ -6273,7 +6498,7 @@ function renderPositionsWidget() {
       + '<span style="font-size:9px;color:' + (tradeDir==='LONG'?'#3fb950':'#f85149') + ';">' + tradeDir + '</span>'
       + '<span style="font-size:9px;background:rgba(' + (isPending?'227,179,65':'63,185,80') + ',.12);color:' + statusCol + ';border:1px solid ' + statusCol + '33;padding:1px 5px;border-radius:3px;">' + t.status + '</span>'
       + '</div>'
-      + cancelBtn
+      + adminAction
       + '</div>'
       // Price info
       + '<div style="font-size:10px;margin-bottom:4px;">'
