@@ -479,6 +479,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="muted" id="pump-vps-sync-status">Menunggu status VPS...</div>
     <div class="muted" style="font-size:10px;line-height:1.6;margin-top:5px;">Pumping/Dumping di bawah dihitung dari market data yang sama; status order dibaca dari Paper Bot VPS. Panel ini tidak membuat atau mengarang data eksternal PumpRadar.</div>
   </div>
+  <div class="card"><div class="card-t"><i class="fa-solid fa-bolt" style="color:#e3b341;"></i> Last VPS Signals</div><div id="pump-vps-signals"><div class="ld">Menunggu scan VPS...</div></div></div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-circle-info"></i> PumpRadar Legend</div><div class="muted" style="margin-top:6px;line-height:1.8;"><span class="badge ba">A</span> score ≥ 8/12 · <span class="badge bb">B</span> score 6.5–7.9/12 · <span class="badge bn">C</span> score &lt; 6.5/12 · <span class="badge bn">L2</span> lower-liquidity universe segment. Volume bar compares the scanner's relative volume reading; IN POSITION means a VPS paper order exists. Hidden Gems requires derivatives data, L2, negative funding and rising OI; informational only—not an entry signal.</div></div>
   <div class="g2">
     <div class="card"><div class="card-t"><i class="fa-solid fa-fire" style="color:#f0883e;"></i> Pumping</div><div id="pump-l"><div class="ld">--</div></div></div>
@@ -2520,11 +2521,32 @@ function loadVpsSignalChart() {
 function renderPump() {
   var pairs = G.pairs;
   var sync = document.getElementById('pump-vps-sync-status');
+  var ps = G.paperStatus || {};
   if (sync) {
-    var ps = G.paperStatus || {};
     var activeCount = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';}).length;
     var pendingCount = BOT.activeTrades.filter(function(t){return t.status==='PENDING';}).length;
     sync.innerHTML = ps.running ? '<span class="status-chip status-live">LIVE VPS</span> · scan terakhir ' + sourceEsc(vpsFmtAt(ps.lastScanAt)) + ' · berikutnya ' + sourceEsc(vpsFmtAt(ps.nextScanAt)) + ' · ' + activeCount + ' open · ' + pendingCount + ' pending · ' + sourceEsc(ps.strategyVersion || 'MTF') : '<span class="status-chip status-warn">VPS STATUS WAITING</span> · buka Operations atau jalankan Refresh untuk mengambil status terbaru.';
+  }
+  var signalHost = document.getElementById('pump-vps-signals');
+  if (signalHost) {
+    var latest = Array.isArray(ps.recentScans) && ps.recentScans.length ? ps.recentScans[0] : null;
+    var selected = latest && Array.isArray(latest.selected) ? latest.selected.slice(0, 3) : [];
+    var placed = latest && Array.isArray(latest.placed) ? latest.placed : [];
+    var signalRows = selected.map(function(item, index) {
+      var sym = String(item.sym || item.symbol || '--').toUpperCase();
+      var order = placed.find(function(trade){ return String(trade.sym || '').toUpperCase() === sym; });
+      var direction = order && order.dir ? order.dir : item.mtfDirection || (item.sig === 'BUY' ? 'LONG' : item.sig === 'SELL' ? 'SHORT' : '--');
+      var directionColor = direction === 'LONG' ? '#3fb950' : direction === 'SHORT' ? '#f85149' : '#e3b341';
+      var orderText = order ? String(order.status || 'PLACED') : 'CANDIDATE';
+      var orderColor = orderText === 'OPEN' || orderText === 'TP1_PARTIAL' ? '#3fb950' : orderText === 'PENDING' ? '#e3b341' : '#8b949e';
+      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.05);">'
+        + '<div><b>#' + (index + 1) + ' ' + sourceEsc(sym) + '</b> <span class="badge ' + (item.tier === 'A' ? 'ba' : item.tier === 'B' ? 'bb' : 'bn') + '">' + sourceEsc(item.tier || '--') + '</span>'
+        + '<div class="muted" style="font-size:10px;margin-top:3px;">Score ' + sourceEsc(item.score != null ? item.score : item.sc) + '/12 · ' + sourceEsc(item.sig || 'NEU') + ' · <b style="color:' + directionColor + ';">' + sourceEsc(direction) + '</b></div></div>'
+        + '<div style="text-align:right;"><b style="color:' + orderColor + ';font-size:10px;">' + sourceEsc(orderText) + '</b><div class="muted" style="font-size:9px;">' + (order ? sourceEsc(fP(order.entryLimit)) : 'not placed') + '</div></div></div>';
+    }).join('');
+    signalHost.innerHTML = latest && signalRows
+      ? '<div class="muted" style="font-size:10px;margin:6px 0 2px;">' + sourceEsc(latest.cycleKey || '--') + ' · ' + sourceEsc(latest.candidates || 0) + ' candidates · ' + sourceEsc(latest.reason || '15M scan') + '</div>' + signalRows
+      : '<div class="ld"><span>Belum ada detail sinyal VPS.</span></div>';
   }
   if (!pairs || !pairs.length) { ['pump-l','dump-l','gems-l'].forEach(function(id){ document.getElementById(id).innerHTML='<div class="ld"><span>Run scan first</span></div>'; }); return; }
   var sorted = pairs.slice().sort(function(a,b){return b.chg-a.chg;});
@@ -5547,6 +5569,10 @@ function applyServerPaperStatus(status, announce) {
   var regimePage = document.getElementById('p-rg');
   if(regimePage && regimePage.classList.contains('on')) {
     try { renderCorr(); } catch(e) {}
+  }
+  var pumpPage = document.getElementById('p-pump');
+  if(pumpPage && pumpPage.classList.contains('on')) {
+    try { renderPump(); } catch(e) {}
   }
   if(announce && !wasServer) {
     if(serverRunning) {
