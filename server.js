@@ -49,7 +49,7 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 6;
+const PAPER_SCHEMA_VERSION = 7;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -71,6 +71,11 @@ const PAPER_MAX_HIGH_CORR_POSITIONS = Math.max(2, Math.min(80,
 const PAPER_MAX_DAILY_LOSS_R = Math.max(1, Math.min(20,
   Number.isFinite(Number(process.env.PAPER_MAX_DAILY_LOSS_R))
     ? Number(process.env.PAPER_MAX_DAILY_LOSS_R) : 3));
+// Automatic entry guard based on the strict trial equity peak. Existing
+// paper positions continue to be monitored; only new entries are blocked.
+const PAPER_MAX_DRAWDOWN_PCT = Math.max(0.5, Math.min(50,
+  Number.isFinite(Number(process.env.PAPER_MAX_DRAWDOWN_PCT))
+    ? Number(process.env.PAPER_MAX_DRAWDOWN_PCT) : 2.5));
 const PAPER_TP1_CLOSE_PCT = Math.max(10, Math.min(90,
   Number.isFinite(Number(process.env.PAPER_TP1_CLOSE_PCT))
     ? Number(process.env.PAPER_TP1_CLOSE_PCT) : 50));
@@ -124,6 +129,7 @@ const APIS = {
   '/gate': 'https://api.gateio.ws',
   '/altme': 'https://api.alternative.me',
   '/coingecko': 'https://api.coingecko.com',
+  '/cryptocompare': 'https://data-api.coindesk.com',
   '/coinpaprika': 'https://api.coinpaprika.com',
   '/binance': 'https://fapi.binance.com',
   '/okx': 'https://www.okx.com',
@@ -263,6 +269,7 @@ function sourceHealthView() {
 }
 
 function cacheTtl(prefix, pathname) {
+  if (prefix === '/cryptocompare') return pathname.includes('/news/') ? 1800000 : 120000;
   if (prefix === '/coingecko') {
     return pathname.includes('/ohlc') || pathname.includes('/market_chart') ? 300000 : 30000;
   }
@@ -482,7 +489,8 @@ function paperRiskGuardAlert(status, reason) {
 function maybeSendPaperOperationalAlerts() {
   const today = new Date().toISOString().slice(0, 10);
   const alertState = paperState.alertState || (paperState.alertState = {});
-  if (alertState.lastDailySummaryDate !== today) {
+  const alertsConfigured = TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL);
+  if (alertsConfigured && alertState.lastDailySummaryDate !== today) {
     alertState.lastDailySummaryDate = today;
     savePaperState();
     sendRateLimitedAlert('paper-daily-summary:' + today, paperDailySummaryAlert(today), 24 * 60 * 60 * 1000);
@@ -694,6 +702,7 @@ function defaultPaperState() {
       blacklist: []
     },
     startingEquity: PAPER_STARTING_EQUITY,
+    equityPeak: PAPER_STARTING_EQUITY,
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: PAPER_DEFAULT_COHORT_ID,
     startedAt: new Date().toISOString(),
@@ -788,6 +797,16 @@ function loadPaperState() {
       alertState: {...defaultPaperState().alertState, ...(parsed.alertState || {})},
       schemaVersion: PAPER_SCHEMA_VERSION
     };
+    const startingEquity = Number(state.startingEquity);
+    const normalizedStartingEquity = Number.isFinite(startingEquity) && startingEquity > 0
+      ? startingEquity : PAPER_STARTING_EQUITY;
+    const previousEquityPeak = Number(state.equityPeak);
+    state.startingEquity = normalizedStartingEquity;
+    state.equityPeak = Math.max(
+      Number.isFinite(previousEquityPeak) && previousEquityPeak > 0 ? previousEquityPeak : 0,
+      normalizedStartingEquity
+    );
+    if (!Number.isFinite(previousEquityPeak) || previousEquityPeak <= 0) state._needsSave = true;
     state.strategyVersion = state.strategyVersion || PAPER_STRATEGY_VERSION;
     state.cohortId = state.cohortId || PAPER_DEFAULT_COHORT_ID;
     if (previousSchemaVersion < PAPER_SCHEMA_VERSION) state._needsSave = true;
@@ -1499,6 +1518,30 @@ function paperUnrealizedPnl(includeLegacy) {
 function paperEquity(includeLegacy) {
   return paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
     paperRealizedPnl(includeLegacy) + paperUnrealizedPnl(includeLegacy);
+}
+
+function paperEquityPeak() {
+  return Math.max(
+    paperNumber(paperState.equityPeak),
+    paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY)
+  );
+}
+
+function paperUpdateEquityPeak() {
+  const current = paperEquity();
+  const peak = paperEquityPeak();
+  if (current > peak) {
+    paperState.equityPeak = Number(current.toFixed(2));
+    return true;
+  }
+  if (paperState.equityPeak !== peak) paperState.equityPeak = Number(peak.toFixed(2));
+  return false;
+}
+
+function paperDrawdownPct() {
+  const peak = paperEquityPeak();
+  const current = paperEquity();
+  return peak > 0 ? Math.max(0, (peak - current) / peak * 100) : 0;
 }
 
 function paperTradeRiskDollar(trade) {
@@ -2443,8 +2486,15 @@ function applyPaperInstrumentMetadata(pairs, instruments) {
 
 async function runPaperScan(reason, requestedCycleKey) {
   const cfg = paperSettings();
+  paperUpdateEquityPeak();
+  const drawdownGuard = paperDrawdownPct() >= PAPER_MAX_DRAWDOWN_PCT;
   if (!paperState.enabled || paperState.paused || paperState.killSwitch || !cfg.strategyEnabled ||
       !paperWithinTradingHours(cfg) || paperBusy) return;
+  if (drawdownGuard) {
+    paperState.lastBlockReason = 'MAX_DRAWDOWN_REACHED';
+    savePaperState();
+    return;
+  }
   const cycleKey = requestedCycleKey || paperCycleKey(Date.now());
   if (paperState.lastCycleKey === cycleKey) return;
   paperBusy = true;
@@ -2861,10 +2911,11 @@ async function monitorPaperTrades() {
     paperState.lastMonitorAt = new Date().toISOString();
     paperState.lastPriceAt = paperState.lastMonitorAt;
     paperState.lastError = null;
+    const equityPeakChanged = paperUpdateEquityPeak();
     paperRuntime.monitorsSucceeded += 1;
     paperRuntime.lastMonitorAt = paperState.lastMonitorAt;
     paperRuntime.lastMonitorError = null;
-    if (changed || watchlistChanged || paperState.activeTrades.length) savePaperState();
+    if (changed || watchlistChanged || equityPeakChanged || paperState.activeTrades.length || paperState._needsSave) savePaperState();
   } catch (error) {
     paperRuntime.monitorsFailed += 1;
     paperRuntime.lastMonitorErrorAt = new Date().toISOString();
@@ -3232,8 +3283,13 @@ function paperStatus() {
     cohortId: paperState.cohortId
   });
   const dailyLossR = paperDailyLossR();
+  paperUpdateEquityPeak();
+  const equityPeak = paperEquityPeak();
+  const drawdownPct = paperDrawdownPct();
+  const drawdownGuard = drawdownPct >= PAPER_MAX_DRAWDOWN_PCT;
   const blockReason = paperState.killSwitch ? 'KILL_SWITCH' : paperState.paused ? 'PAUSED' :
     !cfg.strategyEnabled ? 'STRATEGY_DISABLED' : !paperWithinTradingHours(cfg) ? 'OUTSIDE_TRADING_HOURS' :
+    drawdownGuard ? 'MAX_DRAWDOWN_REACHED' :
     paperState.lastBlockReason ||
     (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * cfg.riskPct / 100
       ? 'RISK_BUDGET_REACHED' : null);
@@ -3254,6 +3310,10 @@ function paperStatus() {
     minCandles: PAPER_MIN_CANDLES, monitorGranularity: '1m',
     fallbacks: {enabled: PAPER_FALLBACK_ENABLED, order: ['Bitget', 'Binance Futures', 'OKX Swap']},
     tp1ClosePct: cfg.tp1ClosePct, maxDailyLossR: cfg.maxDailyLossR,
+    maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
+    equityPeak: Number(equityPeak.toFixed(2)),
+    drawdownPct: Number(drawdownPct.toFixed(2)),
+    drawdownGuard,
     maxDirectionRiskPct: PAPER_MAX_DIRECTION_RISK_PCT,
     maxPerDirection: PAPER_MAX_PER_DIRECTION,
     maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
@@ -3296,7 +3356,7 @@ function paperStatus() {
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError,
       discord: Boolean(DISCORD_WEBHOOK_URL),
-      dailySummary: 'dashboard-only',
+      dailySummary: (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL)) ? 'enabled' : 'dashboard-only',
       riskGuard: 'guard notifications are emitted for configured alert channels',
       watchlistNearEntry: PAPER_WATCHLIST_ALERTS_ENABLED &&
         (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))
@@ -3362,6 +3422,7 @@ function paperDiagnostics() {
       maxPerDirection: PAPER_MAX_PER_DIRECTION,
       maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
       maxDailyLossR: cfg.maxDailyLossR, tp1ClosePct: cfg.tp1ClosePct,
+      maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
       monitorGranularity: '1m'
     },
     runtime: {
@@ -3378,7 +3439,9 @@ function paperDiagnostics() {
       blockReason: status.blockReason, trialActiveCount: status.trialActiveCount,
       preUpgradeActiveCount: status.preUpgradeActiveCount,
       trialDirectionCounts: status.trialDirectionCounts,
-      dailyLossR: status.dailyLossR, dailyGuard: status.dailyGuard
+      dailyLossR: status.dailyLossR, dailyGuard: status.dailyGuard,
+      equityPeak: status.equityPeak, drawdownPct: status.drawdownPct,
+      drawdownGuard: status.drawdownGuard, maxDrawdownPct: status.maxDrawdownPct
     }
   };
 }

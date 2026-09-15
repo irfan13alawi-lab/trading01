@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexora Command Center V4</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/highstock.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/modules/accessibility.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/highcharts@12.1.2/modules/heatmap.js"></script>
@@ -18,7 +21,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{background:var(--bg);color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
   font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;}
 body{padding-bottom:40px;}
 a{color:var(--blue);text-decoration:none;}
@@ -135,6 +138,12 @@ tbody tr{cursor:pointer;transition:background .1s;}
 tbody tr:hover{background:rgba(88,166,255,.06);}
 tr.tl-a{border-left:2px solid var(--green);}
 tr.tl-b{border-left:2px solid var(--orange);}
+tr.tl-c{border-left:2px solid var(--text3);}
+tbody tr.tl-a{background:linear-gradient(90deg,rgba(63,185,80,.12),rgba(63,185,80,.025) 55%,transparent);}
+tbody tr.tl-b{background:linear-gradient(90deg,rgba(240,136,62,.09),rgba(240,136,62,.018) 55%,transparent);}
+tbody tr.tl-c{background:linear-gradient(90deg,rgba(139,148,158,.045),transparent 55%);}
+.vps-position-card{min-width:240px!important;max-width:320px!important;padding:11px 13px!important;line-height:1.5;overflow:visible;}
+.vps-position-card b,.vps-position-card span{overflow-wrap:anywhere;}
 .sym{color:var(--text);font-weight:700;}
 .up{color:var(--green);}
 .dn{color:var(--red);}
@@ -280,6 +289,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="nt on" id="nt-mkt" onclick="sp('p-mkt', this)"><i class="fa-solid fa-chart-line"></i> Market</div>
   <div class="nt" id="nt-scan" onclick="sp('p-scan', this)"><i class="fa-solid fa-radar"></i> Scanner V4.4 <span class="nb" id="nb">0</span></div>
   <div class="nt" id="nt-pump" onclick="sp('p-pump', this)"><i class="fa-solid fa-fire"></i> PumpRadar</div>
+  <div class="nt" id="nt-news" onclick="sp('p-news', this)"><i class="fa-solid fa-newspaper"></i> News <span class="nb" id="news-count">0</span></div>
   <div class="nt" id="nt-wl" onclick="sp('p-wl', this)"><i class="fa-solid fa-star"></i> Watchlist</div>
   <div class="nt" id="nt-eq" onclick="sp('p-eq', this)"><i class="fa-solid fa-wallet"></i> Equity</div>
   <div class="nt" id="nt-rg" onclick="sp('p-rg', this)"><i class="fa-solid fa-gauge-high"></i> Regime</div>
@@ -468,6 +478,18 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="card"><div class="card-t"><i class="fa-solid fa-arrow-trend-down" style="color:#f85149;"></i> Dumping</div><div id="dump-l"><div class="ld">--</div></div></div>
   </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-gem" style="color:#bc8cff;"></i> Hidden Gems</div><div id="gems-l"><div class="ld">--</div></div></div>
+</div>
+
+<!-- ============ NEWS ============ -->
+<div class="page" id="p-news">
+  <div class="card">
+    <div class="card-h"><div class="card-t"><i class="fa-solid fa-newspaper"></i> Crypto News <span class="muted" id="news-updated">VPS cache 30m</span></div><button class="btn btn-sm btn-blue" onclick="loadNews(true)"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
+    <div class="muted" style="line-height:1.7;margin:6px 0 10px;">Berita diambil melalui proxy VPS dari CryptoCompare/CoinDesk Data API. Sentimen adalah label heuristik berbasis judul, bukan rekomendasi trading.</div>
+    <div id="news-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+      <button class="pill on" onclick="setNewsFilter('all',this)">Semua</button><button class="pill" onclick="setNewsFilter('btc',this)">BTC</button><button class="pill" onclick="setNewsFilter('trending',this)">Trending</button>
+    </div>
+    <div id="news-list" class="g2"><div class="ld">Memuat berita...</div></div>
+  </div>
 </div>
 
 <!-- ============ WATCHLIST ============ -->
@@ -930,6 +952,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="kpi"><div class="l">Equity</div><div class="v" id="ops-summary-equity">--</div><div class="s">strict cohort</div></div>
       <div class="kpi"><div class="l">Pending</div><div class="v" id="ops-summary-pending">--</div><div class="s">waiting for entry</div></div>
       <div class="kpi"><div class="l">Guard</div><div class="v" id="ops-summary-guard">--</div><div class="s">daily loss limit</div></div>
+      <div class="kpi"><div class="l">Drawdown</div><div class="v" id="ops-summary-dd">--</div><div class="s">peak-to-equity · max 2.5%</div></div>
     </div>
   </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-shield-halved"></i> Trial safety status</div><div class="muted" style="line-height:1.8;margin-top:8px;">Paper trading berjalan sebagai service VPS dan tidak bergantung pada tab browser. Posisi PENDING menunggu candle 1M tertutup, kadaluarsa setelah 120 menit, dan histori tersimpan dengan backup atomik. Kontrol yang dapat mengubah state sengaja memerlukan otorisasi server; halaman ini hanya memonitor agar tidak ada tombol palsu yang terlihat aktif.</div></div>
@@ -1061,7 +1084,7 @@ var G = {
   vpsStatsFiltersInitialized: false,
   scanView: 'grid', scanFocus: 'BTC', posSort: 'status', marketExchange: 'bitget', marketType: 'futures',
   charts: {btEq: null, btMon: null, vpsPrice: null, vpsRsi: null, vpsMacd: null, vpsReplay: null},
-  eq: [], trades: [],
+  eq: [], trades: [], news: [], newsFilter: 'all',
   cgKey: '',
   derivs: {},
   derivsTs: 0,
@@ -1097,6 +1120,7 @@ var PROXY_BASE = window.location.port === '18084' ? 'http://' + window.location.
 var CG = PROXY_BASE ? PROXY_BASE + '/coingecko/api/v3' : 'https://api.coingecko.com/api/v3';
 var ALT = PROXY_BASE ? PROXY_BASE + '/altme' : 'https://api.alternative.me';
 var CP_API = PROXY_BASE ? PROXY_BASE + '/coinpaprika' : 'https://api.coinpaprika.com';
+var NEWS_API = PROXY_BASE ? PROXY_BASE + '/cryptocompare/news/v1/article/list' : '';
 var PAPER_API = PROXY_BASE ? PROXY_BASE + '/paper' : '';
 var paperBotStatusTimer = null;
 var paperHistoryTimer = null;
@@ -1208,6 +1232,7 @@ function sp(id, btn) {
   if (id === 'p-eq') setTimeout(renderEquity, 80);
   if (id === 'p-rg') setTimeout(function(){ renderRegime(); renderCorr(); }, 80);
   if (id === 'p-pump') renderPump();
+  if (id === 'p-news') { renderNewsPage(); loadNews(false); }
   if (id === 'p-oi') { fetchOI(); setTimeout(runConnectionTest, 300); }
   if (id === 'p-ops') { refreshOpsPage(); checkAdminStatus(); }
 }
@@ -1400,9 +1425,8 @@ function doRefresh() {
     Promise.resolve(null),
     // Fear & Greed (always works)
     apf(ALT + '/fng/?limit=10&format=json').catch(function(){ return null; }),
-    // News (optional)
-    Promise.resolve(null)
-      .then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})
+    // News is optional but routed through the VPS to avoid browser CORS.
+    loadNews(false)
   ]).then(function(res) {
     try {
     var marketPayload = res[0], mexcData = res[1], fg = res[2], news = res[3];
@@ -1675,18 +1699,75 @@ function renderFG(data) {
   });
 }
 
+function newsSentiment(row) {
+  var explicit = String(row && (row.sentiment || row.SENTIMENT || '')).toUpperCase();
+  if (explicit.indexOf('NEG') >= 0 || explicit.indexOf('BEAR') >= 0) return 'NEGATIVE';
+  if (explicit.indexOf('POS') >= 0 || explicit.indexOf('BULL') >= 0) return 'POSITIVE';
+  var title = String(row && (row.title || row.TITLE || '')).toLowerCase();
+  if (/hack|exploit|lawsuit|ban|fraud|scam|liquidat|crash|hack|reject|outflow|sell-off/.test(title)) return 'NEGATIVE';
+  if (/surge|rally|approval|approved|adoption|inflow|partnership|launch|breakout|record high/.test(title)) return 'POSITIVE';
+  return 'NEUTRAL';
+}
+function normaliseNewsPayload(payload) {
+  var rows = payload && (payload.Data || payload.data || payload.results || []);
+  if (!Array.isArray(rows)) rows = [];
+  var seen = {};
+  return rows.map(function(row) {
+    row = row || {};
+    var sourceData = row.SOURCE_DATA || row.source_data || {};
+    var title = String(row.TITLE || row.title || row.headline || '').trim();
+    var url = String(row.URL || row.url || row.guid || row.GUID || '').trim();
+    var source = String(sourceData.NAME || sourceData.name || row.SOURCE || row.source || row.source_name || 'Crypto news').trim();
+    var ts = Number(row.PUBLISHED_ON || row.published_on || row.publishedAt || row.timestamp || 0);
+    if (ts > 100000000000) ts = Math.round(ts / 1000);
+    var categories = String(row.CATEGORY_DATA || row.categories || row.CATEGORIES || '').trim();
+    var symbols = (title + ' ' + categories).toUpperCase();
+    var tags = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','XRP','LINK','AVAX','DOT','ARB','OP','INJ','SUI','PEPE','FET','WIF'].filter(function(sym){return new RegExp('\\b'+sym+'\\b').test(symbols) || (sym==='BTC' && /BITCOIN/.test(symbols)) || (sym==='ETH' && /ETHEREUM/.test(symbols));});
+    var key = url || title;
+    if (!title || !key || seen[key]) return null;
+    seen[key] = true;
+    return {title:title, url:url, source:source, ts:ts, image:String(row.IMAGE_URL || row.imageurl || row.image || ''), categories:categories, symbols:tags, sentiment:newsSentiment(row)};
+  }).filter(Boolean).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+}
+function newsTime(ts) { return ts ? new Date(ts*1000).toLocaleString('id-ID',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : 'waktu tidak tersedia'; }
+function setNewsFilter(filter, btn) {
+  G.newsFilter = filter || 'all';
+  document.querySelectorAll('#news-filters .pill').forEach(function(p){p.classList.remove('on');});
+  if(btn) btn.classList.add('on');
+  renderNewsPage();
+}
+function renderNewsPage() {
+  var host=document.getElementById('news-list'); if(!host) return;
+  var filter=G.newsFilter||'all', rows=Array.isArray(G.news)?G.news.slice():[];
+  if(filter==='btc') rows=rows.filter(function(n){return n.symbols.indexOf('BTC')>=0;});
+  if(filter==='trending') rows=rows.slice(0,12);
+  rows=rows.slice(0,24);
+  if(!rows.length){host.innerHTML='<div class="ld">Belum ada berita dari provider. Tekan Refresh atau coba lagi setelah cache 30m.</div>';return;}
+  host.innerHTML=rows.map(function(n){
+    var color=n.sentiment==='POSITIVE'?'#3fb950':n.sentiment==='NEGATIVE'?'#f85149':'#e3b341';
+    var href=n.url?sourceEsc(n.url):'#';
+    return '<article class="card" style="padding:12px;"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><span class="badge" style="color:'+color+';border-color:'+color+'66;">'+n.sentiment+'</span><span class="muted" style="font-size:10px;">'+sourceEsc(newsTime(n.ts))+'</span></div><a href="'+href+'" target="_blank" rel="noopener" style="display:block;color:#c9d1d9;font-weight:700;line-height:1.45;margin:8px 0;text-decoration:none;">'+sourceEsc(n.title)+'</a><div class="muted" style="font-size:10px;">'+sourceEsc(n.source)+(n.symbols.length?' · '+sourceEsc(n.symbols.join(' · ')):'')+'</div></article>';
+  }).join('');
+}
+function loadNews(force) {
+  if(!NEWS_API) return Promise.resolve(null);
+  var status=document.getElementById('news-updated');
+  if(status && !G.news.length) status.textContent='loading via VPS…';
+  return fetch(NEWS_API+'?lang=EN&limit=50',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('News HTTP '+r.status);return r.json();}).then(function(payload){
+    G.news=normaliseNewsPayload(payload);
+    var count=document.getElementById('news-count'); if(count){count.textContent=G.news.length;count.style.display=G.news.length?'inline':'none';}
+    if(status) status.textContent='VPS cache 30m · updated '+new Date().toLocaleTimeString('id-ID');
+    renderNewsPage(); renderTicker(payload); return payload;
+  }).catch(function(error){if(status)status.textContent='provider unavailable';renderNewsPage();sLog('News: '+(error.message||error));return null;});
+}
 function renderTicker(data) {
-  var html = [];
-  if (data && data.results) {
-    data.results.slice(0,16).forEach(function(n) {
-      var sent = '';
-      if (n.votes) { if (n.votes.positive > n.votes.negative) sent = 'pos'; else if (n.votes.negative > n.votes.positive) sent = 'neg'; }
-      html.push('<span class="ti ' + sent + '">' + (sent==='pos'?'up ':sent==='neg'?'dn ':'* ') + n.title + '</span>');
-    });
-  }
+  var html = normaliseNewsPayload(data).slice(0,16).map(function(n) {
+    var cls=n.sentiment==='POSITIVE'?'pos':n.sentiment==='NEGATIVE'?'neg':'';
+    return '<span class="ti '+cls+'">'+(n.sentiment==='POSITIVE'?'up ':n.sentiment==='NEGATIVE'?'dn ':'* ')+sourceEsc(n.title)+'</span>';
+  });
   if (!html.length) html.push('<span class="ti">No news</span>');
   var inner = html.join('') + html.join('');
-  document.getElementById('ti').innerHTML = inner;
+  var ticker=document.getElementById('ti'); if(ticker)ticker.innerHTML = inner;
 }
 
 function setF(f, btn) {
@@ -1854,7 +1935,7 @@ function renderTable() {
     var fundSrc = !hasDerivatives(p) ? ' <span style="color:#484f58;font-size:8px;">Spot</span>' : p.fundReal ? ' <span style="color:#3fb950;font-size:8px;">' + (p.fundSrc||'Live') + '</span>' : ' <span style="color:#484f58;font-size:8px;">est</span>';
     var pct = Math.round(p.sc / 12 * 100);
     var tc = p.tier==='A' ? 'ba' : p.tier==='B' ? 'bb' : 'bn';
-    var trc = p.tier==='A' ? 'tl-a' : p.tier==='B' ? 'tl-b' : '';
+    var trc = p.tier==='A' ? 'tl-a' : p.tier==='B' ? 'tl-b' : 'tl-c';
     var mtf = p.tier==='A' ? '<span style="color:#3fb950;font-size:9px">D1+ H4+</span>' : p.tier==='B' ? '<span style="color:#f0883e;font-size:9px">D1+</span>' : '<span style="color:#484f58;font-size:9px">-</span>';
     var row = '<tr class="' + trc + '" onclick="switchCoin(\'' + p.id + '\',\'' + p.s + '\')">';
     row += '<td class="tl" style="min-width:80px;"><b class="sym">' + p.s + '</b> <span style="font-size:9px;color:#484f58;">' + p.layer + '</span></td>';
@@ -5291,6 +5372,7 @@ function applyServerPaperStatus(status, announce) {
       NO_VALID_UNALLOCATED_SETUP: 'tidak ada setup baru yang valid',
       NO_VALID_MTF_SETUP: 'tidak ada setup MTF yang memenuhi syarat',
       DAILY_DRAWDOWN_GUARD: 'daily drawdown guard aktif',
+      MAX_DRAWDOWN_REACHED: 'max drawdown 2.5% tercapai — entry baru ditahan',
       DIRECTION_RISK_FULL: 'risk satu arah sudah penuh',
       STALE_DATA: 'data candle sudah stale',
       PARTIAL_CAPACITY: 'sebagian slot tersedia'
@@ -5298,8 +5380,9 @@ function applyServerPaperStatus(status, announce) {
     var guardReason = !serverRunning ? 'service VPS berhenti' : paperPaused ? 'bot dijeda' : paperKilled ? 'kill switch aktif'
       : (status.blockReason ? (reasonMap[status.blockReason] || status.blockReason) : 'siap menerima setup baru');
     guard.textContent = 'Guard: ' + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
-      + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1);
-    guard.style.color = !serverRunning || paperKilled ? '#f85149' : (status.blockReason ? '#e3b341' : '#3fb950');
+      + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1)
+      + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%';
+    guard.style.color = !serverRunning || paperKilled || status.drawdownGuard ? '#f85149' : (status.blockReason ? '#e3b341' : '#3fb950');
     if(status.lastError) guard.title = 'Last error: ' + status.lastError;
   }
   if(status.equity != null) {
@@ -5641,6 +5724,7 @@ function refreshOpsPage() {
     var summaryEquity = document.getElementById('ops-summary-equity');
     var summaryPending = document.getElementById('ops-summary-pending');
     var summaryGuard = document.getElementById('ops-summary-guard');
+    var summaryDd = document.getElementById('ops-summary-dd');
     if(summaryDate) summaryDate.textContent = summary.date || '--';
     if(summaryTrades) summaryTrades.textContent = String(Number(summary.trades || 0));
     if(summaryWl) summaryWl.textContent = 'W/L ' + Number(summary.wins || 0) + '/' + Number(summary.losses || 0) + (summary.breakeven ? ' · BE ' + Number(summary.breakeven) : '');
@@ -5649,6 +5733,7 @@ function refreshOpsPage() {
     if(summaryEquity) summaryEquity.textContent = '$' + Number(summary.equity || status.equity || 0).toFixed(2);
     if(summaryPending) summaryPending.textContent = String(Number(status.summary && status.summary.pending || 0));
     if(summaryGuard) { summaryGuard.textContent = summary.guard ? 'ON' : 'OK'; summaryGuard.style.color = summary.guard ? '#f85149' : '#3fb950'; }
+    if(summaryDd) { var dd = Number(status.drawdownPct || 0), ddMax = Number(status.maxDrawdownPct || 2.5); summaryDd.textContent = dd.toFixed(2) + '%'; summaryDd.style.color = status.drawdownGuard ? '#f85149' : dd >= ddMax * .8 ? '#e3b341' : '#3fb950'; summaryDd.title = 'Peak $' + Number(status.equityPeak || 0).toFixed(2) + ' · limit ' + ddMax.toFixed(2) + '%'; }
     var runtime = diag.runtime || {};
     var errorCount = Number(runtime.scansFailed || 0) + Number(runtime.monitorsFailed || 0);
     if(opsErrors) { opsErrors.textContent = String(errorCount); opsErrors.style.color = errorCount ? '#f85149' : '#3fb950'; }
@@ -6345,7 +6430,7 @@ function sourceEsc(value) {
 function renderSourceHealth(sources) {
   var names = [
     ['bitget', 'Bitget'], ['bingx', 'BingX'], ['gate', 'Gate.io'],
-    ['coingecko', 'CoinGecko'], ['altme', 'Fear & Greed'], ['coinpaprika', 'CoinPaprika']
+    ['coingecko', 'CoinGecko'], ['altme', 'Fear & Greed'], ['coinpaprika', 'CoinPaprika'], ['cryptocompare', 'Crypto News']
   ];
   var live = 0, stale = 0, errors = 0;
   var html = names.map(function(pair) {
@@ -7063,7 +7148,7 @@ function renderPositionsWidget() {
     var slStr    = activeSl >= 1000 ? '$' + Math.round(activeSl).toLocaleString('en') : '$' + activeSl.toFixed(activeSl >= 1 ? 3 : 5);
     var tpStr    = activeTp >= 1000 ? '$' + Math.round(activeTp).toLocaleString('en') : '$' + activeTp.toFixed(activeTp >= 1 ? 3 : 5);
 
-    return '<div style="background:#161b25;border:1px solid #21262d;border-radius:7px;padding:9px 11px;min-width:180px;flex:1;max-width:220px;">'
+    return '<div class="vps-position-card" style="background:#161b25;border:1px solid #21262d;border-radius:7px;padding:9px 11px;min-width:180px;flex:1;max-width:220px;">'
       // Header
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">'
       + '<div style="display:flex;align-items:center;gap:5px;">'
