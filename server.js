@@ -49,7 +49,7 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 5;
+const PAPER_SCHEMA_VERSION = 6;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -77,6 +77,12 @@ const PAPER_TP1_CLOSE_PCT = Math.max(10, Math.min(90,
 const PAPER_STRATEGY_VERSION = String(process.env.PAPER_STRATEGY_VERSION || 'MTF_ATR_V2');
 const PAPER_DEFAULT_COHORT_ID = String(process.env.PAPER_COHORT_ID ||
   ('trial-' + new Date().toISOString().slice(0, 10)));
+const PAPER_STRATEGY_KEYS = ['MTF_ATR_V2', 'PRE_UPGRADE', 'LEGACY'];
+const PAPER_DEFAULT_STRATEGY_SETTINGS = {
+  MTF_ATR_V2: {enabled: true, maxActive: PAPER_MAX_ACTIVE, riskPct: PAPER_RISK_PCT, minRR: PAPER_MIN_RR, slPct: 0, tp1R: 2, tp2R: 3},
+  PRE_UPGRADE: {enabled: false, maxActive: 10, riskPct: PAPER_RISK_PCT, minRR: PAPER_MIN_RR, slPct: 3, tp1R: 2, tp2R: 3},
+  LEGACY: {enabled: false, maxActive: 0, riskPct: PAPER_RISK_PCT, minRR: PAPER_MIN_RR, slPct: 3, tp1R: 2, tp2R: 3}
+};
 // Keep enough server history for a normal one-week paper trial. The status
 // endpoint remains lightweight; /paper/history serves the full retained set.
 const PAPER_MAX_CLOSED_TRADES = 5000;
@@ -93,6 +99,7 @@ const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
 const PAPER_FALLBACK_ENABLED = String(process.env.PAPER_FALLBACK_ENABLED || 'true').toLowerCase() !== 'false';
+const PAPER_WATCHLIST_ALERTS_ENABLED = String(process.env.PAPER_WATCHLIST_ALERTS || '').toLowerCase() === 'true';
 // This service is paper-only, but the operational endpoints can still pause
 // the bot or create/close paper records. A token is mandatory before any
 // state-changing endpoint is enabled; never leave the dashboard controls
@@ -201,7 +208,7 @@ function markSourceHealth(prefix, result) {
       pathItem.lastError = null;
     } else {
       pathItem.lastErrorAt = now;
-      pathItem.lastError = 'HTTP ' + result.status;
+      pathItem.lastError = result.status === 429 ? 'HTTP 429 (rate limited)' : 'HTTP ' + result.status;
     }
     item.paths[result.path] = pathItem;
   }
@@ -210,9 +217,9 @@ function markSourceHealth(prefix, result) {
     item.lastOkAt = now;
     item.lastError = null;
   } else {
-    item.status = 'ERROR';
+    item.status = result.status === 429 ? 'RATE_LIMITED' : 'ERROR';
     item.lastErrorAt = now;
-    item.lastError = 'HTTP ' + result.status;
+    item.lastError = result.status === 429 ? 'HTTP 429 (rate limited)' : 'HTTP ' + result.status;
   }
 }
 
@@ -248,7 +255,8 @@ function sourceHealthView() {
     return [name, {
       ...item,
       ageSec,
-      displayStatus: item.status === 'LIVE' && ageSec != null && ageSec > 180
+      displayStatus: (item.status === 'LIVE' && ageSec != null && ageSec > 180) ||
+        (item.status === 'RATE_LIMITED' && item.lastOkAt)
         ? 'DELAYED' : item.status
     }];
   }));
@@ -435,18 +443,31 @@ function paperPartialAlert(trade) {
 }
 
 function paperDailySummaryAlert(dateKey) {
+  const summary = paperDailySummaryView(dateKey);
+  return 'NEXORA PAPER DAILY SUMMARY ' + dateKey + '\n' +
+    'Trades: ' + summary.trades + ' | Win/Loss: ' + summary.wins + '/' + summary.losses +
+    '\nNet: ' + summary.netR.toFixed(2) + 'R | PnL: $' + summary.pnl.toFixed(2) +
+    '\nEquity: $' + paperEquity().toFixed(2) + ' | Daily guard: ' +
+    (paperDailyLossR() <= -paperSettings().maxDailyLossR ? 'ON' : 'OK');
+}
+
+function paperDailySummaryView(dateKey) {
+  const key = dateKey || new Date().toISOString().slice(0, 10);
   const dayTrades = paperState.closedTrades.filter(trade =>
-    paperIsTrialTrade(trade) && String(trade.closedAt || '').slice(0, 10) === dateKey &&
+    paperIsTrialTrade(trade) && String(trade.closedAt || '').slice(0, 10) === key &&
     trade.outcome !== 'CANCELLED');
   const wins = dayTrades.filter(trade => paperNumber(trade.r) > 0).length;
   const losses = dayTrades.filter(trade => paperNumber(trade.r) < 0).length;
+  const breakeven = dayTrades.filter(trade => paperNumber(trade.r) === 0).length;
   const netR = dayTrades.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
   const pnl = dayTrades.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
-  return 'NEXORA PAPER DAILY SUMMARY ' + dateKey + '\n' +
-    'Trades: ' + dayTrades.length + ' | Win/Loss: ' + wins + '/' + losses +
-    '\nNet: ' + netR.toFixed(2) + 'R | PnL: $' + pnl.toFixed(2) +
-    '\nEquity: $' + paperEquity().toFixed(2) + ' | Daily guard: ' +
-    (paperDailyLossR() <= -paperSettings().maxDailyLossR ? 'ON' : 'OK');
+  return {
+    date: key, trades: dayTrades.length, wins, losses, breakeven,
+    netR: Number(netR.toFixed(2)), pnl: Number(pnl.toFixed(2)),
+    equity: Number(paperEquity().toFixed(2)),
+    dailyLossR: Number(paperDailyLossR().toFixed(2)),
+    guard: paperDailyLossR() <= -paperSettings().maxDailyLossR
+  };
 }
 
 function paperRiskGuardAlert(status, reason) {
@@ -498,6 +519,29 @@ const PAPER_SYMBOLS = [
 function paperNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function paperNormaliseWatchlistAlert(input) {
+  const raw = input && typeof input === 'object' ? input : {};
+  const sym = String(raw.sym || raw.symbol || '').toUpperCase()
+    .replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '');
+  if (!sym || !PAPER_SYMBOLS.includes(sym)) return null;
+  const dir = ['LONG', 'SHORT'].includes(String(raw.dir || raw.direction || '').toUpperCase())
+    ? String(raw.dir || raw.direction).toUpperCase() : null;
+  const range = String(raw.entryRange || raw.entry || '').replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+  const rawLow = Number(raw.entryLow);
+  const rawHigh = Number(raw.entryHigh);
+  const entryLow = Number.isFinite(rawLow) && rawLow > 0 ? rawLow : Number(range[0] || 0);
+  const entryHigh = Number.isFinite(rawHigh) && rawHigh > 0 ? rawHigh : Number(range[1] || entryLow || 0);
+  const alertPctRaw = Number(raw.alertPct);
+  const alertPct = Number.isFinite(alertPctRaw) ? Math.max(0.1, Math.min(10, alertPctRaw)) : 3;
+  return {
+    sym, dir, entryLow: entryLow > 0 ? entryLow : null,
+    entryHigh: entryHigh > 0 ? Math.max(entryLow || entryHigh, entryHigh) : null,
+    alertPct: Number(alertPct.toFixed(2)),
+    requestedAt: raw.requestedAt || new Date().toISOString(),
+    lastAlertAt: raw.lastAlertAt || null
+  };
 }
 
 function paperFieldPresent(value) {
@@ -599,6 +643,32 @@ function paperRoundPriceForPair(value, pair) {
   return Number(rounded.toFixed(Math.min(12, decimals)));
 }
 
+function paperStrategySettingsDefaults() {
+  return Object.fromEntries(PAPER_STRATEGY_KEYS.map(key => [key, {...PAPER_DEFAULT_STRATEGY_SETTINGS[key]}]));
+}
+
+function paperNormaliseStrategySettings(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const defaults = paperStrategySettingsDefaults();
+  const clamp = (value, fallback, min, max) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+  };
+  return Object.fromEntries(PAPER_STRATEGY_KEYS.map(key => {
+    const raw = source[key] && typeof source[key] === 'object' ? source[key] : {};
+    const fallback = defaults[key];
+    return [key, {
+      enabled: raw.enabled == null ? fallback.enabled : (raw.enabled === true || raw.enabled === 'true'),
+      maxActive: Math.round(clamp(raw.maxActive, fallback.maxActive, 0, 100)),
+      riskPct: Number(clamp(raw.riskPct, fallback.riskPct, 0.1, 2).toFixed(2)),
+      minRR: Number(clamp(raw.minRR, fallback.minRR, 1.5, 5).toFixed(2)),
+      slPct: Number(clamp(raw.slPct, fallback.slPct, 0, 10).toFixed(2)),
+      tp1R: Number(clamp(raw.tp1R, fallback.tp1R, 0.5, 10).toFixed(2)),
+      tp2R: Number(clamp(raw.tp2R, fallback.tp2R, 0.5, 15).toFixed(2))
+    }];
+  }));
+}
+
 function defaultPaperState() {
   return {
     schemaVersion: PAPER_SCHEMA_VERSION,
@@ -616,6 +686,7 @@ function defaultPaperState() {
       minRR: PAPER_MIN_RR,
       tp1ClosePct: PAPER_TP1_CLOSE_PCT,
       strategyEnabled: true,
+      strategySettings: paperStrategySettingsDefaults(),
       tradingHoursEnabled: false,
       tradingStartUtc: '00:00',
       tradingEndUtc: '23:59',
@@ -641,6 +712,7 @@ function defaultPaperState() {
     invalidatedTrades: [],
     recentScans: [],
     watchlistQueue: [],
+    watchlistAlerts: [],
     alertState: {
       lastDailySummaryDate: null,
       lastRiskGuardAt: null
@@ -667,10 +739,32 @@ function loadPaperState() {
   }
   try {
     const previousSchemaVersion = Number(parsed.schemaVersion || 0);
+    const freshState = defaultPaperState();
+    const parsedSettings = parsed.settings && typeof parsed.settings === 'object' ? parsed.settings : {};
+    const migratedStrategySettings = paperNormaliseStrategySettings(parsedSettings.strategySettings);
+    // Preserve settings written by schema <=5 when introducing per-strategy
+    // configuration. The active MTF worker remains exactly as configured.
+    if (!parsedSettings.strategySettings) {
+      const legacyNumber = (name, fallback, min, max) => {
+        const value = Number(parsedSettings[name]);
+        return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+      };
+      migratedStrategySettings.MTF_ATR_V2 = {
+        ...migratedStrategySettings.MTF_ATR_V2,
+        enabled: parsedSettings.strategyEnabled !== false,
+        maxActive: Math.round(legacyNumber('maxActive', PAPER_MAX_ACTIVE, 0, 100)),
+        riskPct: Number(legacyNumber('riskPct', PAPER_RISK_PCT, 0.1, 2).toFixed(2)),
+        minRR: Number(legacyNumber('minRR', PAPER_MIN_RR, 1.5, 5).toFixed(2))
+      };
+    }
     const state = {
-      ...defaultPaperState(),
+      ...freshState,
       ...parsed,
-      settings: {...defaultPaperState().settings, ...(parsed.settings || {})},
+      settings: {
+        ...freshState.settings,
+        ...parsedSettings,
+        strategySettings: migratedStrategySettings
+      },
       oiSnapshot: parsed.oiSnapshot || {},
       oiHistory: Object.fromEntries(Object.entries(parsed.oiHistory || {}).map(([symbol, rows]) => [
         symbol,
@@ -689,6 +783,8 @@ function loadPaperState() {
           sym, requestedAt: item && item.requestedAt || null
         } : null;
       }).filter(Boolean).slice(0, 5) : [],
+      watchlistAlerts: Array.isArray(parsed.watchlistAlerts) ? parsed.watchlistAlerts
+        .map(paperNormaliseWatchlistAlert).filter(Boolean).slice(0, 5) : [],
       alertState: {...defaultPaperState().alertState, ...(parsed.alertState || {})},
       schemaVersion: PAPER_SCHEMA_VERSION
     };
@@ -787,17 +883,23 @@ function paperSettings() {
   const list = value => Array.isArray(value)
     ? [...new Set(value.map(item => String(item || '').trim().toUpperCase()).filter(Boolean))].slice(0, 200)
     : [];
+  const strategySettings = paperNormaliseStrategySettings(raw.strategySettings);
+  const activeStrategyKey = PAPER_STRATEGY_KEYS.includes(PAPER_STRATEGY_VERSION)
+    ? PAPER_STRATEGY_VERSION : 'MTF_ATR_V2';
+  const activeStrategy = strategySettings[activeStrategyKey] || strategySettings.MTF_ATR_V2;
   return {
     perScan: Math.round(paperSettingNumber('perScan', PAPER_PER_SCAN, 1, 5)),
-    maxActive: Math.round(paperSettingNumber('maxActive', PAPER_MAX_ACTIVE, 3, 100)),
+    maxActive: Math.round(activeStrategy.maxActive),
     maxPerSymbol: Math.round(paperSettingNumber('maxPerSymbol', PAPER_MAX_PER_SYMBOL, 1, 3)),
-    riskPct: paperSettingNumber('riskPct', PAPER_RISK_PCT, 0.1, 2),
+    riskPct: activeStrategy.riskPct,
     maxDailyLossR: paperSettingNumber('maxDailyLossR', PAPER_MAX_DAILY_LOSS_R, 1, 20),
     minConfluence: paperSettingNumber('minConfluence', PAPER_MIN_CONFLUENCE, 50, 95),
     minSignalScore: paperSettingNumber('minSignalScore', PAPER_MIN_SIGNAL_SCORE, 50, 95),
-    minRR: paperSettingNumber('minRR', PAPER_MIN_RR, 1.5, 5),
+    minRR: activeStrategy.minRR,
     tp1ClosePct: paperSettingNumber('tp1ClosePct', PAPER_TP1_CLOSE_PCT, 10, 90),
-    strategyEnabled: raw.strategyEnabled !== false,
+    strategyEnabled: raw.strategyEnabled !== false && activeStrategy.enabled,
+    activeStrategy: activeStrategyKey,
+    strategySettings,
     tradingHoursEnabled: raw.tradingHoursEnabled === true,
     tradingStartUtc: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(raw.tradingStartUtc || '')) ? String(raw.tradingStartUtc) : '00:00',
     tradingEndUtc: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(raw.tradingEndUtc || '')) ? String(raw.tradingEndUtc) : '23:59',
@@ -2594,8 +2696,37 @@ async function runPaperScan(reason, requestedCycleKey) {
   }
 }
 
+function monitorPaperWatchlistAlerts(prices) {
+  if (!PAPER_WATCHLIST_ALERTS_ENABLED ||
+      !(TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))) return false;
+  const now = Date.now();
+  let changed = false;
+  (paperState.watchlistAlerts || []).forEach(item => {
+    const price = paperNumber(prices[item.sym]);
+    const low = paperNumber(item.entryLow);
+    const high = paperNumber(item.entryHigh || item.entryLow);
+    if (!price || !low || !high) return;
+    const inZone = price >= Math.min(low, high) && price <= Math.max(low, high);
+    const reference = price < low ? low : price > high ? high : price;
+    const distancePct = reference > 0 ? Math.abs(price - reference) / reference * 100 : 99;
+    if (!inZone && distancePct > Number(item.alertPct || 3)) return;
+    const lastAlert = Date.parse(item.lastAlertAt || '') || 0;
+    if (now - lastAlert < 15 * 60 * 1000) return;
+    item.lastAlertAt = new Date(now).toISOString();
+    changed = true;
+    sendRateLimitedAlert('paper-watchlist:' + item.sym,
+      'NEXORA WATCHLIST NEAR ENTRY\n' + item.sym + (item.dir ? ' ' + item.dir : '') +
+      '\nPrice: ' + price + ' | Zone: ' + low + '-' + high +
+      '\nDistance: ' + (inZone ? 'inside zone' : distancePct.toFixed(2) + '%') +
+      '\nMTF/risk checks tetap wajib sebelum paper order.', 15 * 60 * 1000);
+  });
+  return changed;
+}
+
 async function monitorPaperTrades() {
-  if (!paperState.enabled || paperBusy || !paperState.activeTrades.length) return;
+  const hasWatchlistAlerts = PAPER_WATCHLIST_ALERTS_ENABLED &&
+    Array.isArray(paperState.watchlistAlerts) && paperState.watchlistAlerts.length > 0;
+  if (!paperState.enabled || paperBusy || (!paperState.activeTrades.length && !hasWatchlistAlerts)) return;
   paperBusy = true;
   let changed = false;
   paperRuntime.monitorAttempts += 1;
@@ -2607,6 +2738,7 @@ async function monitorPaperTrades() {
       const price = paperNumber(row.lastPr || row.last || row.close || row.markPrice);
       if (sym && price) prices[sym] = price;
     });
+    const watchlistChanged = monitorPaperWatchlistAlerts(prices);
     const barsBySymbol = await fetchPaperMonitorBars(paperState.activeTrades.map(trade => trade.sym));
     const now = Date.now();
     const retained = [];
@@ -2732,7 +2864,7 @@ async function monitorPaperTrades() {
     paperRuntime.monitorsSucceeded += 1;
     paperRuntime.lastMonitorAt = paperState.lastMonitorAt;
     paperRuntime.lastMonitorError = null;
-    if (changed || paperState.activeTrades.length) savePaperState();
+    if (changed || watchlistChanged || paperState.activeTrades.length) savePaperState();
   } catch (error) {
     paperRuntime.monitorsFailed += 1;
     paperRuntime.lastMonitorErrorAt = new Date().toISOString();
@@ -3153,6 +3285,7 @@ function paperStatus() {
     dailyLossR: Number(dailyLossR.toFixed(2)),
     dailyPnlDate,
     dailyRealizedPnl: Number(dailyRealizedPnl.toFixed(2)),
+    dailySummary: paperDailySummaryView(dailyPnlDate),
     dailyGuard: dailyLossR <= -cfg.maxDailyLossR,
     blockReason,
     alerts: {
@@ -3163,8 +3296,10 @@ function paperStatus() {
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError,
       discord: Boolean(DISCORD_WEBHOOK_URL),
-      dailySummary: 'dashboard-only until explicitly enabled',
-      riskGuard: 'guard notifications are emitted for configured alert channels'
+      dailySummary: 'dashboard-only',
+      riskGuard: 'guard notifications are emitted for configured alert channels',
+      watchlistNearEntry: PAPER_WATCHLIST_ALERTS_ENABLED &&
+        (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))
     },
     state: {
       schemaVersion: PAPER_SCHEMA_VERSION,
@@ -3177,6 +3312,7 @@ function paperStatus() {
     lastMonitorAt: paperState.lastMonitorAt, lastPriceAt: paperState.lastPriceAt,
     lastError: paperState.lastError, activeTrades: active,
     watchlistQueue: (paperState.watchlistQueue || []).slice(),
+    watchlistAlerts: (paperState.watchlistAlerts || []).slice(),
     recentScans: paperState.recentScans.slice(0, 20),
     closedTrades: closed.slice(0, 100),
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
@@ -3366,6 +3502,32 @@ function updatePaperSettings(input) {
   next.minSignalScore = Math.max(50, Math.min(95, Number(next.minSignalScore) || PAPER_MIN_SIGNAL_SCORE));
   next.minRR = Math.max(1.5, Math.min(5, Number(next.minRR) || PAPER_MIN_RR));
   next.tp1ClosePct = Math.max(10, Math.min(90, Number(next.tp1ClosePct) || PAPER_TP1_CLOSE_PCT));
+  const activeStrategyKey = PAPER_STRATEGY_KEYS.includes(PAPER_STRATEGY_VERSION)
+    ? PAPER_STRATEGY_VERSION : 'MTF_ATR_V2';
+  const existingStrategies = paperNormaliseStrategySettings(current.strategySettings);
+  if (body.strategySettings && typeof body.strategySettings === 'object') {
+    const mergedStrategies = {...existingStrategies};
+    PAPER_STRATEGY_KEYS.forEach(key => {
+      if (body.strategySettings[key] && typeof body.strategySettings[key] === 'object') {
+        mergedStrategies[key] = {...mergedStrategies[key], ...body.strategySettings[key]};
+      }
+    });
+    next.strategySettings = paperNormaliseStrategySettings(mergedStrategies);
+    const active = next.strategySettings[activeStrategyKey];
+    next.maxActive = active.maxActive;
+    next.riskPct = active.riskPct;
+    next.minRR = active.minRR;
+    next.strategyEnabled = active.enabled;
+  } else {
+    const active = {...existingStrategies[activeStrategyKey]};
+    active.enabled = next.strategyEnabled;
+    active.maxActive = next.maxActive;
+    active.riskPct = next.riskPct;
+    active.minRR = next.minRR;
+    next.strategySettings = paperNormaliseStrategySettings({
+      ...existingStrategies, [activeStrategyKey]: active
+    });
+  }
   paperState.settings = next;
   paperState.settingsUpdatedAt = new Date().toISOString();
   savePaperState();
@@ -3731,7 +3893,9 @@ const server = http.createServer(async (req, res) => {
       actions: ['pause', 'kill-switch', 'settings', 'watchlist-priority', 'manual-entry', 'close', 'cancel', 'close-all'],
       alerts: {
         telegram: TELEGRAM_ALERTS_ENABLED,
-        discord: Boolean(DISCORD_WEBHOOK_URL)
+        discord: Boolean(DISCORD_WEBHOOK_URL),
+        watchlistNearEntry: PAPER_WATCHLIST_ALERTS_ENABLED &&
+          (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))
       }
     }));
     return;
@@ -3776,16 +3940,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (requestUrl.pathname === '/paper/admin/watchlist') {
-        const inputSymbols = Array.isArray(body.symbols) ? body.symbols : [body.sym || body.symbol];
-        const symbols = [...new Set(inputSymbols.map(value => String(value || '').toUpperCase()
-          .replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '')).filter(Boolean))];
+        const rawItems = Array.isArray(body.items) ? body.items
+          : (Array.isArray(body.symbols) ? body.symbols.map(sym => ({sym})) : [{sym: body.sym || body.symbol}]);
+        const alertItems = rawItems.map(item => paperNormaliseWatchlistAlert(
+          typeof item === 'object' ? item : {sym: item})).filter(Boolean);
+        const symbols = [...new Set(alertItems.map(item => item.sym))];
         if (!symbols.length || symbols.length > 5) {
           paperControlError(res, 400, 'Kirim 1–5 symbol watchlist yang valid');
-          return;
-        }
-        const unsupported = symbols.filter(sym => !PAPER_SYMBOLS.includes(sym));
-        if (unsupported.length) {
-          paperControlError(res, 400, 'Symbol belum didukung bot VPS: ' + unsupported.join(', '));
           return;
         }
         const queued = new Set((paperState.watchlistQueue || []).map(item => item.sym));
@@ -3799,9 +3960,17 @@ const server = http.createServer(async (req, res) => {
           const existing = oldQueue.find(item => item.sym === sym);
           return existing || {sym, requestedAt: new Date().toISOString()};
         });
+        const oldAlerts = paperState.watchlistAlerts || [];
+        alertItems.forEach(item => {
+          const existing = oldAlerts.find(row => row.sym === item.sym);
+          paperState.watchlistAlerts = (paperState.watchlistAlerts || []).filter(row => row.sym !== item.sym);
+          paperState.watchlistAlerts.push({...item, lastAlertAt: existing && existing.lastAlertAt || item.lastAlertAt || null});
+        });
+        paperState.watchlistAlerts = paperState.watchlistAlerts.slice(-5);
         paperState.settingsUpdatedAt = new Date().toISOString();
         savePaperState();
-        send(res, 200, JSON.stringify({ok: true, action: 'watchlist-queued', queued: paperState.watchlistQueue, status: paperStatus()}));
+        send(res, 200, JSON.stringify({ok: true, action: 'watchlist-queued', queued: paperState.watchlistQueue,
+          watchlistAlerts: paperState.watchlistAlerts, status: paperStatus()}));
         return;
       }
       if (requestUrl.pathname === '/paper/admin/manual') {

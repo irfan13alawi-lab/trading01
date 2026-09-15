@@ -25,10 +25,13 @@
   </div>
   <section class="positions"><h2>Active paper positions</h2><div id="positions" class="empty">Loading positions...</div></section>
   <div style="margin-top:14px"><button onclick="refresh()">Refresh</button><a href="/">Full dashboard</a></div>
-  <div class="foot">Kontrol yang mengubah state order tidak ditempatkan di halaman mobile tanpa token admin server. Riwayat tetap tersimpan di VPS.</div>
+  <section class="card" style="margin-top:14px"><div class="label">Paper bot control</div><div class="position-detail" style="margin:5px 0 9px">Token hanya disimpan di memori halaman ini; kontrol tidak memengaruhi live exchange.</div><div style="display:flex;gap:6px;flex-wrap:wrap"><input id="admin-token" type="password" autocomplete="off" placeholder="PAPER_ADMIN_TOKEN" style="flex:1;min-width:180px;background:#161b25;color:var(--text);border:1px solid var(--border);border-radius:7px;padding:8px"><button onclick="unlockAdmin()">Unlock</button></div><div id="admin-actions" style="display:none;margin-top:9px"><button onclick="setPause(true)">Pause</button><button onclick="setPause(false)">Resume</button><button onclick="setKill(true)" style="color:var(--red)">Kill ON</button><button onclick="setKill(false)">Clear kill</button><div class="position-detail" id="admin-result"></div></div></section>
+  <div class="foot">Paper bot berjalan sebagai service VPS. Riwayat tersimpan di VPS; token admin tidak disimpan ke localStorage.</div>
 </main>
 <script>
   var api=(location.protocol+'//'+location.hostname+':18085')+'/paper/status';
+  var adminApi=(location.protocol+'//'+location.hostname+':18085')+'/paper';
+  var adminToken='';
   function set(id,value,color){var e=document.getElementById(id);if(e)e.textContent=value;if(e&&color)e.style.color=color;}
   function renderPositions(items){
     var host=document.getElementById('positions');if(!host)return;
@@ -62,5 +65,11 @@
     set('equity','$'+Number(d.equity||0).toFixed(2));set('upnl',(Number(d.unrealizedPnl||0)>=0?'+':'')+'$'+Number(d.unrealizedPnl||0).toFixed(2),Number(d.unrealizedPnl||0)>=0?'var(--green)':'var(--red)');
     set('open',Number(d.summary&&d.summary.open||0)+' / '+Number(d.summary&&d.summary.partial||0)+' / '+Number(d.summary&&d.summary.pending||0));set('daily',(Number(d.dailyLossR||0)>=0?'+':'')+Number(d.dailyLossR||0).toFixed(2)+'R',d.dailyGuard?'var(--red)':'var(--text)');var dailyPnl=Number(d.dailyRealizedPnl||0);set('daily-pnl',(dailyPnl>=0?'+':'')+'$'+dailyPnl.toFixed(2),dailyPnl>=0?'var(--green)':'var(--red)');set('daily-date','UTC '+String(d.dailyPnlDate||'--'));set('closed',String(d.summary&&d.summary.closed||0));set('next',d.nextScanAt?new Date(d.nextScanAt).toLocaleTimeString('id-ID'):'--');renderPositions(d.activeTrades);
   }).catch(function(e){var box=document.getElementById('status');box.className='status bad';box.textContent='VPS offline · '+e.message;});}
+  function adminHeaders(){return {'Content-Type':'application/json','Authorization':'Bearer '+adminToken};}
+  function adminPost(path,payload){return fetch(adminApi+path,{method:'POST',headers:adminHeaders(),body:JSON.stringify(payload||{}),cache:'no-store'}).then(function(r){return r.json().catch(function(){return {};}).then(function(d){if(!r.ok||!d.ok)throw Error(d.error||('HTTP '+r.status));return d;});});}
+  function adminMessage(value,bad){var el=document.getElementById('admin-result');if(el){el.textContent=value;el.style.color=bad?'var(--red)':'var(--green)';}}
+  function unlockAdmin(){adminToken=String((document.getElementById('admin-token')||{}).value||'').trim();if(!adminToken){adminMessage('Masukkan token admin VPS.',true);return;}fetch(adminApi+'/admin/status',{headers:{'Authorization':'Bearer '+adminToken},cache:'no-store'}).then(function(r){return r.json().then(function(d){if(!r.ok||!d.controlsEnabled)throw Error(d.error||'Kontrol belum aktif di VPS');document.getElementById('admin-actions').style.display='block';adminMessage('Kontrol siap.',false);});}).catch(function(e){adminToken='';document.getElementById('admin-actions').style.display='none';adminMessage(e.message,true);});}
+  function setPause(paused){adminPost('/admin/pause',{paused:!!paused}).then(function(){adminMessage(paused?'Bot dijeda; posisi lama tetap dimonitor.':'Bot dilanjutkan.',false);refresh();}).catch(function(e){adminMessage(e.message,true);});}
+  function setKill(enabled){if(enabled&&!confirm('Aktifkan kill-switch paper bot?'))return;adminPost('/admin/kill-switch',{enabled:!!enabled}).then(function(){adminMessage(enabled?'Kill-switch aktif.':'Kill-switch dibersihkan.',false);refresh();}).catch(function(e){adminMessage(e.message,true);});}
   refresh();setInterval(refresh,15000);
 </script></body></html>

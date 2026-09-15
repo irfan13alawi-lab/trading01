@@ -357,6 +357,19 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </div>
   </div>
 
+  <div class="card" id="tradingview-embed-card">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-chart-line"></i> Embedded TradingView <span class="muted" id="tv-embed-status">BTCUSDT · 15M</span></div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+        <input id="tv-embed-symbol" value="BTC" placeholder="BTC" style="width:80px;text-transform:uppercase;">
+        <select id="tv-embed-interval" style="width:80px;"><option value="15">15M</option><option value="60">1H</option><option value="240">4H</option><option value="D">1D</option></select>
+        <button class="btn btn-sm btn-blue" onclick="loadTradingViewEmbed()"><i class="fa-solid fa-rotate"></i> Load</button>
+      </div>
+    </div>
+    <div class="muted" style="margin-bottom:6px;">Chart terintegrasi dari market Bitget Futures. Jika widget eksternal diblokir browser, chart VPS di atas tetap tersedia.</div>
+    <iframe id="tv-embed-frame" title="TradingView chart" loading="lazy" allowtransparency="true" allowfullscreen style="display:block;width:100%;height:420px;border:0;border-radius:8px;background:#0d1117;"></iframe>
+  </div>
+
   <div class="g2">
     <div class="card" id="orderbook-card">
       <div class="card-h">
@@ -418,6 +431,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </div>
     <div id="filter-pills" style="margin-bottom:10px;">
       <select id="scan-preset" onchange="applyScanPreset(this.value)" style="width:150px;"><option value="all">Preset: All</option><option value="high">High confidence</option><option value="long">Long bias</option><option value="short">Short bias</option></select>
+      <button class="btn btn-sm" onclick="saveScanPreset()" title="Simpan filter, pencarian, sort, dan tampilan scanner"><i class="fa-solid fa-bookmark"></i> Save</button>
+      <button class="btn btn-sm" onclick="deleteScanPreset()" title="Hapus preset scanner tersimpan"><i class="fa-solid fa-trash"></i></button>
       <span class="pill on" onclick="setF('all',this)">All</span>
       <span class="pill" onclick="setF('top10',this)">Top 10</span>
       <span class="pill" onclick="setF('top25',this)">Top 25</span>
@@ -483,7 +498,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
         <div class="fg"><label>Take Profit</label><input id="f-tp" type="number" step="any"></div>
       </div>
       <div class="frow">
-        <div class="fg"><label>Status</label><select id="f-st"><option>WATCHING</option><option>TRIGGERED</option><option>CLOSED</option></select></div>
+        <div class="fg"><label>Status</label><select id="f-st"><option>WAITING</option><option>ACTIVE</option><option>EXPIRED</option></select></div>
         <div class="fg" style="grid-column:span 3;"><label>Notes</label><input id="f-nt" placeholder="Notes..."></div>
       </div>
       <button class="btn btn-sm btn-green" onclick="saveSetup()"><i class="fa-solid fa-check"></i> Save Setup</button>
@@ -771,7 +786,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
         <a class="btn btn-sm" id="p2-h4-link" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> H4</a>
         <a class="btn btn-sm" id="p2-h1-link" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> H1</a>
         <a class="btn btn-sm" id="p2-m15-link" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> M15</a>
-        <button class="btn btn-sm btn-blue" id="p2-gc-btn" onclick="openGC()"><i class="fa-solid fa-chart-line"></i> Open Chart</button>
+         <button class="btn btn-sm btn-blue" id="p2-gc-btn" onclick="openGC()"><i class="fa-solid fa-chart-line"></i> TradingView</button>
         <button class="btn btn-sm btn-green" onclick="addToWatchlistFromP2()"><i class="fa-solid fa-star"></i> Add to Watchlist</button>
       </div>
       <!-- Trigger proximity -->
@@ -872,8 +887,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="card"><div class="card-t"><i class="fa-solid fa-chart-column"></i> Monthly Returns</div><div class="chart" id="bt-monthly-chart"></div></div>
     </div>
     <div class="card">
-      <div class="card-t"><i class="fa-solid fa-list"></i> Trade Log</div>
-      <div class="tbl-wrap"><div id="bt-trade-log"></div></div>
+      <div class="card-t"><i class="fa-solid fa-list"></i> Trade Log <span class="muted">(klik baris untuk detail)</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th class="tl"># / setup</th><th>Date</th><th>Exit date</th><th>Entry</th><th>Exit</th><th>R</th><th>Result</th><th>Reason</th></tr></thead><tbody id="bt-trade-log"></tbody></table></div>
     </div>
     <div class="card" id="bt-sweep-panel" style="display:none;"><div class="card-t"><i class="fa-solid fa-table-cells"></i> Parameter Sweep</div><div id="bt-sweep-results" class="muted"></div></div>
   </div>
@@ -905,6 +920,17 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="card-h"><div class="card-t"><i class="fa-solid fa-heart-pulse"></i> VPS Operations &amp; Data Quality</div><button class="btn btn-sm btn-blue" onclick="refreshOpsPage()"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
     <div id="ops-health" class="muted">Loading VPS diagnostics...</div>
     <div id="ops-sources" class="conn-grid" style="margin-top:10px;"></div>
+  </div>
+  <div class="card" id="ops-daily-summary">
+    <div class="card-h"><div class="card-t"><i class="fa-solid fa-calendar-check"></i> Daily paper summary</div><span class="muted" id="ops-summary-date">--</span></div>
+    <div class="g6" style="margin-top:8px;">
+      <div class="kpi"><div class="l">Closed</div><div class="v" id="ops-summary-trades">--</div><div class="s" id="ops-summary-wl">W/L --</div></div>
+      <div class="kpi"><div class="l">Net R</div><div class="v" id="ops-summary-r">--</div><div class="s">strict cohort</div></div>
+      <div class="kpi"><div class="l">PnL</div><div class="v" id="ops-summary-pnl">--</div><div class="s">realized today</div></div>
+      <div class="kpi"><div class="l">Equity</div><div class="v" id="ops-summary-equity">--</div><div class="s">strict cohort</div></div>
+      <div class="kpi"><div class="l">Pending</div><div class="v" id="ops-summary-pending">--</div><div class="s">waiting for entry</div></div>
+      <div class="kpi"><div class="l">Guard</div><div class="v" id="ops-summary-guard">--</div><div class="s">daily loss limit</div></div>
+    </div>
   </div>
   <div class="card"><div class="card-t"><i class="fa-solid fa-shield-halved"></i> Trial safety status</div><div class="muted" style="line-height:1.8;margin-top:8px;">Paper trading berjalan sebagai service VPS dan tidak bergantung pada tab browser. Posisi PENDING menunggu candle 1M tertutup, kadaluarsa setelah 120 menit, dan histori tersimpan dengan backup atomik. Kontrol yang dapat mengubah state sengaja memerlukan otorisasi server; halaman ini hanya memonitor agar tidak ada tombol palsu yang terlihat aktif.</div></div>
   <div class="card" id="ops-admin-card">
@@ -942,6 +968,18 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="frow" style="grid-template-columns:1fr 1fr;">
         <div class="fg"><label>Whitelist (comma separated)</label><input id="ops-whitelist" placeholder="BTC,ETH,SOL — kosong = semua"></div>
         <div class="fg"><label>Blacklist (comma separated)</label><input id="ops-blacklist" placeholder="SHIB,PEPE"></div>
+      </div>
+      <div class="card-t" style="margin:14px 0 6px;"><i class="fa-solid fa-layer-group"></i> Strategy cohorts</div>
+      <div class="muted" style="line-height:1.6;margin-bottom:8px;">MTF V2 adalah worker aktif. PRE-UPGRADE dan LEGACY hanya menyimpan konfigurasi kompatibilitas/histori; tidak membuat worker kedua.</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th class="tl">Cohort</th><th>Enabled</th><th>Max active</th><th>Risk %</th><th>Min R:R</th></tr></thead>
+          <tbody>
+            <tr><td class="tl"><b>MTF_ATR_V2</b><br><span class="muted">active worker</span></td><td><input id="ops-strategy-mtf-enabled" type="checkbox" checked></td><td><input id="ops-strategy-mtf-max" type="number" min="3" max="100" value="80"></td><td><input id="ops-strategy-mtf-risk" type="number" min="0.1" max="2" step="0.1" value="0.5"></td><td><input id="ops-strategy-mtf-rr" type="number" min="1.5" max="5" step="0.1" value="2"></td></tr>
+            <tr><td class="tl"><b>PRE_UPGRADE</b><br><span class="muted">historical compatibility</span></td><td><input id="ops-strategy-pre-enabled" type="checkbox"></td><td><input id="ops-strategy-pre-max" type="number" min="0" max="100" value="10"></td><td><input id="ops-strategy-pre-risk" type="number" min="0.1" max="2" step="0.1" value="0.5"></td><td><input id="ops-strategy-pre-rr" type="number" min="1.5" max="5" step="0.1" value="2"></td></tr>
+            <tr><td class="tl"><b>LEGACY</b><br><span class="muted">historical only</span></td><td><input id="ops-strategy-legacy-enabled" type="checkbox"></td><td><input id="ops-strategy-legacy-max" type="number" min="0" max="100" value="0"></td><td><input id="ops-strategy-legacy-risk" type="number" min="0.1" max="2" step="0.1" value="0.5"></td><td><input id="ops-strategy-legacy-rr" type="number" min="1.5" max="5" step="0.1" value="2"></td></tr>
+          </tbody>
+        </table>
       </div>
       <button class="btn btn-sm btn-green" onclick="saveAdminSettings()"><i class="fa-solid fa-floppy-disk"></i> Save settings</button>
       <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
@@ -1657,11 +1695,104 @@ function setF(f, btn) {
   if(btn) btn.classList.add('on');
   renderTable();
 }
+var SCAN_PRESET_KEY = 'nexora_scanner_presets_v1';
+function readScanPresets() {
+  try {
+    var raw = JSON.parse(localStorage.getItem(SCAN_PRESET_KEY) || '[]');
+    if(!Array.isArray(raw)) return [];
+    return raw.filter(function(item){
+      return item && typeof item.name === 'string' && item.name.trim() && item.state && typeof item.state === 'object';
+    }).slice(0, 20);
+  } catch(e) { return []; }
+}
+function writeScanPresets(items) {
+  try { localStorage.setItem(SCAN_PRESET_KEY, JSON.stringify(items.slice(0,20))); return true; }
+  catch(e) { toast('<i class="fa-solid fa-circle-exclamation" style="color:#f0883e;"></i> Preset tidak bisa disimpan di browser.','a'); return false; }
+}
+function renderScanPresets() {
+  var select = document.getElementById('scan-preset');
+  if(!select) return;
+  Array.prototype.slice.call(select.options).forEach(function(option){
+    if(String(option.value).indexOf('saved:') === 0) option.remove();
+  });
+  readScanPresets().forEach(function(item, index){
+    var option = document.createElement('option');
+    option.value = 'saved:' + index;
+    option.textContent = 'Saved: ' + item.name;
+    select.appendChild(option);
+  });
+}
+function scanPresetState() {
+  return {
+    filt: G.filt || 'all', srch: G.srch || '', sKey: G.sKey || 'sc',
+    sAsc: !!G.sAsc, scanView: G.scanView === 'single' ? 'single' : 'grid'
+  };
+}
+function applyScanPresetState(state) {
+  state = state || {};
+  var allowed = ['all','top10','top25','fav','a','b','sig','long','short','fund','oi','pump','dump','l2'];
+  G.filt = allowed.indexOf(state.filt) >= 0 ? state.filt : 'all';
+  G.srch = String(state.srch || '').slice(0, 80).toLowerCase();
+  G.sKey = String(state.sKey || 'sc');
+  G.sAsc = !!state.sAsc;
+  var search = document.getElementById('srch');
+  if(search) search.value = G.srch;
+  var pills = document.querySelectorAll('#filter-pills .pill');
+  Array.prototype.forEach.call(pills,function(p){p.classList.remove('on');});
+  var labels = {all:'All',a:'A-Tier',b:'B-Tier',sig:'Signals',long:'LONG',short:'SHORT',fund:'Neg Funding',oi:'OI Rising',pump:'Pumping',dump:'Dumping',l2:'L2',top10:'Top 10',top25:'Top 25',fav:'Favorites'};
+  Array.prototype.forEach.call(pills,function(p){ if(p.textContent === labels[G.filt]) p.classList.add('on'); });
+  G.scanView = state.scanView === 'single' ? 'single' : 'grid';
+  var grid = document.getElementById('scan-view-grid');
+  var single = document.getElementById('scan-view-single');
+  if(grid) grid.classList.toggle('on', G.scanView === 'grid');
+  if(single) single.classList.toggle('on', G.scanView === 'single');
+  var top5 = document.getElementById('top5-body');
+  if(top5) top5.classList.toggle('single-mode', G.scanView === 'single');
+  renderTable();
+}
 function applyScanPreset(value) {
+  if(String(value).indexOf('saved:') === 0) {
+    var index = Number(String(value).slice(6));
+    var item = readScanPresets()[index];
+    if(item) { applyScanPresetState(item.state); sLog('Scanner preset loaded: ' + item.name); }
+    return;
+  }
   var map={all:'all',high:'a',long:'long',short:'short'};
   var key=map[value]||'all';
   var pill=Array.prototype.find.call(document.querySelectorAll('#filter-pills .pill'),function(el){return (key==='a'&&el.textContent==='A-Tier')||(key==='long'&&el.textContent==='LONG')||(key==='short'&&el.textContent==='SHORT')||(key==='all'&&el.textContent==='All');});
   setF(key,pill);
+}
+function saveScanPreset() {
+  var name = window.prompt('Nama preset scanner:', 'My scanner filter');
+  if(!name) return;
+  name = name.trim().slice(0, 40);
+  if(!name) return;
+  var items = readScanPresets();
+  var existing = items.findIndex(function(item){return item.name.toLowerCase() === name.toLowerCase();});
+  var record = {name:name, state:scanPresetState(), savedAt:new Date().toISOString()};
+  if(existing >= 0) items[existing] = record; else items.unshift(record);
+  if(!writeScanPresets(items)) return;
+  renderScanPresets();
+  var select = document.getElementById('scan-preset');
+  if(select) select.value = 'saved:0';
+  toast('<i class="fa-solid fa-bookmark" style="color:#58a6ff;"></i> Preset scanner tersimpan: ' + sourceEsc(name),'a');
+  sLog('Scanner preset saved: ' + name);
+}
+function deleteScanPreset() {
+  var select = document.getElementById('scan-preset');
+  var value = select ? String(select.value) : '';
+  if(value.indexOf('saved:') !== 0) { toast('Pilih preset Saved terlebih dahulu.','a'); return; }
+  var index = Number(value.slice(6));
+  var items = readScanPresets();
+  if(!items[index]) return;
+  if(!window.confirm('Hapus preset scanner "' + items[index].name + '"?')) return;
+  var name = items[index].name;
+  items.splice(index, 1);
+  if(!writeScanPresets(items)) return;
+  renderScanPresets();
+  if(select) select.value = 'all';
+  applyScanPreset('all');
+  sLog('Scanner preset deleted: ' + name);
 }
 function onSrch() { G.srch = document.getElementById('srch').value.toLowerCase(); renderTable(); }
 function doSort(k) { if (G.sKey===k) G.sAsc=!G.sAsc; else {G.sKey=k;G.sAsc=false;} renderTable(); }
@@ -1764,7 +1895,7 @@ function renderTable() {
     row += '<td style="color:'+cpCol+';font-size:10px;">'+(cp?cp.pattern:'-')+'</td>';
     var vsCol = !p.volSpike?'#484f58':p.volSpike.isSpike?'#f0883e':'#484f58';
     row += '<td style="color:'+vsCol+';font-size:10px;">'+(p.volSpike?p.volSpike.ratio+'x':'-')+'</td>';
-    row += '<td style="white-space:nowrap;"><button class="btn btn-sm btn-blue" onclick="event.stopPropagation();openGC(\'' + p.s + '\')" title="GoCharting"><i class="fa-solid fa-chart-line"></i></button> <button class="btn btn-sm" onclick="event.stopPropagation();quickAddWatch(\''+p.s+'\')" title="Quick add watchlist"><i class="fa-solid fa-star"></i></button> ' + (p.tier!=='C'?'<button class="btn btn-sm" style="background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.2);" onclick="event.stopPropagation();runP2Analysis(\''+p.s+'\',\''+p.id+'\')" title="Phase 2 Analysis">P2</button>':'<button class="btn btn-sm bn" onclick="event.stopPropagation();">P2</button>') + '</td>';
+    row += '<td style="white-space:nowrap;"><button class="btn btn-sm btn-blue" onclick="event.stopPropagation();openGC(\'' + p.s + '\')" title="TradingView embedded"><i class="fa-solid fa-chart-line"></i></button> <button class="btn btn-sm" onclick="event.stopPropagation();quickAddWatch(\''+p.s+'\')" title="Quick add watchlist"><i class="fa-solid fa-star"></i></button> ' + (p.tier!=='C'?'<button class="btn btn-sm" style="background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.2);" onclick="event.stopPropagation();runP2Analysis(\''+p.s+'\',\''+p.id+'\')" title="Phase 2 Analysis">P2</button>':'<button class="btn btn-sm bn" onclick="event.stopPropagation();">P2</button>') + '</td>';
     row += '</tr>';
     rows.push(row);
     } catch(ep) { rows.push('<tr><td colspan="11" style="color:#484f58;padding:4px 8px;">'+((p&&p.s)||'?')+'</td></tr>'); }
@@ -1772,7 +1903,32 @@ function renderTable() {
   document.getElementById('tbody').innerHTML = rows.join('') || '<tr><td colspan="15" style="text-align:center;padding:20px;color:#484f58;">No matches</td></tr>';
 }
 
-function openGC(s) { window.open('https://gocharting.com/?ticker=BINANCE:' + s + 'USDT', '_blank'); }
+function tradingViewEmbedUrl(sym, interval) {
+  var symbol = 'BITGET:' + String(sym || 'BTC').toUpperCase().replace(/[^A-Z0-9]/g,'') + 'USDT';
+  var tf = String(interval || '15');
+  return 'https://www.tradingview.com/widgetembed/?frameElementId=nexora_tv&symbol=' + encodeURIComponent(symbol)
+    + '&interval=' + encodeURIComponent(tf) + '&hidesidetoolbar=1&symboledit=1&saveimage=0'
+    + '&toolbar_bg=%230d1117&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hideideas=1&hidevolume=0&hidelegend=0&autosize=1';
+}
+function loadTradingViewEmbed(sym, interval) {
+  var symbolEl = document.getElementById('tv-embed-symbol');
+  var intervalEl = document.getElementById('tv-embed-interval');
+  var rawSym = String(sym || (symbolEl && symbolEl.value) || 'BTC').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/USDT$/,'') || 'BTC';
+  var tf = String(interval || (intervalEl && intervalEl.value) || '15');
+  if(['15','60','240','D'].indexOf(tf) < 0) tf = '15';
+  if(symbolEl) symbolEl.value = rawSym;
+  if(intervalEl) intervalEl.value = tf;
+  var frame = document.getElementById('tv-embed-frame');
+  var status = document.getElementById('tv-embed-status');
+  if(frame) frame.src = tradingViewEmbedUrl(rawSym, tf);
+  if(status) status.textContent = rawSym + 'USDT · ' + ({'15':'15M','60':'1H','240':'4H','D':'1D'}[tf] || tf);
+}
+function openTradingViewChart(sym, interval) {
+  loadTradingViewEmbed(sym, interval || '60');
+  var panel = document.getElementById('tradingview-embed-card');
+  if(panel && panel.scrollIntoView) panel.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function openGC(s) { openTradingViewChart(s, '60'); }
 function switchCoin(id, s) {
   G.coinId = id;
   G.scanFocus = s;
@@ -2262,8 +2418,9 @@ function renderWL() {
 
     var cls = w.tier === 'A' ? 'sa' : 'sb2';
     var dc  = w.dir  === 'LONG' ? 'up' : 'dn';
-    var statusText = String(w.status || 'WATCHING').toUpperCase();
-    var statusClass = statusText === 'TRIGGERED' ? 'status-live' : statusText === 'CLOSED' ? 'status-error' : 'status-warn';
+    var rawStatus = String(w.status || 'WATCHING').toUpperCase();
+    var statusText = rawStatus === 'TRIGGERED' || rawStatus === 'ACTIVE' ? 'ACTIVE' : rawStatus === 'CLOSED' || rawStatus === 'EXPIRED' ? 'EXPIRED' : 'WAITING';
+    var statusClass = statusText === 'ACTIVE' ? 'status-live' : statusText === 'EXPIRED' ? 'status-error' : 'status-warn';
 
     html.push('<div class="setup ' + cls + '">');
 
@@ -2305,7 +2462,7 @@ function renderWL() {
 
     // Mini chart slot
     html.push('<div class="mini-chart" id="mini-' + idx + '" onclick="openGC(\'' + w.sym.replace('USDT','') + '\')">');
-    html.push('<div class="mini-ov"><i class="fa-solid fa-arrow-up-right-from-square"></i> GoCharting</div>');
+    html.push('<div class="mini-ov"><i class="fa-solid fa-chart-line"></i> TradingView embedded</div>');
     html.push('</div>');
 
     // Levels
@@ -2492,7 +2649,9 @@ function sendWatchToBot(idx) {
   G.scanFocus=sym;
   var p=fp(sym);
   if(p) { switchCoin(p.id,sym); }
-  adminPost('/admin/watchlist', {symbols:[sym]}).then(function(data){
+  var range=String(w.en||'').replace(/[$,]/g,'').match(/\d+(?:\.\d+)?/g)||[];
+  var low=Number(range[0]||0), high=Number(range[1]||range[0]||0);
+  adminPost('/admin/watchlist', {items:[{sym:sym,dir:String(w.dir||'').toUpperCase(),entryLow:low||null,entryHigh:high||null,alertPct:3}]}).then(function(data){
     if(data.status) applyServerPaperStatus(data.status, false);
     sLog('Watchlist '+sourceEsc(sym)+' queued for priority MTF evaluation on the next VPS scan.');
     toast('<i class="fa-solid fa-paper-plane" style="color:#58a6ff;"></i> '+sourceEsc(sym)+' masuk antrean scan VPS. Ini bukan order: MTF, kualitas data, whitelist, dan risk guard tetap berlaku.','a');
@@ -3585,8 +3744,8 @@ function fireAlert(p) {
   var msg = '<b style="font-size:13px;color:#3fb950;">ENTRY SIGNAL: ' + p.s + '</b><br>'
     + 'Score: <b>' + p.sc + '/12</b> | Fund: <b style="color:#3fb950;">' + (p.fund*100).toFixed(4) + '%</b><br>'
     + 'OI: <b>' + (p.oi >= 0 ? '+' : '') + p.oi.toFixed(2) + '%</b> | 24h: ' + p.chg.toFixed(2) + '%<br>'
-    + '<a href="https://gocharting.com/?ticker=BINANCE:' + p.s + 'USDT&interval=240" '
-    + 'target="_blank" style="color:#58a6ff;font-size:11px;">Open GoCharting H4 -></a>';
+    + '<a href="https://www.tradingview.com/chart/?symbol=BITGET%3A' + p.s + 'USDT&interval=240" '
+    + 'target="_blank" rel="noopener" style="color:#58a6ff;font-size:11px;">Open TradingView H4 -></a>';
 
   // Toast notification
   toast(msg, 'a');
@@ -3595,7 +3754,7 @@ function fireAlert(p) {
   // Try browser notification
   if ('Notification' in window && Notification.permission === 'granted') {
     new Notification('NEXORA: Entry Signal - ' + p.s, {
-      body: 'Score ' + p.sc + '/12 | Fund ' + (p.fund*100).toFixed(4) + '% | Buka GoCharting',
+      body: 'Score ' + p.sc + '/12 | Fund ' + (p.fund*100).toFixed(4) + '% | Buka TradingView',
       icon: ''
     });
   }
@@ -4228,7 +4387,7 @@ function renderMTFAnalysis(mtf, containerId) {
     html += '<div style="background:#0d1117;border:1px solid '+tfColor+'33;border-radius:6px;padding:8px;border-top:3px solid '+tfColor+';">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
     html += '<b style="font-size:13px;color:'+tfColor+';">'+tf.tf+'</b>';
-    html += '<a href="https://gocharting.com/?ticker=BINANCE:'+sym+'USDT&interval='+interval+'" target="_blank" style="color:#484f58;font-size:9px;text-decoration:none;">chart &rarr;</a>';
+    html += '<a href="https://www.tradingview.com/chart/?symbol=BITGET%3A'+sym+'USDT&interval='+interval+'" target="_blank" rel="noopener" style="color:#484f58;font-size:9px;text-decoration:none;">TradingView &rarr;</a>';
     html += '</div>';
     html += '<div style="font-size:10px;color:#484f58;margin-bottom:4px;">'+tf.role+'</div>';
     html += '<div style="font-size:12px;font-weight:700;color:'+tfColor+';margin-bottom:5px;">'+(tf.verdict||'NO_DATA')+'</div>';
@@ -5473,6 +5632,23 @@ function refreshOpsPage() {
     if(opsDaily) { opsDaily.textContent = (Number(status.dailyLossR || 0) >= 0 ? '+' : '') + Number(status.dailyLossR || 0).toFixed(2) + 'R'; opsDaily.style.color = status.dailyGuard ? '#f85149' : Number(status.dailyLossR || 0) < 0 ? '#e3b341' : '#3fb950'; }
     if(opsLast) opsLast.textContent = vpsFmtAt(status.lastScanAt);
     if(opsNext) opsNext.textContent = 'next ' + vpsFmtAt(status.nextScanAt);
+    var summary = status.dailySummary || {};
+    var summaryDate = document.getElementById('ops-summary-date');
+    var summaryTrades = document.getElementById('ops-summary-trades');
+    var summaryWl = document.getElementById('ops-summary-wl');
+    var summaryR = document.getElementById('ops-summary-r');
+    var summaryPnl = document.getElementById('ops-summary-pnl');
+    var summaryEquity = document.getElementById('ops-summary-equity');
+    var summaryPending = document.getElementById('ops-summary-pending');
+    var summaryGuard = document.getElementById('ops-summary-guard');
+    if(summaryDate) summaryDate.textContent = summary.date || '--';
+    if(summaryTrades) summaryTrades.textContent = String(Number(summary.trades || 0));
+    if(summaryWl) summaryWl.textContent = 'W/L ' + Number(summary.wins || 0) + '/' + Number(summary.losses || 0) + (summary.breakeven ? ' · BE ' + Number(summary.breakeven) : '');
+    if(summaryR) { summaryR.textContent = (Number(summary.netR || 0) >= 0 ? '+' : '') + Number(summary.netR || 0).toFixed(2) + 'R'; summaryR.style.color = Number(summary.netR || 0) < 0 ? '#f85149' : '#3fb950'; }
+    if(summaryPnl) { summaryPnl.textContent = (Number(summary.pnl || 0) >= 0 ? '+' : '') + '$' + Number(summary.pnl || 0).toFixed(2); summaryPnl.style.color = Number(summary.pnl || 0) < 0 ? '#f85149' : '#3fb950'; }
+    if(summaryEquity) summaryEquity.textContent = '$' + Number(summary.equity || status.equity || 0).toFixed(2);
+    if(summaryPending) summaryPending.textContent = String(Number(status.summary && status.summary.pending || 0));
+    if(summaryGuard) { summaryGuard.textContent = summary.guard ? 'ON' : 'OK'; summaryGuard.style.color = summary.guard ? '#f85149' : '#3fb950'; }
     var runtime = diag.runtime || {};
     var errorCount = Number(runtime.scansFailed || 0) + Number(runtime.monitorsFailed || 0);
     if(opsErrors) { opsErrors.textContent = String(errorCount); opsErrors.style.color = errorCount ? '#f85149' : '#3fb950'; }
@@ -5538,6 +5714,19 @@ function fillAdminSettings(settings) {
   var enabled = document.getElementById('ops-strategy-enabled'); if(enabled) enabled.checked = s.strategyEnabled !== false;
   var hours = document.getElementById('ops-hours-enabled'); if(hours) hours.checked = !!s.tradingHoursEnabled;
   ['whitelist','blacklist'].forEach(function(key){var el=document.getElementById('ops-' + key); if(el) el.value=Array.isArray(s[key]) ? s[key].join(',') : '';});
+  var rows = {MTF_ATR_V2:'mtf',PRE_UPGRADE:'pre',LEGACY:'legacy'};
+  Object.keys(rows).forEach(function(key){
+    var row = (s.strategySettings || {})[key] || {};
+    var suffix = rows[key];
+    var enabledEl = document.getElementById('ops-strategy-' + suffix + '-enabled');
+    var maxEl = document.getElementById('ops-strategy-' + suffix + '-max');
+    var riskEl = document.getElementById('ops-strategy-' + suffix + '-risk');
+    var rrEl = document.getElementById('ops-strategy-' + suffix + '-rr');
+    if(enabledEl) enabledEl.checked = row.enabled !== false;
+    if(maxEl && row.maxActive != null) maxEl.value = row.maxActive;
+    if(riskEl && row.riskPct != null) riskEl.value = row.riskPct;
+    if(rrEl && row.minRR != null) rrEl.value = row.minRR;
+  });
 }
 function applyAdminResponse(data) {
   if(data && data.status) {
@@ -5580,7 +5769,9 @@ function setAdminKillSwitch(enabled) {
 function saveAdminSettings() {
   var csv=function(id){return String((document.getElementById(id)||{}).value||'').split(',').map(function(v){return v.trim().toUpperCase();}).filter(Boolean);};
   var value=function(id){return Number((document.getElementById(id)||{}).value);};
-  var config={perScan:value('ops-per-scan'),maxActive:value('ops-max-active'),riskPct:value('ops-risk'),maxDailyLossR:value('ops-max-loss'),minConfluence:value('ops-min-conf'),minSignalScore:value('ops-min-score'),minRR:value('ops-min-rr'),tp1ClosePct:value('ops-tp1-pct'),strategyEnabled:!!(document.getElementById('ops-strategy-enabled')||{}).checked,tradingHoursEnabled:!!(document.getElementById('ops-hours-enabled')||{}).checked,tradingStartUtc:String((document.getElementById('ops-start')||{}).value||'00:00'),tradingEndUtc:String((document.getElementById('ops-end')||{}).value||'23:59'),whitelist:csv('ops-whitelist'),blacklist:csv('ops-blacklist')};
+  var checked=function(id){return !!(document.getElementById(id)||{}).checked;};
+  var strategy=function(prefix){return {enabled:checked('ops-strategy-' + prefix + '-enabled'),maxActive:value('ops-strategy-' + prefix + '-max'),riskPct:value('ops-strategy-' + prefix + '-risk'),minRR:value('ops-strategy-' + prefix + '-rr')};};
+  var config={perScan:value('ops-per-scan'),maxActive:value('ops-max-active'),riskPct:value('ops-risk'),maxDailyLossR:value('ops-max-loss'),minConfluence:value('ops-min-conf'),minSignalScore:value('ops-min-score'),minRR:value('ops-min-rr'),tp1ClosePct:value('ops-tp1-pct'),strategyEnabled:checked('ops-strategy-enabled'),tradingHoursEnabled:checked('ops-hours-enabled'),tradingStartUtc:String((document.getElementById('ops-start')||{}).value||'00:00'),tradingEndUtc:String((document.getElementById('ops-end')||{}).value||'23:59'),whitelist:csv('ops-whitelist'),blacklist:csv('ops-blacklist'),strategySettings:{MTF_ATR_V2:strategy('mtf'),PRE_UPGRADE:strategy('pre'),LEGACY:strategy('legacy')}};
   adminPost('/admin/settings', config).then(function(data){applyAdminResponse(data);adminLog('Settings tersimpan di VPS.','#3fb950');}).catch(function(error){adminLog(error.message,'#f85149');});
 }
 function confirmCloseAll() {
@@ -6379,11 +6570,11 @@ function runP2Analysis(sym, coinId, keepCurrentPage) {
   dirEl.textContent = dir;
   dirEl.className = dir === 'LONG' ? 'up' : 'dn';
 
-  // GoCharting button
+  // TradingView fallback button
   var gcBtn = document.getElementById('p2-gc-btn');
-  gcBtn.onclick = function() { window.open('https://gocharting.com/?ticker=BINANCE:' + sym + 'USDT&interval=240', '_blank'); };
+  gcBtn.onclick = function() { openTradingViewChart(sym, '240'); };
   // Set all TF chart links
-  var gcBase = 'https://gocharting.com/?ticker=BINANCE:' + sym + 'USDT&interval=';
+  var gcBase = 'https://www.tradingview.com/chart/?symbol=BITGET%3A' + sym + 'USDT&interval=';
   document.getElementById('p2-d1-link').href  = gcBase + '1D';
   document.getElementById('p2-h4-link').href  = gcBase + '240';
   document.getElementById('p2-h1-link').href  = gcBase + '60';
@@ -6472,8 +6663,8 @@ function runP2Analysis(sym, coinId, keepCurrentPage) {
   var decSLPct = dir === 'SHORT' ? '+3%' : '-3%';
   var decTPPct = dir === 'SHORT' ? '-6%' : '+6%';
   var decActions = {
-    'ENTRY NOW': ['1. Open GoCharting H1 - verify trigger candle (Hammer/Engulf)','2. Volume must be > 1.5x 20-period avg','3. Set SL at $' + decSL.toFixed(p.price>=1?3:5) + ' (' + decSLPct + ')','4. Set TP1 at $' + decTP.toFixed(p.price>=1?3:5) + ' (' + decTPPct + ', 2R)'],
-    'PREPARE':   ['1. Open GoCharting H1 - monitor for trigger','2. Set price alert at entry zone','3. Wait for candle close confirmation','4. Check funding stays negative'],
+    'ENTRY NOW': ['1. Open TradingView H1 - verify trigger candle (Hammer/Engulf)','2. Volume must be > 1.5x 20-period avg','3. Set SL at $' + decSL.toFixed(p.price>=1?3:5) + ' (' + decSLPct + ')','4. Set TP1 at $' + decTP.toFixed(p.price>=1?3:5) + ' (' + decTPPct + ', 2R)'],
+    'PREPARE':   ['1. Open TradingView H1 - monitor for trigger','2. Set price alert at entry zone','3. Wait for candle close confirmation','4. Check funding stays negative'],
     'WATCHLIST': ['1. Add to watchlist (click + Add above)','2. Set alert when price approaches zone','3. Re-analyze at next 4H close','4. Monitor OI for confirmation'],
     'SKIP':      ['1. Price too far from zone - do NOT chase','2. Wait for pullback to entry zone','3. Re-evaluate in next scan cycle','4. Move to next candidate']
   };
@@ -6642,9 +6833,11 @@ try {
 } catch(e) {}
 // Load saved data from previous session
 var _loaded = loadFromStorage();
+renderScanPresets();
 // Telegram configuration stays server-side; never restore a bot token into the browser.
 pollTelegramStatus();
 try { renderWL(); } catch(e) { console.error('renderWL boot error:', e); }
+try { loadTradingViewEmbed('BTC', '15'); } catch(e) { console.error('TradingView embed boot error:', e); }
 if(_loaded) {
   try { renderEquity(); } catch(e) {}
   try { updateActiveTradesPanel(); } catch(e) {}
@@ -7059,7 +7252,7 @@ function runV44Strategy(ohlc, slPct, rr, minSc) {
 function renderBacktestResults(trades, sym, days, src) {
   document.getElementById('bt-results').style.display = 'block';
   if(!trades.length) {
-    document.getElementById('bt-trade-log').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#484f58;padding:20px;">No signals. Try lower min score.</td></tr>';
+    document.getElementById('bt-trade-log').innerHTML = '<tr><td colspan="8" style="text-align:center;color:#484f58;padding:20px;">No signals. Try lower min score.</td></tr>';
     return;
   }
   var wins = trades.filter(function(t){return t.r>0;}).length;
@@ -7119,12 +7312,11 @@ function renderBacktestResults(trades, sym, days, src) {
   var rows=trades.map(function(t,i){
     var rc=t.r>0?'up':'dn';
     var f=function(v){return v>=1?'$'+v.toFixed(3):'$'+v.toFixed(5);};
-    return '<tr><td class="tl">'+(i+1)+'</td><td class="tl" style="color:#484f58;">'+t.date+'</td>'
-      +'<td>'+f(t.entry)+'</td><td>'+f(t.exit)+'</td>'
-      +'<td style="color:#f85149;">'+f(t.sl)+'</td><td style="color:#3fb950;">'+f(t.tp)+'</td>'
+    return '<tr><td class="tl"><details><summary>#'+(i+1)+' · '+sourceEsc(t.result || 'TRADE')+'</summary><div class="muted" style="font-size:10px;line-height:1.7;margin-top:4px;">SL: '+f(t.sl)+' · TP: '+f(t.tp)+'<br>Entry: '+f(t.entry)+' · Exit: '+f(t.exit)+'</div></details></td><td class="tl" style="color:#484f58;">'+sourceEsc(t.date || '--')+'</td>'
+      +'<td class="tl" style="color:#484f58;">'+sourceEsc(t.exitDate || '--')+'</td><td>'+f(t.entry)+'</td><td>'+f(t.exit)+'</td>'
       +'<td class="'+rc+'">'+(t.r>=0?'+':'')+t.r.toFixed(2)+'R</td>'
-      +'<td><span class="badge '+(t.result==='WIN'?'bg':'br')+'">'+t.result+'</span></td>'
-      +'<td class="tl" style="color:#484f58;font-size:10px;">'+t.reason+'</td></tr>';
+      +'<td><span class="badge '+(t.result==='WIN'?'bg':t.result==='LOSS'?'br':'bn')+'">'+sourceEsc(t.result || '--')+'</span></td>'
+      +'<td class="tl" style="color:#484f58;font-size:10px;">'+sourceEsc(t.reason || '--')+'</td></tr>';
   }).join('');
   document.getElementById('bt-trade-log').innerHTML=rows;
   sLog('Backtest: '+sym+' | '+trades.length+' signals | WR:'+wr+'% | '+( netR>=0?'+':'')+netR.toFixed(1)+'R');
@@ -7171,7 +7363,7 @@ function tgAlert(type, pair, data) {
       + 'Funding: ' + (data.fund !== undefined ? (data.fund*100).toFixed(4)+'%' : '?') + '\n'
       + 'OI: ' + (data.oi !== undefined ? (data.oi>=0?'+':'')+data.oi.toFixed(1)+'%' : '?') + '\n'
       + '24h: ' + (data.chg !== undefined ? (data.chg>=0?'+':'')+data.chg.toFixed(2)+'%' : '?') + '\n'
-      + 'GoCharting: https://gocharting.com/?ticker=BINANCE:' + pair + 'USDT&interval=240';
+      + 'TradingView: https://www.tradingview.com/chart/?symbol=BITGET%3A' + pair + 'USDT&interval=240';
   } else if(type === 'PAPER_FILL') {
     var fillDir = data.dir || 'LONG';
     msg = '<b>PAPER ORDER FILLED</b>\n'
