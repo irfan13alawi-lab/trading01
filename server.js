@@ -49,7 +49,7 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 4;
+const PAPER_SCHEMA_VERSION = 5;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -629,6 +629,7 @@ function defaultPaperState() {
     lastSavedAt: null,
     nextId: 0,
     oiSnapshot: {},
+    oiHistory: {},
     activeTrades: [],
     closedTrades: [],
     invalidatedTrades: [],
@@ -664,6 +665,12 @@ function loadPaperState() {
       ...parsed,
       settings: {...defaultPaperState().settings, ...(parsed.settings || {})},
       oiSnapshot: parsed.oiSnapshot || {},
+      oiHistory: Object.fromEntries(Object.entries(parsed.oiHistory || {}).map(([symbol, rows]) => [
+        symbol,
+        (Array.isArray(rows) ? rows : []).filter(row => row && Number.isFinite(Number(row.ts)) &&
+          Number(row.ts) > 0 && Number.isFinite(Number(row.oiUSD)) && Number(row.oiUSD) > 0)
+          .slice(-672)
+      ])),
       activeTrades: Array.isArray(parsed.activeTrades) ? parsed.activeTrades.map(normalisePaperTrade) : [],
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades.map(normalisePaperTrade) : [],
       invalidatedTrades: Array.isArray(parsed.invalidatedTrades) ? parsed.invalidatedTrades : [],
@@ -1136,20 +1143,31 @@ function buildPaperPairs(payload) {
     const fund = paperNumber(row.fundingRate || row.fundingRate24h);
     const oiUnits = paperNumber(row.holdingAmount || row.openInterest);
     const oiUsd = oiUnits * price;
+    const oiAvailable = paperFieldPresent(row.holdingAmount) || paperFieldPresent(row.openInterest);
     const previousOi = paperNumber(paperState.oiSnapshot[sym]);
-    const oi = previousOi > 0 ? ((oiUsd - previousOi) / previousOi) * 100 : 0;
-    paperState.oiSnapshot[sym] = oiUsd;
-    const sc = paperScore(chg, fund, oi, previousOi > 0);
+    const oiReady = oiAvailable && oiUsd > 0 && previousOi > 0;
+    const oi = oiReady ? ((oiUsd - previousOi) / previousOi) * 100 : 0;
+    if (oiAvailable && oiUsd > 0) {
+      paperState.oiSnapshot[sym] = oiUsd;
+      const history = paperState.oiHistory[sym] || (paperState.oiHistory[sym] = []);
+      const ts = Date.parse(dataAt) || Date.now();
+      const sample = {ts, oiUSD: oiUsd, source: payload && payload._nexoraSource || 'Futures ticker'};
+      const last = history[history.length - 1];
+      if (last && Number(last.ts) === ts) history[history.length - 1] = sample;
+      else if (!last || Number(last.ts) < ts) history.push(sample);
+      paperState.oiHistory[sym] = history.slice(-672);
+    }
+    const sc = paperScore(chg, fund, oi, oiReady);
     const pair = {
       sym, price, chg,
       volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
-      fund, oi, oiUSD: oiUsd, oiReady: previousOi > 0,
+      fund, oi, oiUSD: oiAvailable && oiUsd > 0 ? oiUsd : null, oiReady,
       fundingAvailable: paperFieldPresent(row.fundingRate) || paperFieldPresent(row.fundingRate24h),
-      oiAvailable: paperFieldPresent(row.holdingAmount) || paperFieldPresent(row.openInterest),
+      oiAvailable,
       volumeAvailable: paperFieldPresent(row.quoteVolume) || paperFieldPresent(row.usdtVolume) ||
         paperFieldPresent(row.quoteVolume24h),
       sc: 0,
-      tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: previousOi > 0 ? 'FULL' : 'PARTIAL',
+      tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: oiReady ? 'FULL' : 'PARTIAL',
       dataAt, source: payload && payload._nexoraSource || 'Bitget Futures'
     };
     pairs[sym] = pair;
@@ -3783,6 +3801,38 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperHistory(requestUrl.searchParams)));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/oi-history') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    const symbol = String(requestUrl.searchParams.get('symbol') || '').toUpperCase();
+    const hours = Number(requestUrl.searchParams.get('hours') || 24);
+    if (!/^[A-Z0-9]{2,15}$/.test(symbol) || !PAPER_SYMBOLS.includes(symbol)) {
+      send(res, 400, JSON.stringify({ok: false, error: 'Unsupported futures symbol'}));
+      return;
+    }
+    if (hours !== 24 && hours !== 168) {
+      send(res, 400, JSON.stringify({ok: false, error: 'hours must be 24 or 168'}));
+      return;
+    }
+    const from = Date.now() - hours * 60 * 60 * 1000;
+    const samples = (paperState.oiHistory[symbol] || []).filter(row => Number(row.ts) >= from);
+    const first = samples[0] && Number(samples[0].oiUSD);
+    const last = samples[samples.length - 1] && Number(samples[samples.length - 1].oiUSD);
+    send(res, 200, JSON.stringify({
+      ok: true,
+      symbol,
+      hours,
+      interval: '15M scan observations (only when upstream supplies OI)',
+      source: 'VPS persisted futures ticker observations',
+      samples,
+      deltaPct: samples.length >= 2 && first > 0 ? Number(((last - first) / first * 100).toFixed(4)) : null,
+      from: samples.length ? samples[0].ts : null,
+      to: samples.length ? samples[samples.length - 1].ts : null
+    }));
     return;
   }
   if (requestUrl.pathname === '/paper/stats') {

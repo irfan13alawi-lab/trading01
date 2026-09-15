@@ -640,8 +640,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </div>
   </div>
   <div class="g2">
-    <div class="kpi"><div class="l">Portfolio Beta</div><div class="v" id="port-beta">--</div></div>
-    <div class="card"><div class="card-t"><i class="fa-solid fa-chart-column"></i> Regime History</div><div class="chart-sm" id="c-rhist"></div></div>
+    <div class="kpi"><div class="l">Net Open Paper Notional</div><div class="v" id="port-beta">--</div></div>
+    <div class="card"><div class="card-t"><i class="fa-solid fa-chart-column"></i> BTC 7D Realized Volatility (Annualized)</div><div class="chart-sm" id="c-rhist"></div></div>
   </div>
 </div>
 
@@ -669,7 +669,13 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div id="fund-ladder"></div>
   </div>
   <div class="card">
-    <div class="card-h"><div class="card-t"><i class="fa-solid fa-chart-line"></i> OI History</div><span class="muted" id="oi-history-status">Select a row</span></div>
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-chart-line"></i> OI History
+        <button class="btn btn-sm btn-blue" id="oi-range-24" onclick="setOIHistoryHours(24)">24H</button>
+        <button class="btn btn-sm" id="oi-range-168" onclick="setOIHistoryHours(168)">7D</button>
+      </div>
+      <span class="muted" id="oi-history-status">Select a row</span>
+    </div>
     <div class="chart-sm" id="oi-history-chart"></div>
   </div>
 
@@ -2196,6 +2202,8 @@ function renderPump() {
   document.getElementById('gems-l').innerHTML = gems.map(function(p,i){return gemRow(p,i+1);}).join('') || '<div class="ld"><span>Run scan</span></div>';
 }
 
+var WL_SPARK_RENDER_SEQ = 0;
+
 function renderWL() {
   var html = [];
   for (var idx = 0; idx < G.wl.length; idx++) {
@@ -2290,35 +2298,46 @@ function renderWL() {
   if (!html.length) html.push('<div style="text-align:center;color:#484f58;padding:30px;">No setups. Click + Add.</div>');
   document.getElementById('wl-body').innerHTML = html.join('');
 
-  // Mini sparklines - only if live data available
-  setTimeout(function() {
-    for (var i = 0; i < G.wl.length; i++) {
-      var el = document.getElementById('mini-' + i);
-      if (!el) continue;
-      var p2 = fp(G.wl[i].sym.replace('USDT',''));
-      if (!p2 || !p2.price || !p2.chg) {
-        el.innerHTML = '<div style="height:70px;display:flex;align-items:center;justify-content:center;color:#484f58;font-size:10px;">Run scan for live chart</div>';
-        continue;
-      }
-      var base2 = p2.price * (1 - p2.chg / 100);
-      var sd = [];
-      for (var j = 0; j < 21; j++) {
-        sd.push(base2 + (p2.price - base2) * (j / 20) + (Math.random() - 0.5) * p2.price * 0.01);
-      }
-      hcChart('mini-' + i, {
-        chart: {backgroundColor:'transparent', margin:[2,0,2,0], style:{fontFamily:'inherit'}},
-        title: {text:null},
-        xAxis: {visible:false},
-        yAxis: {visible:false, min: Math.min.apply(null,sd)*0.998, max: Math.max.apply(null,sd)*1.002},
-        tooltip: {enabled:false}, legend: {enabled:false}, credits: {enabled:false},
-        series: [{
-          type: 'area', data: sd,
-          color: p2.chg >= 0 ? '#3fb950' : '#f85149',
-          fillColor: {linearGradient:{x1:0,y1:0,x2:0,y2:1}, stops: [[0, p2.chg>=0?'rgba(63,185,80,.25)':'rgba(248,81,73,.25)'],[1,'rgba(0,0,0,0)']]},
-          lineWidth: 1.5, marker: {enabled:false}, enableMouseTracking: false
-        }]
-      });
+  // Mini sparklines use real completed Bitget 1H candles; never synthesize a path.
+  Object.keys(G.charts).forEach(function(key) {
+    if (key.indexOf('wlMini') === 0 && G.charts[key]) {
+      try { G.charts[key].destroy(); } catch(e) {}
+      delete G.charts[key];
     }
+  });
+  var sparkSeq = ++WL_SPARK_RENDER_SEQ;
+  G.wl.slice().forEach(function(item, index) {
+    fetchBitgetCandles(String(item.sym || '').replace('USDT',''), '1H', 24).then(function(rows) {
+      if (sparkSeq !== WL_SPARK_RENDER_SEQ) return;
+      var el = document.getElementById('mini-' + index);
+      var candles = Array.isArray(rows) ? rows.filter(function(row) {
+        return Array.isArray(row) && Number.isFinite(Number(row[0])) && Number(row[4]) > 0;
+      }) : [];
+      if (!el) return;
+      if (candles.length < 2) {
+        el.innerHTML = '<div style="height:70px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
+        return;
+      }
+      var values = candles.map(function(row) { return Number(row[4]); });
+      var low = Math.min.apply(null, values), high = Math.max.apply(null, values);
+      var pad = (high - low) * 0.05 || Math.abs(high) * 0.005;
+      var positive = values[values.length - 1] >= values[0];
+      G.charts['wlMini' + index] = hcChart('mini-' + index, {
+        chart:{backgroundColor:'transparent',margin:[2,0,2,0],style:{fontFamily:'inherit'}},
+        title:{text:null},xAxis:{visible:false},yAxis:{visible:false,min:low-pad,max:high+pad},
+        tooltip:{enabled:true,backgroundColor:'#0d1117',style:{color:'#c9d1d9',fontSize:'9px'},formatter:function(){return '<b>'+new Date(this.x).toLocaleString('id-ID')+'</b><br>Close: '+Number(this.y).toPrecision(7);}},
+        legend:{enabled:false},credits:{enabled:false},
+        series:[{type:'area',name:'Bitget 1H close',data:candles.map(function(row){return [Number(row[0]),Number(row[4])];}),color:positive?'#3fb950':'#f85149',fillColor:{linearGradient:{x1:0,y1:0,x2:0,y2:1},stops:[[0,positive?'rgba(63,185,80,.25)':'rgba(248,81,73,.25)'],[1,'rgba(0,0,0,0)']]},lineWidth:1.5,marker:{enabled:false}}]
+      });
+    }).catch(function() {
+      if (sparkSeq !== WL_SPARK_RENDER_SEQ) return;
+      var el = document.getElementById('mini-' + index);
+      if (el) el.innerHTML = '<div style="height:70px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
+    });
+  });
+
+  // Keep the existing near-entry notification separate from asynchronous chart loading.
+  setTimeout(function() {
     for(var ni=0;ni<G.wl.length;ni++) {
       var wp=fp(G.wl[ni].sym.replace('USDT',''));
       if(wp && wp.price && G.wl[ni].en && G.wl[ni].en !== '--') {
@@ -2832,6 +2851,12 @@ function resetEq() {
   renderEquity();
 }
 
+var REGIME_HISTORY_CACHE = {ts:0,key:'',data:null};
+var REGIME_HISTORY_PENDING = null;
+var CORRELATION_CACHE = {ts:0,key:'',result:null};
+var CORRELATION_PENDING = null;
+var CORRELATION_RENDER_SEQ = 0;
+
 function renderRegime() {
   var pairs = G.pairs;
   if (!pairs || !pairs.length) return;
@@ -2862,63 +2887,203 @@ function renderRegime() {
     series:[{name:'Vol',data:top.map(function(p){return {y:Math.abs(p.chg),color:Math.abs(p.chg)>4?'#f85149':Math.abs(p.chg)>1.5?'#3fb950':'#f0883e'};})}],
     credits:{enabled:false}
   });
-  var rh = []; var v = 50;
-  for (var i=30; i>=0; i--) {
-    var d = new Date(); d.setDate(d.getDate()-i);
-    v = Math.max(10, Math.min(90, v+(Math.random()-0.5)*8));
-    rh.push([d.getTime(), parseFloat(v.toFixed(1))]);
+  renderRegimeHistory();
+}
+
+function drawRegimeHistory(data) {
+  var host = document.getElementById('c-rhist');
+  if (!host) return;
+  if (!data || data.length < 3) {
+    clearRegimeHistory('Belum cukup candle harian tertutup untuk menghitung volatilitas historis.');
+    return;
   }
-  if (G.charts.rhist) { try{G.charts.rhist.destroy();}catch(e){} }
+  if (G.charts.rhist) { try { G.charts.rhist.destroy(); } catch(e) {} }
+  host.innerHTML = '';
   G.charts.rhist = hcChart('c-rhist', {
-    chart:{backgroundColor:'transparent',margin:[10,10,30,40],style:{fontFamily:'inherit'}},title:{text:null},
+    chart:{backgroundColor:'transparent',margin:[10,10,30,48],style:{fontFamily:'inherit'}},title:{text:null},
     xAxis:{type:'datetime',lineColor:'#21262d',labels:{style:{color:'#484f58',fontSize:'9px'}}},
-    yAxis:{min:0,max:100,title:null,gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'9px'}},
-      plotBands:[{from:0,to:30,color:'rgba(63,185,80,.03)',label:{text:'Ranging',style:{color:'#3fb950',fontSize:'9px'}}},{from:30,to:70,color:'rgba(240,136,62,.02)',label:{text:'Trending',style:{color:'#f0883e',fontSize:'9px'}}},{from:70,to:100,color:'rgba(248,81,73,.03)',label:{text:'Volatile',style:{color:'#f85149',fontSize:'9px'}}}]},
-    tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'}},
-    series:[{type:'areaspline',data:rh,color:'#bc8cff',fillColor:{linearGradient:{x1:0,y1:0,x2:0,y2:1},stops:[[0,'rgba(188,140,255,.18)'],[1,'rgba(188,140,255,0)']]},lineWidth:1.5,marker:{enabled:false}}],
+    yAxis:{min:0,title:{text:'% annualized',style:{color:'#8b949e',fontSize:'9px'}},gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'9px'},format:'{value}%'}},
+    tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){return '<b>'+new Date(this.x).toLocaleDateString('id-ID')+'</b><br>7D realized volatility: '+Number(this.y).toFixed(2)+'% annualized';}},
+    series:[{type:'areaspline',name:'7D realized volatility',data:data,color:'#bc8cff',fillColor:{linearGradient:{x1:0,y1:0,x2:0,y2:1},stops:[[0,'rgba(188,140,255,.18)'],[1,'rgba(188,140,255,0)']]},lineWidth:1.5,marker:{enabled:false}}],
     legend:{enabled:false},credits:{enabled:false}
   });
+}
+
+function clearRegimeHistory(message) {
+  if (G.charts.rhist) { try { G.charts.rhist.destroy(); } catch(e) {} G.charts.rhist = null; }
+  var host = document.getElementById('c-rhist');
+  if (host) host.innerHTML = '<div class="ld" style="padding:45px 10px;">'+message+'</div>';
+}
+
+function renderRegimeHistory() {
+  var host = document.getElementById('c-rhist');
+  if (!host) return;
+  var sourceKey = marketLabel();
+  if (!marketIsBitget()) {
+    clearRegimeHistory('Riwayat volatilitas harian hanya tersedia dari candle Bitget yang dipilih.');
+    return;
+  }
+  if (REGIME_HISTORY_CACHE.data && REGIME_HISTORY_CACHE.key === sourceKey && Date.now() - REGIME_HISTORY_CACHE.ts < 300000) {
+    drawRegimeHistory(REGIME_HISTORY_CACHE.data);
+    return;
+  }
+  if (REGIME_HISTORY_PENDING && REGIME_HISTORY_PENDING.key === sourceKey) return;
+  host.innerHTML = '<div class="ld" style="padding:45px 10px;">Memuat candle BTC 1D aktual…</div>';
+  var pending = fetchBitgetCandles('BTC', '1D', 40).then(function(rows) {
+    var day = 24 * 60 * 60 * 1000;
+    var candles = rows.filter(function(row) {
+      return Number(row[0]) + day <= Date.now() && Number(row[4]) > 0;
+    });
+    var data = [];
+    for (var i = 7; i < candles.length; i++) {
+      var returns = [];
+      for (var j = i - 6; j <= i; j++) {
+        var previous = Number(candles[j - 1][4]), close = Number(candles[j][4]);
+        if (previous > 0 && close > 0) returns.push(Math.log(close / previous));
+      }
+      if (returns.length !== 7) continue;
+      var mean = returns.reduce(function(sum, value){return sum + value;}, 0) / returns.length;
+      var variance = returns.reduce(function(sum, value){return sum + Math.pow(value - mean, 2);}, 0) / returns.length;
+      data.push([Number(candles[i][0]), Number((Math.sqrt(variance * 365) * 100).toFixed(3))]);
+    }
+    if (marketLabel() !== sourceKey) return;
+    REGIME_HISTORY_CACHE = {ts:Date.now(),key:sourceKey,data:data};
+    drawRegimeHistory(data);
+  }).catch(function() {
+    if (marketLabel() === sourceKey) clearRegimeHistory('Data candle BTC 1D tidak tersedia; grafik tidak dibuat dari perkiraan.');
+  }).then(function(){if(REGIME_HISTORY_PENDING&&REGIME_HISTORY_PENDING.promise===pending)REGIME_HISTORY_PENDING=null;});
+  REGIME_HISTORY_PENDING = {key:sourceKey,promise:pending};
+}
+
+function correlationReturnsForSymbol(symbol) {
+  return fetchBitgetCandles(symbol, '1D', 33).then(function(rows) {
+    var day = 24 * 60 * 60 * 1000;
+    var candles = rows.filter(function(row){return Number(row[0]) + day <= Date.now() && Number(row[4]) > 0;});
+    var returns = {};
+    for (var i=1; i<candles.length; i++) {
+      var previous = Number(candles[i-1][4]), close = Number(candles[i][4]);
+      if (previous > 0 && close > 0) returns[Number(candles[i][0])] = Math.log(close / previous);
+    }
+    return {symbol:symbol,returns:returns};
+  });
+}
+
+function pearsonCorrelation(xs, ys) {
+  if (!xs || !ys || xs.length !== ys.length || xs.length < 10) return null;
+  var meanX = xs.reduce(function(sum,value){return sum+value;},0)/xs.length;
+  var meanY = ys.reduce(function(sum,value){return sum+value;},0)/ys.length;
+  var numerator = 0, sumX = 0, sumY = 0;
+  for (var i=0; i<xs.length; i++) {
+    var dx=xs[i]-meanX, dy=ys[i]-meanY;
+    numerator += dx*dy; sumX += dx*dx; sumY += dy*dy;
+  }
+  var denominator = Math.sqrt(sumX*sumY);
+  return denominator > 0 ? numerator/denominator : null;
+}
+
+function loadCorrelationMatrix(syms) {
+  var key = marketLabel() + ':' + syms.join(',');
+  if (CORRELATION_CACHE.key === key && Date.now()-CORRELATION_CACHE.ts < 300000) return Promise.resolve(CORRELATION_CACHE.result);
+  if (CORRELATION_PENDING && CORRELATION_PENDING.key === key) return CORRELATION_PENDING.promise;
+  var promise = Promise.all(syms.map(function(symbol){return correlationReturnsForSymbol(symbol).catch(function(){return {symbol:symbol,returns:{}};});})).then(function(items) {
+    var lookup = {};
+    items.forEach(function(item){lookup[item.symbol]=item.returns;});
+    var correlations = {}, samples = {};
+    syms.forEach(function(a, i) { syms.forEach(function(b, j) {
+      var pairKey = a < b ? a+'|'+b : b+'|'+a;
+      if (i === j) {
+        var ownCount = Object.keys(lookup[a] || {}).length;
+        correlations[pairKey] = ownCount >= 10 ? 1 : null;
+        samples[pairKey] = ownCount;
+        return;
+      }
+      var dates = Object.keys(lookup[a] || {}).filter(function(ts){return Object.prototype.hasOwnProperty.call(lookup[b] || {},ts);}).sort(function(x,y){return Number(x)-Number(y);});
+      var corr = pearsonCorrelation(dates.map(function(ts){return lookup[a][ts];}), dates.map(function(ts){return lookup[b][ts];}));
+      correlations[pairKey] = corr == null ? null : Math.max(-1,Math.min(1,corr));
+      samples[pairKey] = dates.length;
+    });});
+    var result = {correlations:correlations,samples:samples,returns:lookup};
+    CORRELATION_CACHE = {ts:Date.now(),key:key,result:result};
+    return result;
+  });
+  CORRELATION_PENDING = {key:key,promise:promise};
+  return promise.then(function(result){if(CORRELATION_PENDING&&CORRELATION_PENDING.promise===promise)CORRELATION_PENDING=null;return result;},function(error){if(CORRELATION_PENDING&&CORRELATION_PENDING.promise===promise)CORRELATION_PENDING=null;throw error;});
 }
 
 function renderCorr() {
   var pairs = G.pairs;
   if (!pairs || !pairs.length) return;
-  var syms = ['BTC','ETH','SOL','BNB','XRP','ADA'];
-  var cd = [];
-  for (var i=0; i<syms.length; i++) {
-    for (var j=0; j<syms.length; j++) {
-      var pi = fp(syms[i]), pj = fp(syms[j]);
-      var corr = i===j ? 1 : (!pi||!pj) ? 0.5 : Math.max(-1, Math.min(1, 1-Math.abs(nn(pi.chg)-nn(pj.chg))/10));
-      cd.push([j, i, parseFloat(corr.toFixed(2))]);
-    }
-  }
-  var beta = G.wl.filter(function(w){return w.dir==='LONG';}).length * 0.02;
-  var bel = document.getElementById('port-beta'); bel.textContent = 'Beta: ' + beta.toFixed(2);
-  bel.style.color = beta>0.06?'#f85149':beta>0.04?'#f0883e':'#3fb950';
-  var ca = document.getElementById('corr-alert');
   var active = G.paperStatus && Array.isArray(G.paperStatus.activeTrades) ? G.paperStatus.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';}) : [];
-  var activeSyms = active.map(function(t){return String(t.sym || '').toUpperCase();});
-  var highCorr = [];
-  for(var ai=0; ai<activeSyms.length; ai++) for(var aj=ai+1; aj<activeSyms.length; aj++) {
-    var ap = fp(activeSyms[ai]), aq = fp(activeSyms[aj]);
-    if(!ap || !aq) continue;
-    var acorr = Math.max(-1, Math.min(1, 1-Math.abs(nn(ap.chg)-nn(aq.chg))/10));
-    if(acorr >= 0.75) highCorr.push(activeSyms[ai] + '/' + activeSyms[aj] + ' ' + acorr.toFixed(2));
+  var activeSymbols = active.map(function(t){return String(t.sym || '').toUpperCase().replace(/USDT$/,'');}).filter(function(s){return /^[A-Z0-9]{2,15}$/.test(s);});
+  var syms = ['BTC','ETH','SOL','BNB','XRP','ADA'];
+  activeSymbols.forEach(function(sym){if(syms.indexOf(sym)<0 && syms.length<12) syms.push(sym);});
+  var renderSeq = ++CORRELATION_RENDER_SEQ;
+  var host = document.getElementById('c-corr');
+  var alert = document.getElementById('corr-alert');
+  var netEl = document.getElementById('port-beta');
+  if (netEl) {
+    var net = active.reduce(function(sum, trade){
+      var contracts = Number(trade.remainingContracts != null ? trade.remainingContracts : trade.contracts) || 0;
+      var price = Number(trade.currentPrice || trade.entryActual || trade.entryLimit) || 0;
+      var notional = Math.abs(contracts * price);
+      return sum + (trade.dir === 'LONG' ? notional : trade.dir === 'SHORT' ? -notional : 0);
+    }, 0);
+    netEl.textContent = (net >= 0 ? '+' : '−') + '$' + Math.abs(net).toLocaleString('en-US',{maximumFractionDigits:2});
+    netEl.style.color = net > 0 ? '#3fb950' : net < 0 ? '#f85149' : '#8b949e';
+    netEl.title = 'Net notional from open VPS paper positions only; this is not portfolio beta.';
   }
-  var corrWarning = highCorr.length ? ' · WARN high corr active: ' + highCorr.slice(0,3).join(', ') : '';
-  if (beta>0.06) { ca.textContent = 'WARN Beta '+beta.toFixed(2)+' > 6% -- new entries blocked'+corrWarning; ca.style.background='rgba(248,81,73,.08)'; ca.style.color='#f85149'; }
-  else if (beta>0.04 || highCorr.length) { ca.textContent = (highCorr.length ? 'WARN' : '!!')+' Beta '+beta.toFixed(2)+' -- '+(highCorr.length?'correlated exposure':'near limit (4%)')+corrWarning; ca.style.background='rgba(240,136,62,.08)'; ca.style.color='#f0883e'; }
-  else { ca.textContent = 'OK Beta '+beta.toFixed(2)+' -- safe (<4%)'; ca.style.background='rgba(63,185,80,.05)'; ca.style.color='#3fb950'; }
-  if (G.charts.corr) { try{G.charts.corr.destroy();}catch(e){} }
-  G.charts.corr = hcChart('c-corr', {
-    chart:{type:'heatmap',backgroundColor:'transparent',margin:[10,10,40,55],style:{fontFamily:'inherit'}},title:{text:null},
-    xAxis:{categories:syms,labels:{style:{color:'#8b949e',fontSize:'9px'}},lineWidth:0},
-    yAxis:{categories:syms,title:null,reversed:true,labels:{style:{color:'#8b949e',fontSize:'9px'}},gridLineWidth:0},
-    colorAxis:{min:-1,max:1,stops:[[0,'#f85149'],[0.5,'#21262d'],[1,'#3fb950']],labels:{style:{color:'#8b949e',fontSize:'9px'}}},
-    legend:{enabled:false},
-    tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){return '<b>'+syms[this.point.x]+' x '+syms[this.point.y]+'</b><br>Corr: '+this.point.value.toFixed(2);}},
-    series:[{name:'Corr',data:cd,dataLabels:{enabled:true,color:'#c9d1d9',style:{fontSize:'9px',fontWeight:'600',textOutline:'none'},formatter:function(){return this.point.value.toFixed(1);}},borderColor:'#07090f',borderWidth:1}],
-    credits:{enabled:false}
+  if (!marketIsBitget()) {
+    if (G.charts.corr) { try { G.charts.corr.destroy(); } catch(e) {} G.charts.corr = null; }
+    if (host) host.innerHTML = '<div class="ld" style="padding:45px 10px;">Korelasi membutuhkan seri candle harian Bitget; data exchange ini tidak dicampur.</div>';
+    if (alert) alert.textContent = 'Correlation unavailable for selected source';
+    return;
+  }
+  var matrixKey = marketLabel()+':'+syms.join(',');
+  if (host && !(CORRELATION_CACHE.key === matrixKey && Date.now()-CORRELATION_CACHE.ts < 300000)) {
+    host.innerHTML = '<div class="ld" style="padding:45px 10px;">Menghitung Pearson dari return harian aktual…</div>';
+  }
+  loadCorrelationMatrix(syms).then(function(result) {
+    if (renderSeq !== CORRELATION_RENDER_SEQ || !host) return;
+    var data = [], missing = false;
+    syms.forEach(function(a, i){syms.forEach(function(b, j){
+      var pairKey = a < b ? a+'|'+b : b+'|'+a;
+      var value = result.correlations[pairKey];
+      if (value == null) missing = true;
+      data.push([j,i,value == null ? null : Number(value.toFixed(3))]);
+    });});
+    var highCorr = [];
+    for (var ai=0; ai<active.length; ai++) for (var aj=ai+1; aj<active.length; aj++) {
+      if (active[ai].dir !== active[aj].dir) continue;
+      var a = String(active[ai].sym || '').toUpperCase().replace(/USDT$/,'');
+      var b = String(active[aj].sym || '').toUpperCase().replace(/USDT$/,'');
+      if (syms.indexOf(a)<0 || syms.indexOf(b)<0) continue;
+      var pairKey = a < b ? a+'|'+b : b+'|'+a;
+      var corr = result.correlations[pairKey];
+      if (corr != null && corr >= 0.75) highCorr.push(a+'/'+b+' '+corr.toFixed(2)+' (n='+result.samples[pairKey]+')');
+    }
+    var outsideMatrix = active.some(function(t){return syms.indexOf(String(t.sym||'').toUpperCase().replace(/USDT$/,''))<0;});
+    if (alert) {
+      if (highCorr.length) { alert.textContent = 'WARN same-direction correlation ≥0.75: '+highCorr.slice(0,3).join(', ')+' · 30D daily returns'; alert.style.color='#f85149'; }
+      else if (missing || outsideMatrix) { alert.textContent = 'Correlation sample incomplete; diversification not confirmed · 30D daily returns'; alert.style.color='#e3b341'; }
+      else { alert.textContent = 'No measured same-direction pair ≥0.75 · Pearson, 30D daily returns'; alert.style.color='#8b949e'; }
+    }
+    if (G.charts.corr) { try { G.charts.corr.destroy(); } catch(e) {} }
+    host.innerHTML = '';
+    G.charts.corr = hcChart('c-corr', {
+      chart:{type:'heatmap',backgroundColor:'transparent',margin:[10,10,40,55],style:{fontFamily:'inherit'}},title:{text:null},
+      xAxis:{categories:syms,labels:{style:{color:'#8b949e',fontSize:'9px'}},lineWidth:0},
+      yAxis:{categories:syms,title:null,reversed:true,labels:{style:{color:'#8b949e',fontSize:'9px'}},gridLineWidth:0},
+      colorAxis:{min:-1,max:1,stops:[[0,'#f85149'],[0.5,'#21262d'],[1,'#3fb950']],labels:{style:{color:'#8b949e',fontSize:'9px'}}},
+      legend:{enabled:false},
+      tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){return '<b>'+syms[this.point.x]+' × '+syms[this.point.y]+'</b><br>Pearson: '+(this.point.value == null ? 'N/A (<10 common returns)' : this.point.value.toFixed(2));}},
+      series:[{name:'Pearson correlation',data:data,dataLabels:{enabled:true,color:'#c9d1d9',style:{fontSize:'9px',fontWeight:'600',textOutline:'none'},formatter:function(){return this.point.value == null ? 'N/A' : this.point.value.toFixed(1);}},borderColor:'#07090f',borderWidth:1}],
+      credits:{enabled:false}
+    });
+  }).catch(function() {
+    if (renderSeq !== CORRELATION_RENDER_SEQ || !host) return;
+    if (G.charts.corr) { try { G.charts.corr.destroy(); } catch(e) {} G.charts.corr = null; }
+    host.innerHTML = '<div class="ld" style="padding:45px 10px;">Candle harian tidak tersedia; korelasi tidak diestimasi.</div>';
+    if (alert) alert.textContent = 'Correlation data unavailable';
   });
 }
 
@@ -3623,26 +3788,71 @@ function fetchMTFFromBitget(sym) {
   }).catch(function(){return {ts:Date.now(),p15m:null,p30m:null,p1h:null,p4h:null,p7d:null};});
 }
 
-function showOIHistory(sym) {
+var OI_HISTORY_ACTIVE_SYMBOL = '';
+var OI_HISTORY_ACTIVE_HOURS = 24;
+var OI_HISTORY_VIEW_SEQ = 0;
+
+function setOIHistoryHours(hours) {
+  OI_HISTORY_ACTIVE_HOURS = Number(hours) === 168 ? 168 : 24;
+  if (OI_HISTORY_ACTIVE_SYMBOL) showOIHistory(OI_HISTORY_ACTIVE_SYMBOL, OI_HISTORY_ACTIVE_HOURS);
+}
+
+function drawOIHistory(sym, hours, history, source, errorMessage) {
   var host = document.getElementById('oi-history-chart');
   var status = document.getElementById('oi-history-status');
-  var history = OI_HISTORY[String(sym || '').toUpperCase()] || [];
-  if(!host) return;
-  if(G.charts.oiHistory) { try{G.charts.oiHistory.destroy();}catch(e){} }
-  if(history.length < 2) {
-    host.innerHTML = '<div class="ld" style="padding:45px 10px;">Butuh minimal 2 snapshot OI. Biarkan dashboard mengumpulkan data.</div>';
-    if(status) status.textContent = String(sym || '--') + ' · ' + history.length + ' snapshot';
+  if (!host) return;
+  if (G.charts.oiHistory) { try { G.charts.oiHistory.destroy(); } catch(e) {} }
+  var first = history.length >= 2 ? Number(history[0].oi) : 0;
+  var last = history.length >= 2 ? Number(history[history.length-1].oi) : 0;
+  var delta = first > 0 ? ((last-first)/first)*100 : null;
+  var activeButton = document.getElementById(hours === 168 ? 'oi-range-168' : 'oi-range-24');
+  var inactiveButton = document.getElementById(hours === 168 ? 'oi-range-24' : 'oi-range-168');
+  if (activeButton) activeButton.classList.add('btn-blue');
+  if (inactiveButton) inactiveButton.classList.remove('btn-blue');
+  if (history.length < 2) {
+    host.innerHTML = '<div class="ld" style="padding:45px 10px;">'+(errorMessage || ('Butuh minimal 2 snapshot OI aktual dalam '+(hours===168?'7 hari':'24 jam')+'. Data dikumpulkan VPS pada scan berikutnya.'))+'</div>';
+    if (status) status.textContent = String(sym || '--')+' · '+(hours===168?'7D':'24H')+' · '+history.length+' snapshot'+(source?' · '+source:'');
     return;
   }
   host.innerHTML = '';
-  if(status) status.textContent = String(sym || '--') + ' · ' + history.length + ' snapshot · ' + (getOIDelta(sym) == null ? '--' : (getOIDelta(sym)>=0?'+':'') + getOIDelta(sym).toFixed(2) + '%');
+  if (status) status.textContent = String(sym || '--')+' · '+(hours===168?'7D':'24H')+' · '+history.length+' snapshots · '+(delta==null?'--':(delta>=0?'+':'')+delta.toFixed(2)+'%')+(source?' · '+source:'');
   G.charts.oiHistory = hcChart('oi-history-chart', {
     chart:{backgroundColor:'transparent',margin:[10,10,24,55],style:{fontFamily:'inherit'}},title:{text:null},
     xAxis:{type:'datetime',labels:{style:{color:'#484f58',fontSize:'9px'}},lineColor:'#21262d'},
     yAxis:{title:{text:'OI USD',style:{color:'#8b949e',fontSize:'9px'}},gridLineColor:'#21262d',labels:{style:{color:'#8b949e',fontSize:'9px'},formatter:function(){return '$'+(this.value/1e9).toFixed(1)+'B';}}},
     legend:{enabled:false},tooltip:{shared:true,backgroundColor:'#0d1117',style:{color:'#c9d1d9',fontSize:'10px'},formatter:function(){return '<b>'+fmtDate(this.x)+'</b><br>OI: $'+(this.y/1e9).toFixed(3)+'B';}},
-    series:[{type:'areaspline',name:String(sym || '').toUpperCase()+' OI',data:history.map(function(item){return [item.ts,item.oi];}),color:'#58a6ff',fillColor:'rgba(88,166,255,.12)',lineWidth:1.5,marker:{enabled:false}}],credits:{enabled:false}
+    series:[{type:'areaspline',name:String(sym || '').toUpperCase()+' OI',data:history.map(function(item){return [Number(item.ts),Number(item.oi)];}),color:'#58a6ff',fillColor:'rgba(88,166,255,.12)',lineWidth:1.5,marker:{enabled:false}}],credits:{enabled:false}
   });
+}
+
+function showOIHistory(sym, hours) {
+  if (sym) OI_HISTORY_ACTIVE_SYMBOL = String(sym).toUpperCase();
+  if (hours === 24 || hours === 168) OI_HISTORY_ACTIVE_HOURS = hours;
+  var symbol = OI_HISTORY_ACTIVE_SYMBOL, windowHours = OI_HISTORY_ACTIVE_HOURS;
+  var host = document.getElementById('oi-history-chart');
+  var status = document.getElementById('oi-history-status');
+  if (!host || !symbol) return;
+  var viewSeq = ++OI_HISTORY_VIEW_SEQ;
+  if (G.charts.oiHistory) { try { G.charts.oiHistory.destroy(); } catch(e) {} }
+  host.innerHTML = '<div class="ld" style="padding:45px 10px;">Memuat snapshot OI aktual…</div>';
+  if (status) status.textContent = symbol+' · '+(windowHours===168?'7D':'24H')+' · loading';
+  if (G.paperServer && PAPER_API) {
+    fetch(PAPER_API+'/oi-history?symbol='+encodeURIComponent(symbol)+'&hours='+windowHours,{cache:'no-store'})
+      .then(function(response){if(!response.ok)throw new Error('VPS HTTP '+response.status);return response.json();})
+      .then(function(payload){
+        if (viewSeq !== OI_HISTORY_VIEW_SEQ) return;
+        if (!payload || payload.ok !== true || !Array.isArray(payload.samples)) throw new Error('Respons riwayat OI VPS tidak valid');
+        var history = payload.samples.map(function(item){return {ts:Number(item.ts),oi:Number(item.oiUSD)};}).filter(function(item){return item.ts>0&&item.oi>0;});
+        drawOIHistory(symbol,windowHours,history,payload.source||'VPS persisted',null);
+      }).catch(function(error){
+        if (viewSeq !== OI_HISTORY_VIEW_SEQ) return;
+        drawOIHistory(symbol,windowHours,[],'VPS','Riwayat OI VPS tidak tersedia: '+(error.message||error));
+      });
+    return;
+  }
+  var cutoff = Date.now()-windowHours*60*60*1000;
+  var localHistory = (OI_HISTORY[symbol]||[]).filter(function(item){return Number(item.ts)>=cutoff;});
+  drawOIHistory(symbol,windowHours,localHistory,'browser session only · tidak persisten',null);
 }
 
 // Batch MTF fetch for top pairs
