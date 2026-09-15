@@ -129,7 +129,7 @@ const APIS = {
   '/gate': 'https://api.gateio.ws',
   '/altme': 'https://api.alternative.me',
   '/coingecko': 'https://api.coingecko.com',
-  '/cryptocompare': 'https://data-api.coindesk.com',
+  '/cryptocompare': 'https://www.coindesk.com',
   '/coinpaprika': 'https://api.coinpaprika.com',
   '/binance': 'https://fapi.binance.com',
   '/okx': 'https://www.okx.com',
@@ -276,6 +276,75 @@ function cacheTtl(prefix, pathname) {
   if (pathname.includes('/candles')) return 60000;
   if (pathname.includes('/tickers')) return 5000;
   return 5000;
+}
+
+const NEWS_RSS_URL = 'https://www.coindesk.com/arc/outboundfeeds/rss/';
+
+function decodeNewsXml(value) {
+  return String(value || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .trim();
+}
+
+function newsXmlTag(block, name) {
+  const expression = new RegExp('<' + name + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + name + '>', 'i');
+  const match = String(block || '').match(expression);
+  return match ? decodeNewsXml(match[1]) : '';
+}
+
+function parseNewsRss(xml) {
+  const items = [];
+  const itemPattern = /<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi;
+  let match;
+  while ((match = itemPattern.exec(String(xml || ''))) && items.length < 100) {
+    const block = match[1];
+    const title = newsXmlTag(block, 'title');
+    const link = newsXmlTag(block, 'link') || newsXmlTag(block, 'guid');
+    const pubDate = newsXmlTag(block, 'pubDate') || newsXmlTag(block, 'dc:date');
+    const creator = newsXmlTag(block, 'dc:creator');
+    const categories = [...block.matchAll(/<category(?:\s[^>]*)?>([\s\S]*?)<\/category>/gi)]
+      .map(row => decodeNewsXml(row[1])).filter(Boolean).join(',');
+    if (!title || !link) continue;
+    const published = Date.parse(pubDate);
+    items.push({
+      ID: link, TITLE: title, URL: link,
+      PUBLISHED_ON: Number.isFinite(published) ? Math.floor(published / 1000) : 0,
+      SOURCE_DATA: {NAME: creator || 'CoinDesk'}, CATEGORY_DATA: categories
+    });
+  }
+  return items;
+}
+
+async function serveNewsFeed(requestUrl, res) {
+  const key = '/cryptocompare' + requestUrl.pathname + requestUrl.search;
+  const hit = cache.get(key);
+  if (hit && hit.expiresAt > Date.now()) {
+    send(res, hit.status, hit.body, hit.contentType);
+    return;
+  }
+  try {
+    const startedAt = Date.now();
+    const result = await requestUpstream(NEWS_RSS_URL);
+    result.latencyMs = Date.now() - startedAt;
+    result.path = '/arc/outboundfeeds/rss/';
+    markSourceHealth('/cryptocompare', result);
+    if (result.status < 200 || result.status >= 300) {
+      send(res, result.status, JSON.stringify({error: 'News provider HTTP ' + result.status}));
+      return;
+    }
+    const limitValue = Number(requestUrl.searchParams.get('limit') || 50);
+    const limit = Number.isFinite(limitValue) ? Math.max(1, Math.min(50, Math.floor(limitValue))) : 50;
+    const body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Data: parseNewsRss(result.body).slice(0, limit)});
+    const cached = {status: 200, body, contentType: 'application/json', expiresAt: Date.now() + 1800000};
+    cache.set(key, cached);
+    send(res, cached.status, cached.body, cached.contentType);
+  } catch (error) {
+    markSourceError('/cryptocompare', error, '/arc/outboundfeeds/rss/');
+    send(res, 502, JSON.stringify({error: 'News provider unavailable', detail: error.message}));
+  }
 }
 
 function sleep(ms) {
@@ -4182,6 +4251,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperStats(requestUrl.searchParams)));
+    return;
+  }
+
+  // The current CoinDesk Data API requires an API key. Keep the News tab
+  // functional without inventing credentials by adapting CoinDesk's public
+  // RSS feed into the same small payload shape used by CryptoCompare.
+  if (requestUrl.pathname === '/cryptocompare/news/v1/article/list') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    await serveNewsFeed(requestUrl, res);
     return;
   }
 

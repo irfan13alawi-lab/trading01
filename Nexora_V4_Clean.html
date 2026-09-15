@@ -484,7 +484,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 <div class="page" id="p-news">
   <div class="card">
     <div class="card-h"><div class="card-t"><i class="fa-solid fa-newspaper"></i> Crypto News <span class="muted" id="news-updated">VPS cache 30m</span></div><button class="btn btn-sm btn-blue" onclick="loadNews(true)"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
-    <div class="muted" style="line-height:1.7;margin:6px 0 10px;">Berita diambil melalui proxy VPS dari CryptoCompare/CoinDesk Data API. Sentimen adalah label heuristik berbasis judul, bukan rekomendasi trading.</div>
+    <div class="muted" style="line-height:1.7;margin:6px 0 10px;">Berita diambil melalui proxy VPS dari feed publik CoinDesk. Sentimen adalah label heuristik berbasis judul, bukan rekomendasi trading.</div>
     <div id="news-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
       <button class="pill on" onclick="setNewsFilter('all',this)">Semua</button><button class="pill" onclick="setNewsFilter('btc',this)">BTC</button><button class="pill" onclick="setNewsFilter('trending',this)">Trending</button>
     </div>
