@@ -587,10 +587,16 @@ function paperRoundPriceForPair(value, pair) {
   const tickSize = paperNumber(pair && pair.tickSize);
   if (!number || !tickSize) return paperRoundPrice(number);
   const rounded = Math.round(number / tickSize) * tickSize;
-  const tickText = String(tickSize);
-  const decimals = Math.max(0, Math.min(12,
-    tickText.includes('.') ? tickText.split('.')[1].length : 0));
-  return Number(rounded.toFixed(decimals || 10));
+  const pricePlace = Number(pair && pair.pricePlace);
+  if (Number.isInteger(pricePlace) && pricePlace >= 0 && pricePlace <= 12) {
+    return Number(rounded.toFixed(pricePlace));
+  }
+  let decimals = 0;
+  for (; decimals < 12; decimals++) {
+    const scaled = tickSize * Math.pow(10, decimals);
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-8) break;
+  }
+  return Number(rounded.toFixed(Math.min(12, decimals)));
 }
 
 function defaultPaperState() {
@@ -2291,13 +2297,15 @@ async function fetchPaperInstruments() {
   payload.data.forEach(item => {
     const sym = paperTickerSymbol(item);
     if (!sym) return;
-    let tickSize = paperNumber(item.priceEndStep);
-    if (!tickSize && paperFieldPresent(item.pricePlace)) {
-      tickSize = Math.pow(10, -Number(item.pricePlace));
-    }
+    const pricePlace = paperFieldPresent(item.pricePlace) ? Number(item.pricePlace) : null;
+    const priceEndStep = paperNumber(item.priceEndStep) || 1;
+    // Bitget's priceEndStep is a count of final price units, not a quote-price
+    // tick by itself. The true increment is priceEndStep * 10^(-pricePlace).
+    const tickSize = Number.isInteger(pricePlace) && pricePlace >= 0 && pricePlace <= 12
+      ? priceEndStep * Math.pow(10, -pricePlace) : null;
     next.set(sym, {
       tickSize: tickSize > 0 ? tickSize : null,
-      pricePlace: paperFieldPresent(item.pricePlace) ? Number(item.pricePlace) : null,
+      pricePlace,
       sizePlace: paperFieldPresent(item.sizePlace) ? Number(item.sizePlace) : null,
       minTradeNum: paperNumber(item.minTradeNum || item.minTradeUSDT)
     });
