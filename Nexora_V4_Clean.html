@@ -5136,7 +5136,18 @@ function refreshOpsPage() {
       .then(function(items){
         var rows = Array.isArray(items) ? items : [];
         var upcoming = rows.filter(function(item){return item && item.date && Date.parse(item.date) >= Date.now() - 3600000;}).slice(0,8);
-        events.innerHTML = upcoming.length ? upcoming.map(function(item){return '<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);"><b>' + sourceEsc(item.title || item.event || 'Event') + '</b> · ' + sourceEsc(item.date || '') + ' · ' + sourceEsc(item.impact || 'unknown') + '</div>';}).join('') : 'Tidak ada event upcoming pada feed.';
+        function flag(item) {
+          var title=String(item.title || item.event || '').toLowerCase();
+          if(title.indexOf('fomc')>=0 || title.indexOf('interest rate')>=0 || title.indexOf('fed ')>=0) return 'FOMC / RATE';
+          if(title.indexOf('cpi')>=0 || title.indexOf('consumer price')>=0 || title.indexOf('inflation')>=0) return 'CPI / INFLATION';
+          if(title.indexOf('halving')>=0 || title.indexOf('bitcoin')>=0 && title.indexOf('halv')>=0) return 'BTC HALVING';
+          return '';
+        }
+        events.innerHTML = upcoming.length ? upcoming.map(function(item){
+          var tag=flag(item), impact=String(item.impact || 'unknown').toUpperCase();
+          var color=tag ? '#f85149' : impact==='HIGH' ? '#e3b341' : '#8b949e';
+          return '<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);"><b>' + sourceEsc(item.title || item.event || 'Event') + '</b> · ' + sourceEsc(item.date || '') + ' · <span style="color:'+color+';">' + sourceEsc(impact) + '</span>' + (tag ? ' <span class="status-chip status-warn">'+sourceEsc(tag)+'</span>' : '') + (tag || impact==='HIGH' ? ' <span class="muted">avoid new entries around release</span>' : '') + '</div>';
+        }).join('') : 'Tidak ada event upcoming pada feed.';
       }).catch(function(error){events.innerHTML = '<span class="status-chip status-warn">UNAVAILABLE</span> Macro feed tidak tersedia (' + sourceEsc(error.message || error) + '). Tidak ada data event yang dibuat-buat.';});
   }
 }

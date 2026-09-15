@@ -1722,7 +1722,7 @@ async function fetchPaperCandles(sym, granularity, requestedLimit) {
 // first and limits one response, so page backwards with endTime. Only fully
 // closed candles are retained; the live bot and replay therefore share the
 // same no-lookahead rule.
-async function fetchPaperCandleHistory(sym, granularity, requestedLimit) {
+async function fetchPaperCandleHistoryFromBitget(sym, granularity, requestedLimit) {
   const wanted = Math.max(100, Math.min(25000,
     Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : 1000));
   const intervalMs = paperGranularityMs(granularity);
@@ -1778,7 +1778,75 @@ async function fetchPaperCandleHistory(sym, granularity, requestedLimit) {
   rows._nexoraCandleIntervalMs = intervalMs;
   rows._nexoraLatestRawTs = rows.length ? rows[rows.length - 1].ts : null;
   rows._nexoraLatestClosedTs = rows.length ? rows[rows.length - 1].ts : null;
+  rows._nexoraSource = 'Bitget Futures';
   return rows;
+}
+
+async function fetchPaperCandleHistoryFromBinance(sym, granularity, requestedLimit) {
+  const wanted = Math.max(100, Math.min(25000,
+    Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : 1000));
+  const interval = paperBinanceInterval(granularity);
+  const intervalMs = paperGranularityMs(granularity);
+  const rowsByTs = new Map();
+  let endTime = Date.now();
+  let pages = 0;
+  while (rowsByTs.size < wanted && pages < 40) {
+    const limit = Math.min(1500, wanted - rowsByTs.size);
+    const pathName = '/fapi/v1/klines?interval=' + interval;
+    const target = APIS['/binance'] + '/fapi/v1/klines?symbol=' +
+      encodeURIComponent(paperFallbackSymbol(sym)) + '&interval=' + interval +
+      '&limit=' + limit + '&endTime=' + Math.max(0, Math.floor(endTime));
+    const startedAt = Date.now();
+    let result;
+    try {
+      result = await requestUpstream(target);
+      markSourceHealth('/binance', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+    } catch (error) {
+      markSourceError('/binance', error, pathName);
+      throw error;
+    }
+    if (result.status < 200 || result.status >= 300) throw new Error('Binance historical candles HTTP ' + result.status);
+    let payload;
+    try { payload = JSON.parse(result.body); }
+    catch (_) { throw new Error('Binance historical candles returned invalid JSON'); }
+    if (!Array.isArray(payload)) throw new Error((payload && payload.msg) || 'Binance historical candles response invalid');
+    const pageRows = payload.map(row => ({
+      ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
+      close: Number(row[4]), volume: Number(row[5] || 0)
+    })).filter(row => row.ts > 0 && row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
+      .sort((a, b) => a.ts - b.ts);
+    if (!pageRows.length) break;
+    pageRows.forEach(row => { if (row.ts + intervalMs <= Date.now()) rowsByTs.set(row.ts, row); });
+    const oldest = pageRows[0].ts;
+    if (!oldest || oldest >= endTime) break;
+    endTime = oldest - 1;
+    pages += 1;
+    if (pageRows.length < limit) break;
+  }
+  return paperRowsWithMetadata([...rowsByTs.values()].sort((a, b) => a.ts - b.ts).slice(-wanted),
+    new Date().toISOString(), intervalMs, 'Binance Futures fallback');
+}
+
+async function fetchPaperCandleHistory(sym, granularity, requestedLimit) {
+  let bitgetError;
+  try {
+    return await fetchPaperCandleHistoryFromBitget(sym, granularity, requestedLimit);
+  } catch (error) {
+    bitgetError = error;
+  }
+  if (!PAPER_FALLBACK_ENABLED) throw bitgetError || new Error('Bitget historical candles unavailable');
+  try {
+    return await fetchPaperCandleHistoryFromBinance(sym, granularity, requestedLimit);
+  } catch (binanceError) {
+    const wanted = Math.min(300, Math.max(100,
+      Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : 300));
+    try {
+      return await fetchPaperCandlesFromOkx(sym, granularity, wanted);
+    } catch (okxError) {
+      throw new Error('Bitget historical candles unavailable; Binance/OKX fallback failed: ' +
+        [binanceError.message, okxError.message].join(' | '));
+    }
+  }
 }
 
 async function fetchPaperMonitorBar(sym) {
@@ -2927,7 +2995,7 @@ async function paperReplay(query) {
   return {
     ok: true, strategyVersion: PAPER_STRATEGY_VERSION, executionModel: 'LIMIT_STRICT',
     sameTechnicalLogic: true, derivativesMode: 'NEUTRAL_REPLAY',
-    source: 'Bitget Futures historical candles', symbol: sym, days,
+    source: ((histories.M15 && histories.M15._nexoraSource) || 'Bitget Futures') + ' historical candles', symbol: sym, days,
     from: new Date(startAt).toISOString(), to: new Date(endAt).toISOString(),
     candles: Object.fromEntries(Object.entries(histories).map(([name, rows]) => [name, rows.length])),
     summary: {scans: scans.length, eligibleSignals, placed,
