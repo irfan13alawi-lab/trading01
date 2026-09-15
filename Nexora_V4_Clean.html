@@ -239,6 +239,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="market-picker" title="Pilih sumber dan jenis market">
       <select id="market-exchange" aria-label="Exchange" onchange="setMarketSelection()">
         <option value="bitget">Bitget</option>
+        <option value="binance">Binance Futures</option>
         <option value="coingecko">CoinGecko</option>
       </select>
       <select id="market-type" aria-label="Market type" onchange="setMarketSelection()">
@@ -1138,20 +1139,21 @@ var PAPER_ADMIN_TOKEN = '';
 var VPS_CHART_TF = '15m';
 var VPS_CHART_SYMBOL = 'BTC';
 
-// Persist only the user's market view; paper execution remains server-side
-// Bitget Futures and never follows a Spot selection in the browser.
+// Persist only the user's market view; paper execution remains server-side.
 try {
   var savedMarket = JSON.parse(localStorage.getItem('nexora_market_selection') || 'null');
-  if (savedMarket && (savedMarket.exchange === 'bitget' || savedMarket.exchange === 'coingecko')) {
+  if (savedMarket && (savedMarket.exchange === 'bitget' || savedMarket.exchange === 'binance' || savedMarket.exchange === 'coingecko')) {
     G.marketExchange = savedMarket.exchange;
-    G.marketType = savedMarket.exchange === 'coingecko' ? 'spot' : (savedMarket.type === 'spot' ? 'spot' : 'futures');
+    G.marketType = savedMarket.exchange === 'coingecko' ? 'spot' : (savedMarket.exchange === 'binance' ? 'futures' : (savedMarket.type === 'spot' ? 'spot' : 'futures'));
   }
 } catch(e) {}
 
 function marketIsSpot() { return G.marketType === 'spot'; }
+function marketIsBinance() { return G.marketExchange === 'binance'; }
 function marketIsBitget() { return G.marketExchange === 'bitget'; }
 function marketLabel() {
   if (G.marketExchange === 'coingecko') return 'CoinGecko Spot';
+  if (G.marketExchange === 'binance') return 'Binance Futures';
   return 'Bitget ' + (marketIsSpot() ? 'Spot' : 'Futures');
 }
 function updateMarketControls() {
@@ -1162,8 +1164,9 @@ function updateMarketControls() {
   if (type) {
     type.value = G.marketType;
     var cgOnly = G.marketExchange === 'coingecko';
-    Array.prototype.forEach.call(type.options, function(opt) { opt.disabled = cgOnly && opt.value !== 'spot'; });
-    type.disabled = cgOnly;
+    var futuresOnly = G.marketExchange === 'binance';
+    Array.prototype.forEach.call(type.options, function(opt) { opt.disabled = cgOnly && opt.value !== 'spot' || futuresOnly && opt.value !== 'futures'; });
+    type.disabled = cgOnly || futuresOnly;
   }
   if (label) {
     label.textContent = marketLabel();
@@ -1172,7 +1175,7 @@ function updateMarketControls() {
   }
   var note = document.getElementById('market-note');
   if (note) {
-    note.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : 'Paper Bot VPS memakai Bitget Futures';
+    note.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : marketIsBinance() ? 'Binance Futures via VPS · Paper Bot memakai fallback Bitget → Binance → OKX' : 'Paper Bot VPS memakai Bitget Futures';
     note.style.color = marketIsSpot() ? '#e3b341' : '#8b949e';
   }
 }
@@ -1180,9 +1183,9 @@ function setMarketSelection() {
   var ex = document.getElementById('market-exchange');
   var type = document.getElementById('market-type');
   var nextExchange = ex ? ex.value : 'bitget';
-  var nextType = nextExchange === 'coingecko' ? 'spot' : (type && type.value === 'spot' ? 'spot' : 'futures');
+  var nextType = nextExchange === 'coingecko' ? 'spot' : (nextExchange === 'binance' ? 'futures' : (type && type.value === 'spot' ? 'spot' : 'futures'));
   var changed = nextExchange !== G.marketExchange || nextType !== G.marketType;
-  G.marketExchange = nextExchange === 'coingecko' ? 'coingecko' : 'bitget';
+  G.marketExchange = nextExchange === 'coingecko' || nextExchange === 'binance' ? nextExchange : 'bitget';
   G.marketType = nextType;
   updateMarketControls();
   try { localStorage.setItem('nexora_market_selection', JSON.stringify({exchange:G.marketExchange, type:G.marketType})); } catch(e) {}
@@ -1422,6 +1425,9 @@ function doRefresh() {
     var cgIds = COINS.map(function(c){return c.id;}).join(',');
     marketRequest = apf(CG + '/coins/markets?vs_currency=usd&ids=' + cgIds + '&per_page=100&page=1&sparkline=false&price_change_percentage=24h')
       .then(function(rows){ return {provider:'coingecko', data:rows}; });
+  } else if (G.marketExchange === 'binance') {
+    marketRequest = apf(BINANCE_API + '/ticker/24hr')
+      .then(function(rows){ return {provider:'binance', data:rows}; });
   } else {
     var marketApi = marketIsSpot() ? BITGET_SPOT_API : BITGET_API;
     var marketQuery = marketIsSpot() ? 'category=SPOT' : 'productType=USDT-FUTURES';
@@ -1441,6 +1447,9 @@ function doRefresh() {
 
     if (marketPayload && marketPayload.provider === 'coingecko') {
       return buildPairsFromCG(marketPayload.data, fg, news);
+    }
+    if (marketPayload && marketPayload.provider === 'binance') {
+      return buildPairsFromBinance(marketPayload.data, fg, news);
     }
     var bitgetData = marketPayload ? marketPayload.data : null;
     var spotMarket = marketIsSpot();
@@ -1551,6 +1560,62 @@ function buildPairsFromCG(mkts, fg, news) {
   continueRefresh(pairs, fg, news);
 }
 
+// Binance Futures ticker builder. Funding is enriched immediately after the
+// first render from /premiumIndex; OI delta stays N/A unless a trusted source
+// provides it, so the dashboard never invents derivatives values.
+function buildPairsFromBinance(rows, fg, news) {
+  if (!Array.isArray(rows) || !rows.length) throw new Error('Binance Futures returned no ticker data');
+  var bySymbol = {};
+  rows.forEach(function(row) {
+    var symbol = String(row && row.symbol || '').toUpperCase();
+    if (symbol) bySymbol[symbol] = row;
+  });
+  var pairs = COINS.map(function(coin, i) {
+    var row = bySymbol[coin.s + 'USDT'];
+    if (!row) return null;
+    var price = nn(row.lastPrice);
+    if (!price) return null;
+    // Binance's priceChangePercent is already expressed in percentage points
+    // (unlike Bitget's ratio-shaped change24h field).
+    var chg = nn(row.priceChangePercent);
+    var vol = nn(row.quoteVolume) || nn(row.volume) * price;
+    var sc = score44(chg, 0, 0, false, false, true);
+    return {
+      s: coin.s, id: coin.id, price: price, chg: chg, vol: vol,
+      fund: null, fundReal: false, fundSrc: 'Binance pending',
+      oi: null, oiUSD: 0, oiDeltaReal: false, liq: 0,
+      derivativesAvailable: true, marketExchange: 'binance', marketType: 'futures',
+      sc: sc, tier: tier(sc), sig: sig(chg, 0, 0),
+      layer: i < 20 ? 'L1' : 'L2'
+    };
+  }).filter(Boolean);
+  applyMarketQualityScores(pairs);
+  continueRefresh(pairs, fg, news);
+  fetchBinanceFunding().then(function(fundingRows) {
+    if (G.marketExchange !== 'binance') return;
+    var map = {};
+    (Array.isArray(fundingRows) ? fundingRows : []).forEach(function(row) {
+      var symbol = String(row && row.symbol || '').toUpperCase().replace('USDT','');
+      if (symbol) map[symbol] = row;
+    });
+    G.pairs.forEach(function(pair) {
+      var row = map[pair.s];
+      if (!row) return;
+      pair.fund = nn(row.lastFundingRate);
+      pair.fundReal = true;
+      pair.fundSrc = 'Binance';
+      pair.nextFundingTime = nn(row.nextFundingTime);
+    });
+    applyMarketQualityScores(G.pairs);
+    renderTable();
+    renderSigs(G.pairs);
+    computeTop5(G.pairs);
+    sLog('Binance Futures funding enriched; OI delta remains N/A without a trusted snapshot.');
+  }).catch(function(error) {
+    sLog('Binance funding unavailable: ' + (error.message || error) + ' · price/volume tetap live.');
+  });
+}
+
 // Shared post-processing after pairs are built
 function continueRefresh(pairs, fg, news) {
     try {
@@ -1560,7 +1625,7 @@ function continueRefresh(pairs, fg, news) {
     updateMarketControls();
     var marketName = marketLabel();
     var marketNote = document.getElementById('market-note');
-    if (marketNote) marketNote.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : 'Paper Bot VPS memakai Bitget Futures';
+    if (marketNote) marketNote.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : marketIsBinance() ? 'Binance Futures via VPS · Paper Bot memakai fallback Bitget → Binance → OKX' : 'Paper Bot VPS memakai Bitget Futures';
     document.getElementById('h-cnt').textContent = pairs.length;
     document.getElementById('c-l1').textContent = pairs.filter(function(p){return p.layer==='L1';}).length;
     document.getElementById('c-l2').textContent = pairs.filter(function(p){return p.layer==='L2';}).length;
@@ -3260,8 +3325,8 @@ function renderRegimeHistory() {
   var host = document.getElementById('c-rhist');
   if (!host) return;
   var sourceKey = marketLabel();
-  if (!marketIsBitget()) {
-    clearRegimeHistory('Riwayat volatilitas harian hanya tersedia dari candle Bitget yang dipilih.');
+  if (G.marketExchange === 'coingecko') {
+    clearRegimeHistory('Riwayat volatilitas harian tidak tersedia dari CoinGecko Spot. Pilih Bitget atau Binance Futures.');
     return;
   }
   if (REGIME_HISTORY_CACHE.data && REGIME_HISTORY_CACHE.key === sourceKey && Date.now() - REGIME_HISTORY_CACHE.ts < 300000) {
@@ -3373,9 +3438,9 @@ function renderCorr() {
     netEl.style.color = net > 0 ? '#3fb950' : net < 0 ? '#f85149' : '#8b949e';
     netEl.title = 'Net notional from open VPS paper positions only; this is not portfolio beta.';
   }
-  if (!marketIsBitget()) {
+  if (G.marketExchange === 'coingecko') {
     if (G.charts.corr) { try { G.charts.corr.destroy(); } catch(e) {} G.charts.corr = null; }
-    if (host) host.innerHTML = '<div class="ld" style="padding:45px 10px;">Korelasi membutuhkan seri candle harian Bitget; data exchange ini tidak dicampur.</div>';
+    if (host) host.innerHTML = '<div class="ld" style="padding:45px 10px;">Korelasi membutuhkan seri candle harian; CoinGecko Spot tidak dicampur dengan data Futures.</div>';
     if (alert) alert.textContent = 'Correlation unavailable for selected source';
     return;
   }
@@ -3473,7 +3538,7 @@ function renderOIFromDeriv() {
   });
   document.getElementById('fund-ladder').innerHTML = ladder.join('');
   var cgs = document.getElementById('cg-st');
-  if (cgs) { cgs.textContent = 'Live: Bitget + BingX + Gate.io'; cgs.style.color = '#3fb950'; }
+  if (cgs) { cgs.textContent = marketIsBinance() ? 'Live: Binance Futures funding · OI delta N/A' : 'Live: Bitget + BingX + Gate.io'; cgs.style.color = '#3fb950'; }
 }
 
 function fetchOI() {
@@ -3540,6 +3605,7 @@ function fetchOI() {
 
 var BITGET_API = PROXY_BASE ? PROXY_BASE + '/bitget/api/v2/mix/market' : 'https://api.bitget.com/api/v2/mix/market';
 var BITGET_SPOT_API = PROXY_BASE ? PROXY_BASE + '/bitget/api/v2/spot/market' : 'https://api.bitget.com/api/v2/spot/market';
+var BINANCE_API = PROXY_BASE ? PROXY_BASE + '/binance/fapi/v1' : 'https://fapi.binance.com/fapi/v1';
 var BINGX_API  = PROXY_BASE ? PROXY_BASE + '/bingx/openApi/swap/v2/quote' : 'https://open-api.bingx.com/openApi/swap/v2/quote';
 var GATE_API   = (PROXY_BASE ? PROXY_BASE + '/gate/api/v4' : 'https://api.gateio.ws/api/v4') + '/futures/usdt/contracts';
 
@@ -3559,7 +3625,29 @@ function normaliseCandles(rows) {
     return true;
   }).sort(function(a,b){ return a[0]-b[0]; });
 }
+function fetchBinanceFunding() {
+  return apf(BINANCE_API + '/premiumIndex');
+}
 function fetchBitgetCandles(sym, granularity, limit) {
+  if (marketIsBinance()) {
+    var binanceKey = marketLabel() + ':' + sym + ':' + granularity + ':' + limit;
+    var binanceNow = Date.now();
+    var binanceCached = BITGET_CANDLE_CACHE[binanceKey];
+    if (binanceCached && binanceNow - binanceCached.ts < 60000) return Promise.resolve(binanceCached.data);
+    var binanceIntervals = {'15m':'15m','30m':'30m','1H':'1h','4H':'4h','1D':'1d'};
+    var binanceUrl = BINANCE_API + '/klines?symbol=' + encodeURIComponent(sym + 'USDT') +
+      '&interval=' + encodeURIComponent(binanceIntervals[granularity] || granularity) +
+      '&limit=' + encodeURIComponent(limit || 100);
+    return fetch(binanceUrl, {cache:'no-store'}).then(function(r) {
+      if (!r.ok) throw new Error('Binance candles HTTP ' + r.status);
+      return r.json();
+    }).then(function(rows) {
+      var data = normaliseCandles(rows);
+      if (!data.length) throw new Error('Binance candles empty for ' + sym + ' ' + granularity);
+      BITGET_CANDLE_CACHE[binanceKey] = {ts:Date.now(), data:data};
+      return data;
+    });
+  }
   if (!marketIsBitget()) return Promise.reject(new Error('MTF candles unavailable for ' + marketLabel()));
   var spot = marketIsSpot();
   var key = marketLabel() + ':' + sym + ':' + granularity + ':' + limit;
@@ -3612,7 +3700,7 @@ function normaliseOhlc(rows) {
 function fetchMarketHistory(coinId, sym, days) {
   var symbol = sym || coinSymbolForId(coinId);
   var wanted = Math.max(2, Math.min(1000, parseInt(days,10) || 30));
-  if (!marketIsBitget()) {
+  if (G.marketExchange === 'coingecko') {
     return apfCached(CG + '/coins/' + coinId + '/ohlc?vs_currency=usd&days=' + wanted, 300000).then(function(rows){
       var data = normaliseOhlc(rows);
       if (data.length < 2) throw new Error('CoinGecko history empty for '+coinId);
@@ -3623,7 +3711,7 @@ function fetchMarketHistory(coinId, sym, days) {
     return {data:normaliseOhlc(rows), source:marketLabel()};
   }) : Promise.reject(new Error('Unknown symbol for '+coinId));
   return primary.then(function(result) {
-    if (result.data.length < 2) throw new Error('Bitget history empty for '+symbol);
+    if (result.data.length < 2) throw new Error(marketLabel() + ' history empty for '+symbol);
     return result;
   });
 }
@@ -4248,10 +4336,10 @@ function runAllUpgrades(pairs) {
     fetchTopCandlePatterns();
   }, 2000);
 
-  // Multi-TF from the selected Bitget market (async, staggered). CoinGecko
+  // Multi-TF from the selected Futures market (async, staggered). CoinGecko
   // Spot has no equivalent intraday candle feed for this analysis.
   setTimeout(function(){
-    if (marketIsBitget()) fetchTopMTF();
+    if (marketIsBitget() || marketIsBinance()) fetchTopMTF();
     setTimeout(function(){
       // Re-render table after MTF data arrives
       if(G.pairs.some(function(p){return p.p1h!==undefined;})){
@@ -5097,7 +5185,7 @@ function computeTop5(pairs) {
        + ' &nbsp; <span style="color:#484f58;">OI: </span><b style="color:' + (derivatives ? (p.oi>=0?'#3fb950':'#f85149') : '#484f58') + ';">' + oiText(p, 1) + '</b>'
       + '</div>'
       + '<div style="font-size:9px;color:#8b949e;margin-bottom:4px;">'
-      + '<span style="color:#484f58;">MTF: </span>' + (mtfBits.length ? mtfBits.join(' · ') : (marketIsBitget() ? 'loading...' : 'N/A for CoinGecko Spot'))
+      + '<span style="color:#484f58;">MTF: </span>' + (mtfBits.length ? mtfBits.join(' · ') : ((marketIsBitget() || marketIsBinance()) ? 'loading...' : 'N/A for CoinGecko Spot'))
       + (mtfState.available ? ' <span style="color:' + (mtfState.direction ? '#3fb950' : '#e3b341') + ';">· ' + mtfState.aligned + '/4 · ' + mtfState.confluencePct + '%</span>' : '')
       + '</div>'
       + '<div style="font-size:9px;color:#3fb950;margin-bottom:5px;">'
@@ -6459,7 +6547,7 @@ function sourceEsc(value) {
 function renderSourceHealth(sources) {
   var names = [
     ['bitget', 'Bitget'], ['bingx', 'BingX'], ['gate', 'Gate.io'],
-    ['coingecko', 'CoinGecko'], ['altme', 'Fear & Greed'], ['coinpaprika', 'CoinPaprika'], ['cryptocompare', 'Crypto News']
+    ['coingecko', 'CoinGecko'], ['binance', 'Binance Futures'], ['okx', 'OKX Swap'], ['altme', 'Fear & Greed'], ['coinpaprika', 'CoinPaprika'], ['cryptocompare', 'Crypto News'], ['macro', 'Macro calendar']
   ];
   var live = 0, stale = 0, errors = 0;
   var html = names.map(function(pair) {
@@ -6898,10 +6986,10 @@ function runP2MTFAnalysis() {
   var mode = P2.data.mode || (P2.data.wl ? P2.data.wl.mode : 'A');
   var btn = document.getElementById('p2-run-mtf');
   if(btn) { btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Loading...'; }
-  if (!marketIsBitget()) {
-    document.getElementById('p2-mtf-full').innerHTML = '<div style="color:#e3b341;padding:14px;">MTF intraday (D1/H4/H1/M15) belum tersedia dari CoinGecko Spot. Pilih Bitget Futures atau Bitget Spot untuk analisis candle.</div>';
+  if (G.marketExchange === 'coingecko') {
+    document.getElementById('p2-mtf-full').innerHTML = '<div style="color:#e3b341;padding:14px;">MTF intraday (D1/H4/H1/M15) belum tersedia dari CoinGecko Spot. Pilih Bitget Futures atau Binance Futures untuk analisis candle.</div>';
     if(btn) { btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-rotate"></i> Retry'; }
-    var noData = {d1:analyzeD1([],dir,mode),h4:analyzeTF([], 'H4', dir),h1:analyzeTF([], 'H1', dir),m15:analyzeTF([], 'M15', dir),summary:{status:'DATA UNAVAILABLE',color:'#e3b341',goCount:0,abortCount:0,msg:'CoinGecko Spot tidak menyediakan candle MTF untuk checklist ini.',action:'Pilih Bitget untuk mengaktifkan MTF.'}};
+    var noData = {d1:analyzeD1([],dir,mode),h4:analyzeTF([], 'H4', dir),h1:analyzeTF([], 'H1', dir),m15:analyzeTF([], 'M15', dir),summary:{status:'DATA UNAVAILABLE',color:'#e3b341',goCount:0,abortCount:0,msg:'CoinGecko Spot tidak menyediakan candle MTF untuk checklist ini.',action:'Pilih Bitget atau Binance Futures untuk mengaktifkan MTF.'}};
     P2.lastMTF = noData;
     renderH4Checklist(noData);
     renderP2DecisionFromMTF(noData);

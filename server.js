@@ -3359,10 +3359,11 @@ function paperStatus() {
   const equityPeak = paperEquityPeak();
   const drawdownPct = paperDrawdownPct();
   const drawdownGuard = drawdownPct >= PAPER_MAX_DRAWDOWN_PCT;
+  const persistedBlockReason = paperState.lastBlockReason;
   const blockReason = paperState.killSwitch ? 'KILL_SWITCH' : paperState.paused ? 'PAUSED' :
     !cfg.strategyEnabled ? 'STRATEGY_DISABLED' : !paperWithinTradingHours(cfg) ? 'OUTSIDE_TRADING_HOURS' :
     drawdownGuard ? 'MAX_DRAWDOWN_REACHED' :
-    paperState.lastBlockReason ||
+    persistedBlockReason === 'MAX_DRAWDOWN_REACHED' ? null : persistedBlockReason ||
     (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * cfg.riskPct / 100
       ? 'RISK_BUDGET_REACHED' : null);
   const dailyPnlDate = new Date().toISOString().slice(0, 10);
