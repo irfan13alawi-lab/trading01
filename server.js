@@ -2125,7 +2125,7 @@ async function fetchPaperTickersFromBinance() {
 
 async function fetchPaperTickersFromOkx() {
   const pathName = '/api/v5/market/tickers?instType=SWAP';
-  const target = APIS['/okx'] + '/api/v5/market/tickers?instType=SWAP&uly=USDT';
+  const target = APIS['/okx'] + '/api/v5/market/tickers?instType=SWAP';
   const startedAt = Date.now();
   let result;
   try {
