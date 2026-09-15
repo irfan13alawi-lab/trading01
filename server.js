@@ -3425,7 +3425,7 @@ function paperStatus() {
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError,
       discord: Boolean(DISCORD_WEBHOOK_URL),
-      dailySummary: (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL)) ? 'enabled' : 'dashboard-only',
+      dailySummary: 'dashboard-only until scheduler is explicitly enabled',
       riskGuard: 'guard notifications are emitted for configured alert channels',
       watchlistNearEntry: PAPER_WATCHLIST_ALERTS_ENABLED &&
         (TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL))
