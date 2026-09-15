@@ -640,6 +640,7 @@ function defaultPaperState() {
     closedTrades: [],
     invalidatedTrades: [],
     recentScans: [],
+    watchlistQueue: [],
     alertState: {
       lastDailySummaryDate: null,
       lastRiskGuardAt: null
@@ -681,6 +682,13 @@ function loadPaperState() {
       closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades.map(normalisePaperTrade) : [],
       invalidatedTrades: Array.isArray(parsed.invalidatedTrades) ? parsed.invalidatedTrades : [],
       recentScans: Array.isArray(parsed.recentScans) ? parsed.recentScans : [],
+      watchlistQueue: Array.isArray(parsed.watchlistQueue) ? parsed.watchlistQueue.map(item => {
+        const sym = String(item && typeof item === 'object' ? item.sym : item || '')
+          .toUpperCase().replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '');
+        return sym && PAPER_SYMBOLS.includes(sym) ? {
+          sym, requestedAt: item && item.requestedAt || null
+        } : null;
+      }).filter(Boolean).slice(0, 5) : [],
       alertState: {...defaultPaperState().alertState, ...(parsed.alertState || {})},
       schemaVersion: PAPER_SCHEMA_VERSION
     };
@@ -1536,6 +1544,7 @@ function paperTradeView(trade) {
 
 function paperCandidateView(pair) {
   const reasons = [];
+  if (pair.watchlistPriority) reasons.push('Watchlist priority requested; MTF and risk checks still required');
   if (pair.mtfDirection === 'SHORT') reasons.push('MTF bearish -> kandidat SHORT pullback');
   else if (pair.mtfDirection === 'LONG') reasons.push('MTF bullish -> kandidat LONG pullback');
   else if (pair.chg < 0) reasons.push('24H turun -> konteks bearish');
@@ -1575,6 +1584,7 @@ function paperCandidateView(pair) {
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fundingAvailable: !!pair.fundingAvailable, oiAvailable: !!pair.oiAvailable,
     volumeAvailable: !!pair.volumeAvailable,
+    watchlistPriority: !!pair.watchlistPriority,
     fund: pair.fund, oi: pair.oi, score: pair.sc, tier: pair.tier,
     sig: pair.sig, rank: pair.rank, direction: pair.mtfDirection || 'NEUTRAL',
     signalMode: pair.signalMode || PAPER_SIGNAL_MODE,
@@ -2339,17 +2349,21 @@ async function runPaperScan(reason, requestedCycleKey) {
   paperRuntime.scanAttempts += 1;
   paperRuntime.lastScanStartedAt = new Date().toISOString();
   try {
+    const priorityRequested = Array.isArray(paperState.watchlistQueue) ? paperState.watchlistQueue.slice() : [];
+    const prioritySet = new Set(priorityRequested.map(item => item.sym));
     const payload = await fetchPaperTickers();
     const instruments = await fetchPaperInstruments().catch(error => {
       console.error('[paper] contract precision unavailable:', error.message);
       return new Map();
     });
     let ranked = applyPaperInstrumentMetadata(buildPaperPairs(payload), instruments);
+    ranked.forEach(pair => { pair.watchlistPriority = prioritySet.has(pair.sym); });
+    ranked.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     // MTF is part of eligibility, not a post-selection decoration. Enrich the
     // strongest market-context candidates before choosing the three orders.
     const mtfCandidates = ranked.slice(0, PAPER_MTF_MAX_CANDIDATES);
     await enrichPaperMtfBatch(mtfCandidates);
-    ranked = mtfCandidates.sort((a, b) => b.rank - a.rank);
+    ranked = mtfCandidates.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     const activeSymbols = new Map();
     paperState.activeTrades
       .filter(t => paperIsActive(t) && paperIsTrialTrade(t))
@@ -2511,6 +2525,8 @@ async function runPaperScan(reason, requestedCycleKey) {
       console.log('[paper] placed', id, pair.sym, setup.dir, '@', setup.entry);
       return paperTradeView(trade);
     });
+    const evaluatedPriority = new Set(ranked.filter(pair => pair.watchlistPriority).map(pair => pair.sym));
+    paperState.watchlistQueue = (paperState.watchlistQueue || []).filter(item => !evaluatedPriority.has(item.sym));
     paperState.lastCycleKey = cycleKey;
     paperState.lastScanAt = new Date().toISOString();
     paperState.lastError = null;
@@ -2533,6 +2549,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.lastBlockReason = blockReason;
     paperState.recentScans.unshift({
       cycleKey, at: paperState.lastScanAt, reason: reason || '15M close',
+      watchlistPriority: ranked.filter(pair => pair.watchlistPriority).map(pair => pair.sym),
       candidates: ranked.length,
       selected: ranked.slice(0, 10).map(paperCandidateView),
       placed,
@@ -3088,6 +3105,10 @@ function paperStatus() {
     paperState.lastBlockReason ||
     (availableSlots <= 0 ? 'MAX_ACTIVE_REACHED' : availableRisk < equity * cfg.riskPct / 100
       ? 'RISK_BUDGET_REACHED' : null);
+  const dailyPnlDate = new Date().toISOString().slice(0, 10);
+  const dailyRealizedPnl = closed.filter(trade => paperIsTrialTrade(trade) &&
+    trade.outcome !== 'CANCELLED' && String(trade.closedAt || '').slice(0, 10) === dailyPnlDate)
+    .reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
   return {
     ok: true, service: 'nexora-paper-bot', enabled: paperState.enabled,
     running: paperStarted, paused: !!paperState.paused, killSwitch: !!paperState.killSwitch,
@@ -3128,6 +3149,8 @@ function paperStatus() {
     riskBudget: Number(riskBudget.toFixed(2)),
     availableRisk: Number(availableRisk.toFixed(2)),
     dailyLossR: Number(dailyLossR.toFixed(2)),
+    dailyPnlDate,
+    dailyRealizedPnl: Number(dailyRealizedPnl.toFixed(2)),
     dailyGuard: dailyLossR <= -cfg.maxDailyLossR,
     blockReason,
     alerts: {
@@ -3151,6 +3174,7 @@ function paperStatus() {
     nextScanAt: new Date(paperNextQuarter(Date.now())).toISOString(),
     lastMonitorAt: paperState.lastMonitorAt, lastPriceAt: paperState.lastPriceAt,
     lastError: paperState.lastError, activeTrades: active,
+    watchlistQueue: (paperState.watchlistQueue || []).slice(),
     recentScans: paperState.recentScans.slice(0, 20),
     closedTrades: closed.slice(0, 100),
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
@@ -3463,11 +3487,52 @@ function paperStats(query) {
   let cumulative = 0;
   let peak = 0;
   let maxDrawdownR = 0;
+  const startingEquity = paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY);
+  let realizedEquity = startingEquity;
+  let equityPeak = startingEquity;
+  let maxDrawdownPnl = 0;
+  let maxDrawdownPct = 0;
+  const dailyPnl = new Map();
   chronological.forEach(trade => {
     cumulative += paperNumber(trade.r);
     peak = Math.max(peak, cumulative);
     maxDrawdownR = Math.max(maxDrawdownR, peak - cumulative);
+    realizedEquity += paperNumber(trade.pnl);
+    equityPeak = Math.max(equityPeak, realizedEquity);
+    const drawdown = Math.max(0, equityPeak - realizedEquity);
+    maxDrawdownPnl = Math.max(maxDrawdownPnl, drawdown);
+    if (equityPeak > 0) maxDrawdownPct = Math.max(maxDrawdownPct, drawdown / equityPeak * 100);
+    const closedAt = Date.parse(trade.closedAt || '');
+    if (closedAt) {
+      const day = new Date(closedAt).toISOString().slice(0, 10);
+      dailyPnl.set(day, (dailyPnl.get(day) || 0) + paperNumber(trade.pnl));
+    }
   });
+  const dailyDates = [...dailyPnl.keys()].sort();
+  let dailySharpe = null;
+  let dailySharpeDays = 0;
+  if (dailyDates.length) {
+    const firstDay = Date.parse(dailyDates[0] + 'T00:00:00Z');
+    const lastDay = Date.parse(dailyDates[dailyDates.length - 1] + 'T00:00:00Z');
+    const dayCount = Math.floor((lastDay - firstDay) / 86400000) + 1;
+    if (dayCount >= 1 && dayCount <= 3650) {
+      const returns = [];
+      let priorPnl = 0;
+      for (let offset = 0; offset < dayCount; offset++) {
+        const day = new Date(firstDay + offset * 86400000).toISOString().slice(0, 10);
+        const dayPnl = dailyPnl.get(day) || 0;
+        const baseEquity = startingEquity + priorPnl;
+        if (baseEquity > 0) returns.push(dayPnl / baseEquity);
+        priorPnl += dayPnl;
+      }
+      dailySharpeDays = returns.length;
+      if (returns.length >= 30) {
+        const meanReturn = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+        const variance = returns.reduce((sum, value) => sum + Math.pow(value - meanReturn, 2), 0) / (returns.length - 1);
+        if (variance > 0) dailySharpe = meanReturn / Math.sqrt(variance) * Math.sqrt(365);
+      }
+    }
+  }
   const filled = closed.filter(trade => trade.openedAt);
   const rValues = closed.map(trade => paperNumber(trade.r));
   const fillTimes = filled.map(trade => Math.max(0,
@@ -3506,6 +3571,10 @@ function paperStats(query) {
       expectancyR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
       profitFactor: profitFactor == null ? null : Number(profitFactor.toFixed(2)),
       maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
+      maxDrawdownPnl: Number(maxDrawdownPnl.toFixed(2)),
+      maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
+      realizedDailySharpe: dailySharpe == null ? null : Number(dailySharpe.toFixed(2)),
+      realizedDailySharpeDays: dailySharpeDays,
       grossProfitR: Number(grossProfitR.toFixed(2)),
       grossLossR: Number(grossLossR.toFixed(2)),
       pnl: Number(closed.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0).toFixed(2)),
@@ -3657,7 +3726,7 @@ const server = http.createServer(async (req, res) => {
       configured: Boolean(PAPER_ADMIN_TOKEN),
       controlsEnabled: Boolean(PAPER_ADMIN_TOKEN),
       auth: 'Authorization: Bearer <PAPER_ADMIN_TOKEN>',
-      actions: ['pause', 'kill-switch', 'settings', 'manual-entry', 'close', 'cancel', 'close-all'],
+      actions: ['pause', 'kill-switch', 'settings', 'watchlist-priority', 'manual-entry', 'close', 'cancel', 'close-all'],
       alerts: {
         telegram: TELEGRAM_ALERTS_ENABLED,
         discord: Boolean(DISCORD_WEBHOOK_URL)
@@ -3668,6 +3737,7 @@ const server = http.createServer(async (req, res) => {
   if (requestUrl.pathname === '/paper/admin/pause' ||
       requestUrl.pathname === '/paper/admin/kill-switch' ||
       requestUrl.pathname === '/paper/admin/settings' ||
+      requestUrl.pathname === '/paper/admin/watchlist' ||
       requestUrl.pathname === '/paper/admin/manual' ||
       requestUrl.pathname === '/paper/admin/close-all' ||
       /^\/paper\/admin\/trades\/[^/]+\/(close|cancel)$/.test(requestUrl.pathname)) {
@@ -3701,6 +3771,35 @@ const server = http.createServer(async (req, res) => {
       if (requestUrl.pathname === '/paper/admin/settings') {
         const settings = updatePaperSettings(body.settings || body.config || body);
         send(res, 200, JSON.stringify({ok: true, action: 'settings', settings, status: paperStatus()}));
+        return;
+      }
+      if (requestUrl.pathname === '/paper/admin/watchlist') {
+        const inputSymbols = Array.isArray(body.symbols) ? body.symbols : [body.sym || body.symbol];
+        const symbols = [...new Set(inputSymbols.map(value => String(value || '').toUpperCase()
+          .replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '')).filter(Boolean))];
+        if (!symbols.length || symbols.length > 5) {
+          paperControlError(res, 400, 'Kirim 1–5 symbol watchlist yang valid');
+          return;
+        }
+        const unsupported = symbols.filter(sym => !PAPER_SYMBOLS.includes(sym));
+        if (unsupported.length) {
+          paperControlError(res, 400, 'Symbol belum didukung bot VPS: ' + unsupported.join(', '));
+          return;
+        }
+        const queued = new Set((paperState.watchlistQueue || []).map(item => item.sym));
+        symbols.forEach(sym => queued.add(sym));
+        if (queued.size > 5) {
+          paperControlError(res, 400, 'Antrean Watchlist maksimal 5 symbol; jalankan scan berikutnya dulu');
+          return;
+        }
+        const oldQueue = paperState.watchlistQueue || [];
+        paperState.watchlistQueue = [...queued].map(sym => {
+          const existing = oldQueue.find(item => item.sym === sym);
+          return existing || {sym, requestedAt: new Date().toISOString()};
+        });
+        paperState.settingsUpdatedAt = new Date().toISOString();
+        savePaperState();
+        send(res, 200, JSON.stringify({ok: true, action: 'watchlist-queued', queued: paperState.watchlistQueue, status: paperStatus()}));
         return;
       }
       if (requestUrl.pathname === '/paper/admin/manual') {

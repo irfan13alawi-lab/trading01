@@ -7,7 +7,7 @@
   <style>
     :root{color-scheme:dark;--bg:#07090f;--card:#0d1117;--border:#21262d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--blue:#58a6ff;--yellow:#e3b341}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:16px}
-    main{max-width:680px;margin:auto}.brand{font-weight:800;font-size:18px;letter-spacing:.4px;margin:8px 0 4px}.sub{color:var(--muted);font-size:12px;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}.label{font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.5px}.value{font-size:24px;font-weight:800;margin-top:5px}.status{margin:14px 0;padding:12px;border-radius:8px;border:1px solid var(--border)}.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}button,a{display:inline-block;border:1px solid var(--border);border-radius:7px;background:#161b25;color:var(--text);padding:8px 12px;text-decoration:none;font-weight:700;cursor:pointer}button{margin-right:6px}.foot{color:var(--muted);font-size:11px;margin-top:16px}@media(max-width:420px){body{padding:10px}.value{font-size:20px}}
+    main{max-width:680px;margin:auto}.brand{font-weight:800;font-size:18px;letter-spacing:.4px;margin:8px 0 4px}.sub{color:var(--muted);font-size:12px;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}.label{font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.5px}.value{font-size:24px;font-weight:800;margin-top:5px}.status{margin:14px 0;padding:12px;border-radius:8px;border:1px solid var(--border)}.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}button,a{display:inline-block;border:1px solid var(--border);border-radius:7px;background:#161b25;color:var(--text);padding:8px 12px;text-decoration:none;font-weight:700;cursor:pointer}button{margin-right:6px}.foot{color:var(--muted);font-size:11px;margin-top:16px}.positions{margin-top:14px}.positions h2{font-size:13px;margin:0 0 8px}.position{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;margin:7px 0}.position-top{display:flex;justify-content:space-between;gap:8px;font-weight:700}.position-detail{color:var(--muted);font-size:11px;margin-top:4px}.empty{color:var(--muted);font-size:12px;padding:12px;border:1px dashed var(--border);border-radius:8px}@media(max-width:420px){body{padding:10px}.value{font-size:20px}}
   </style>
 </head>
 <body><main>
@@ -17,24 +17,50 @@
   <div class="grid">
     <div class="card"><div class="label">Equity</div><div class="value" id="equity">--</div></div>
     <div class="card"><div class="label">uPnL</div><div class="value" id="upnl">--</div></div>
-    <div class="card"><div class="label">Open / Pending</div><div class="value" id="open">--</div></div>
-    <div class="card"><div class="label">Daily R</div><div class="value" id="daily">--</div></div>
+    <div class="card"><div class="label">Open / Partial / Pending</div><div class="value" id="open">--</div></div>
+    <div class="card"><div class="label">Daily R (UTC)</div><div class="value" id="daily">--</div></div>
+    <div class="card"><div class="label">Daily realized PnL</div><div class="value" id="daily-pnl">--</div><div class="position-detail" id="daily-date">UTC --</div></div>
     <div class="card"><div class="label">Closed</div><div class="value" id="closed">--</div></div>
     <div class="card"><div class="label">Next scan</div><div class="value" style="font-size:14px" id="next">--</div></div>
   </div>
+  <section class="positions"><h2>Active paper positions</h2><div id="positions" class="empty">Loading positions...</div></section>
   <div style="margin-top:14px"><button onclick="refresh()">Refresh</button><a href="/">Full dashboard</a></div>
   <div class="foot">Kontrol yang mengubah state order tidak ditempatkan di halaman mobile tanpa token admin server. Riwayat tetap tersimpan di VPS.</div>
 </main>
 <script>
   var api=(location.protocol+'//'+location.hostname+':18085')+'/paper/status';
   function set(id,value,color){var e=document.getElementById(id);if(e)e.textContent=value;if(e&&color)e.style.color=color;}
+  function renderPositions(items){
+    var host=document.getElementById('positions');if(!host)return;
+    var active=(Array.isArray(items)?items:[]).filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL'||t.status==='PENDING';}).slice(0,20);
+    host.replaceChildren();
+    if(!active.length){host.className='empty';host.textContent='No active paper positions.';return;}
+    host.className='';
+    active.forEach(function(t){
+      var card=document.createElement('div');card.className='position';
+      var top=document.createElement('div');top.className='position-top';
+      var title=document.createElement('span');title.textContent=String(t.sym||'--')+' · '+String(t.dir||'--');
+      var state=document.createElement('span');state.textContent=String(t.status||'--');
+      state.style.color=t.status==='PENDING'?'var(--yellow)':t.status==='TP1_PARTIAL'?'var(--blue)':'var(--green)';
+      top.append(title,state);
+      var detail=document.createElement('div');detail.className='position-detail';
+      var entry=Number(t.entryActual||t.entryLimit||0);
+      detail.textContent='Entry $'+(entry?entry.toPrecision(7):'--')+' · SL $'+(Number(t.sl||0)?Number(t.sl).toPrecision(7):'--')+' · '+(t.status==='TP1_PARTIAL'?'TP2':'TP1')+' $'+(Number(t.status==='TP1_PARTIAL'?t.tp2:t.tp1||0)?Number(t.status==='TP1_PARTIAL'?t.tp2:t.tp1).toPrecision(7):'--');
+      card.append(top,detail);
+      if(t.status==='OPEN'||t.status==='TP1_PARTIAL'){
+        var pnl=document.createElement('div');pnl.className='position-detail';var value=Number(t.unrealPnl||0);
+        pnl.textContent='Unrealized PnL '+(value>=0?'+':'')+'$'+value.toFixed(2);pnl.style.color=value>=0?'var(--green)':'var(--red)';card.append(pnl);
+      }
+      host.append(card);
+    });
+  }
   function refresh(){fetch(api,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
     if(!d.ok)throw Error(d.error||'status unavailable');
     var paused=d.paused||d.killSwitch, label=d.killSwitch?'KILL SWITCH':d.paused?'PAUSED':d.running?'PAPER ON':'STOPPED';
     var cls=d.killSwitch||!d.running?'bad':d.paused?'warn':'ok';
     var box=document.getElementById('status');box.className='status '+cls;box.textContent=label+' · '+(d.strategyVersion||'--')+' · '+(d.blockReason||'ready');
     set('equity','$'+Number(d.equity||0).toFixed(2));set('upnl',(Number(d.unrealizedPnl||0)>=0?'+':'')+'$'+Number(d.unrealizedPnl||0).toFixed(2),Number(d.unrealizedPnl||0)>=0?'var(--green)':'var(--red)');
-    set('open',Number(d.summary&&d.summary.open||0)+' / '+Number(d.summary&&d.summary.pending||0));set('daily',(Number(d.dailyLossR||0)>=0?'+':'')+Number(d.dailyLossR||0).toFixed(2)+'R',d.dailyGuard?'var(--red)':'var(--text)');set('closed',String(d.summary&&d.summary.closed||0));set('next',d.nextScanAt?new Date(d.nextScanAt).toLocaleTimeString('id-ID'):'--');
+    set('open',Number(d.summary&&d.summary.open||0)+' / '+Number(d.summary&&d.summary.partial||0)+' / '+Number(d.summary&&d.summary.pending||0));set('daily',(Number(d.dailyLossR||0)>=0?'+':'')+Number(d.dailyLossR||0).toFixed(2)+'R',d.dailyGuard?'var(--red)':'var(--text)');var dailyPnl=Number(d.dailyRealizedPnl||0);set('daily-pnl',(dailyPnl>=0?'+':'')+'$'+dailyPnl.toFixed(2),dailyPnl>=0?'var(--green)':'var(--red)');set('daily-date','UTC '+String(d.dailyPnlDate||'--'));set('closed',String(d.summary&&d.summary.closed||0));set('next',d.nextScanAt?new Date(d.nextScanAt).toLocaleTimeString('id-ID'):'--');renderPositions(d.activeTrades);
   }).catch(function(e){var box=document.getElementById('status');box.className='status bad';box.textContent='VPS offline · '+e.message;});}
   refresh();setInterval(refresh,15000);
 </script></body></html>

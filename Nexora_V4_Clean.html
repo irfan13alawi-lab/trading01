@@ -174,7 +174,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   background:var(--bg2);border-bottom:1px solid var(--border);font-size:11px;}
 #bot-ops{flex:1 1 100%;padding:6px 0;border-top:1px solid rgba(255,255,255,.05);color:var(--text2);font-size:10px;line-height:1.6;}
 #positions-widget{display:none;}
-.mini-chart{width:100%;height:60px;}
+.mini-chart{width:100%;height:96px;}
 .mini-ov{position:relative;}
 .rb{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;}
 .ld{color:var(--text3);text-align:center;padding:30px;}
@@ -441,7 +441,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- ============ PUMP RADAR ============ -->
 <div class="page" id="p-pump">
-  <div class="card"><div class="card-t"><i class="fa-solid fa-circle-info"></i> PumpRadar Legend</div><div class="muted" style="margin-top:6px;line-height:1.8;"><span class="badge ba">A</span> high-quality setup · <span class="badge bb">B</span> watchlist · <span class="badge bn">L2</span> lower-liquidity layer. Hidden Gems = derivatives tersedia + Layer 2 + funding negatif + OI meningkat; bukan rekomendasi entry tanpa MTF confirmation.</div></div>
+  <div class="card"><div class="card-t"><i class="fa-solid fa-circle-info"></i> PumpRadar Legend</div><div class="muted" style="margin-top:6px;line-height:1.8;"><span class="badge ba">A</span> score ≥ 8/12 · <span class="badge bb">B</span> score 6.5–7.9/12 · <span class="badge bn">C</span> score &lt; 6.5/12 · <span class="badge bn">L2</span> lower-liquidity universe segment. Volume bar compares the scanner's relative volume reading; IN POSITION means a VPS paper order exists. Hidden Gems requires derivatives data, L2, negative funding and rising OI; informational only—not an entry signal.</div></div>
   <div class="g2">
     <div class="card"><div class="card-t"><i class="fa-solid fa-fire" style="color:#f0883e;"></i> Pumping</div><div id="pump-l"><div class="ld">--</div></div></div>
     <div class="card"><div class="card-t"><i class="fa-solid fa-arrow-trend-down" style="color:#f85149;"></i> Dumping</div><div id="dump-l"><div class="ld">--</div></div></div>
@@ -2184,7 +2184,7 @@ function renderPump() {
     var active = BOT.activeTrades.some(function(t){return t.sym===p.s && (t.status==='OPEN'||t.status==='PENDING'||t.status==='TP1_PARTIAL');});
     return '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.03);">'
       + '<div style="display:flex;align-items:center;gap:7px;"><span style="color:#484f58;font-size:10px;min-width:18px;">#' + rank + '</span>'
-      + '<b>' + p.s + '</b> <span class="badge ' + (p.tier==='A'?'ba':'bb') + '">' + p.tier + '</span>' + (active ? ' <span class="status-chip status-warn">IN POSITION</span>' : '') + '</div>'
+      + '<b>' + p.s + '</b> <span class="badge ' + (p.tier==='A'?'ba':p.tier==='B'?'bb':'bn') + '">' + p.tier + '</span>' + (active ? ' <span class="status-chip status-warn">IN POSITION</span>' : '') + '</div>'
       + '<div style="text-align:right;"><div style="color:' + col + ';font-weight:700;">' + fC(p.chg) + '</div>'
       + '<div style="font-size:9px;color:#484f58;">' + fV(p.vol) + ' · ' + (p.volRatio ? Number(p.volRatio).toFixed(2) + 'x' : 'vol n/a') + '</div>'
       + '<div style="width:110px;height:4px;background:#07090f;border-radius:3px;overflow:hidden;margin-top:4px;"><div style="width:' + volPct + '%;height:100%;background:' + col + ';border-radius:3px;"></div></div></div></div>';
@@ -2198,10 +2198,10 @@ function renderPump() {
   }
   var pumps = sorted.filter(function(p){return p.chg>0;}).slice(0,10);
   var dumps = sorted.filter(function(p){return p.chg<0;}).reverse().slice(0,10);
-  var gems = pairs.filter(function(p){return hasDerivatives(p)&&p.layer==='L2'&&p.fund<0&&p.oi>0;}).sort(function(a,b){return b.sc-a.sc;}).slice(0,10);
+  var gems = pairs.filter(function(p){return hasDerivatives(p)&&p.fundReal===true&&p.oiDeltaReal===true&&p.layer==='L2'&&p.fund<0&&p.oi>0;}).sort(function(a,b){return b.sc-a.sc;}).slice(0,10);
   document.getElementById('pump-l').innerHTML = pumps.map(function(p,i){return row(p,i+1);}).join('') || '<div class="ld"><span>None</span></div>';
   document.getElementById('dump-l').innerHTML = dumps.map(function(p,i){return row(p,i+1);}).join('') || '<div class="ld"><span>None</span></div>';
-  document.getElementById('gems-l').innerHTML = gems.map(function(p,i){return gemRow(p,i+1);}).join('') || '<div class="ld"><span>Run scan</span></div>';
+  document.getElementById('gems-l').innerHTML = gems.map(function(p,i){return gemRow(p,i+1);}).join('') || '<div class="ld"><span>No qualifying Hidden Gems in this scan</span></div>';
 }
 
 var WL_SPARK_RENDER_SEQ = 0;
@@ -2260,7 +2260,7 @@ function renderWL() {
     html.push('</div>');
     html.push('<div style="display:flex;gap:4px;">');
     html.push('<button class="btn btn-sm btn-blue" onclick="openGC(\'' + w.sym.replace('USDT','') + '\')"><i class="fa-solid fa-chart-line"></i> Chart</button>');
-    html.push('<button class="btn btn-sm" onclick="sendWatchToBot(' + idx + ')" title="Re-evaluate at next VPS scan"><i class="fa-solid fa-paper-plane"></i> Bot</button>');
+    html.push('<button class="btn btn-sm" onclick="sendWatchToBot(' + idx + ')" title="Queue priority for the next VPS scan; MTF and risk checks remain mandatory"><i class="fa-solid fa-paper-plane"></i> Queue VPS</button>');
     html.push('<button class="btn btn-sm" style="background:rgba(248,81,73,.08);color:#f85149;border:1px solid rgba(248,81,73,.2);" onclick="rmSetup(' + idx + ')">X</button>');
     html.push('</div></div>');
 
@@ -2317,7 +2317,7 @@ function renderWL() {
       }) : [];
       if (!el) return;
       if (candles.length < 2) {
-        el.innerHTML = '<div style="height:70px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
+        el.innerHTML = '<div style="height:96px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
         return;
       }
       var values = candles.map(function(row) { return Number(row[4]); });
@@ -2334,7 +2334,7 @@ function renderWL() {
     }).catch(function() {
       if (sparkSeq !== WL_SPARK_RENDER_SEQ) return;
       var el = document.getElementById('mini-' + index);
-      if (el) el.innerHTML = '<div style="height:70px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
+      if (el) el.innerHTML = '<div style="height:96px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:10px;">Historical 1H candles unavailable</div>';
     });
   });
 
@@ -2472,8 +2472,13 @@ function sendWatchToBot(idx) {
   G.scanFocus=sym;
   var p=fp(sym);
   if(p) { switchCoin(p.id,sym); }
-  sLog('Watchlist '+sym+' sent to the next VPS scan context. VPS still applies its own MTF/risk filters.');
-  toast('<i class="fa-solid fa-paper-plane" style="color:#58a6ff;"></i> '+sym+' ditandai untuk re-evaluasi VPS pada scan berikutnya.','a');
+  adminPost('/admin/watchlist', {symbols:[sym]}).then(function(data){
+    if(data.status) applyServerPaperStatus(data.status, false);
+    sLog('Watchlist '+sourceEsc(sym)+' queued for priority MTF evaluation on the next VPS scan.');
+    toast('<i class="fa-solid fa-paper-plane" style="color:#58a6ff;"></i> '+sourceEsc(sym)+' masuk antrean scan VPS. Ini bukan order: MTF, kualitas data, whitelist, dan risk guard tetap berlaku.','a');
+  }).catch(function(error){
+    toast('<i class="fa-solid fa-circle-exclamation" style="color:#f0883e;"></i> Antrean VPS gagal: '+sourceEsc(error.message||error)+'. Cek admin token di Operations.','a');
+  });
 }
 
 function journalDateKey(t) {
@@ -3098,17 +3103,20 @@ function renderOIFromDeriv() {
     var sym = p.s + 'USDT';
     var d = G.derivs[p.s] || {};
     if(d.oi > 0) updateOIHistory(p.s, d.oi);
-    var oiUSD = d.oi ? '$' + (d.oi / 1e9).toFixed(2) + 'B' : 'N/A';
+    var oiUsdValue = Number(p.oiUSD || d.oi || 0);
+    var oiUSD = oiUsdValue > 0 ? fV(oiUsdValue) : 'N/A';
     var fundSrc = d.src ? ' <span style="font-size:8px;color:#3fb950;">' + d.src + '</span>' : '';
-    var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
+    var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0 ? 'color:#f85149;' : '';
+    var oiKnown = p.oiDeltaReal === true && p.oi != null;
+    var signal = String(p.sig || 'NEU').toUpperCase();
+    var signalColor = signal === 'BUY' || signal === 'PUMP' || signal === 'LONG' ? '#3fb950' : signal === 'SELL' || signal === 'DUMP' || signal === 'SHORT' ? '#f85149' : '#8b949e';
     rows.push('<tr onclick="showOIHistory(\'' + sourceEsc(p.s) + '\')">');
     rows.push('<td class="tl"><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">' + p.layer + '</span></td>');
     rows.push('<td>' + oiUSD + '</td>');
-    var oiKnown = p.oi != null;
-    rows.push('<td class="' + (oiKnown ? (p.oi >= 0 ? 'up' : 'dn') : 'nu') + '">' + (oiKnown ? oiText({derivativesAvailable:true,oi:p.oi * 0.3}, 2) : 'N/A') + '</td>');
     rows.push('<td class="' + (oiKnown ? (p.oi >= 0 ? 'up' : 'dn') : 'nu') + '">' + (oiKnown ? oiText(p, 2) : 'N/A') + '</td>');
-    rows.push('<td style="' + fc + '">' + (p.fund >= 0 ? '+' : '') + (p.fund*100).toFixed(4) + '%' + fundSrc + '</td>');
-    rows.push('<td class="' + (p.liq > 1e6 ? 'up' : 'nu') + '">' + fV(p.liq) + '</td>');
+    rows.push('<td style="' + fc + '">' + fundingText(p, 4) + fundSrc + '</td>');
+    rows.push('<td>' + fP(p.price) + '</td>');
+    rows.push('<td><span class="badge ' + (signalColor === '#3fb950' ? 'ba' : signalColor === '#f85149' ? 'br' : 'bn') + '" style="color:' + signalColor + ';">' + sourceEsc(signal) + '</span></td>');
     rows.push('</tr>');
   });
   document.getElementById('oi-tb').innerHTML = rows.join('');
@@ -3155,15 +3163,17 @@ function fetchOI() {
   pairs.slice(0,25).forEach(function(p) {
     if(p.oiUSD > 0) updateOIHistory(p.s, p.oiUSD);
     var oi_usd = p.oiUSD > 0 ? fV(p.oiUSD) : 'N/A';
-    var oiKnown = p.oi != null;
+    var oiKnown = p.oiDeltaReal === true && p.oi != null;
     var fc = p.fund < 0 ? 'color:#3fb950;font-weight:700;' : p.fund > 0.01 ? 'color:#f85149;' : '';
     rows.push('<tr onclick="showOIHistory(\'' + sourceEsc(p.s) + '\')">');
     rows.push('<td class="tl"><b>' + p.s + '</b> <span style="font-size:9px;color:#484f58;">' + p.layer + '</span></td>');
     rows.push('<td>' + oi_usd + '</td>');
-    rows.push('<td class="' + (oiKnown ? (p.oi>=0?'up':'dn') : 'nu') + '">' + (oiKnown ? oiText({derivativesAvailable:true,oi:p.oi*0.3}, 2) : 'N/A') + '</td>');
     rows.push('<td class="' + (oiKnown ? (p.oi>=0?'up':'dn') : 'nu') + '">' + (oiKnown ? oiText(p, 2) : 'N/A') + '</td>');
     rows.push('<td style="' + fc + '">' + fundingText(p, 4) + '</td>');
-    rows.push('<td class="' + (p.liq>1e6?'up':'nu') + '">' + fV(p.liq) + '</td>');
+    rows.push('<td>' + fP(p.price) + '</td>');
+    var signal = String(p.sig || 'NEU').toUpperCase();
+    var signalColor = signal === 'BUY' || signal === 'PUMP' || signal === 'LONG' ? '#3fb950' : signal === 'SELL' || signal === 'DUMP' || signal === 'SHORT' ? '#f85149' : '#8b949e';
+    rows.push('<td><span class="badge ' + (signalColor === '#3fb950' ? 'ba' : signalColor === '#f85149' ? 'br' : 'bn') + '" style="color:' + signalColor + ';">' + sourceEsc(signal) + '</span></td>');
     rows.push('</tr>');
   });
   document.getElementById('oi-tb').innerHTML = rows.join('');
@@ -4900,6 +4910,7 @@ function renderServerPaperScan(status) {
     var ind = c.indicators || (c.mtf && c.mtf.M15 && c.mtf.M15.indicators) || {};
     var scores = c.signalScores || (c.scoreBreakdown && c.scoreBreakdown.signalScores) || {};
     var isPlaced = c.status === 'PENDING' || c.status === 'OPEN' || c.status === 'TP1_PARTIAL';
+    var isWatchPriority = c.watchlistPriority === true || (Array.isArray(scan.watchlistPriority) && scan.watchlistPriority.indexOf(c.sym) >= 0);
     var quality = c.dataQuality || '--';
     var qualityColor = quality === 'FULL' ? '#3fb950' : quality === 'STALE' || quality === 'REJECTED' ? '#f85149' : '#e3b341';
     var levels = isPlaced ? '<div style="font-size:9px;color:#8b949e;margin-top:4px;">Entry <b style="color:#e3b341;">' + sourceEsc(String(c.entryLimit || '--')) + '</b> · SL <b style="color:#f85149;">' + sourceEsc(String(c.slAfterTp1 || c.sl || '--')) + '</b> · TP1 <b style="color:#3fb950;">' + sourceEsc(String(c.tp1 || '--')) + '</b> · TP2 <b style="color:#3fb950;">' + sourceEsc(String(c.tp2 || '--')) + '</b>' + (c.remainingSize != null ? ' · rem ' + sourceEsc(String(c.remainingSize)) : '') + '</div>' : '';
@@ -4907,6 +4918,7 @@ function renderServerPaperScan(status) {
     var indicatorLine = (ind.rsi != null || ind.stochRsiK != null || ind.candlePattern) ? '<div style="font-size:9px;color:#8b949e;margin-top:3px;">RSI ' + sourceEsc(String(ind.rsi == null ? '--' : ind.rsi)) + ' · Stoch ' + sourceEsc(String(ind.stochRsiK == null ? '--' : ind.stochRsiK)) + '/' + sourceEsc(String(ind.stochRsiD == null ? '--' : ind.stochRsiD)) + ' · ' + sourceEsc(String(ind.candlePattern || 'no pattern')) + '</div>' : '';
     var marketLine = '24H ' + (c.chg == null ? '--' : Number(c.chg).toFixed(2) + '%') + ' · F ' + (c.fund == null ? '--' : Number(c.fund).toFixed(5)) + ' · OI ' + (c.oi == null ? '--' : Number(c.oi).toFixed(2) + '%') + ' · Vol ' + (c.volumeRatio == null ? '--' : Number(c.volumeRatio).toFixed(2) + 'x');
     var stateLine = isPlaced ? '<span style="color:#3fb950;">' + sourceEsc(c.status) + '</span>' : '<span style="color:#e3b341;">candidate / tidak ditempatkan</span>';
+    if(isWatchPriority) stateLine += ' <span style="color:#58a6ff;">· WATCHLIST PRIORITY</span>';
     return '<div style="display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:7px 8px;border:1px solid ' + (isPlaced ? 'rgba(63,185,80,.35)' : '#21262d') + ';border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
       + '<div><b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
       + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span> · ' + stateLine + '</div>'
@@ -4919,9 +4931,11 @@ function renderServerPaperScan(status) {
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
   var trialInfo = (status.strategyVersion || 'MTF_ATR_V2') + ' · cohort ' + (status.cohortId || '--');
   var capacity = scan.capacity || {};
+  var queueCount = Array.isArray(status.watchlistQueue) ? status.watchlistQueue.length : 0;
   var guardInfo = 'daily ' + Number(status.dailyLossR || capacity.dailyLossR || 0).toFixed(2) + 'R/' + Number(status.maxDailyLossR || 0).toFixed(2) + 'R'
     + ' · risk $' + Number(capacity.availableRisk == null ? status.availableRisk || 0 : capacity.availableRisk).toFixed(2)
-    + ' · slots ' + Number(capacity.availableSlots == null ? status.availableSlots || 0 : capacity.availableSlots);
+    + ' · slots ' + Number(capacity.availableSlots == null ? status.availableSlots || 0 : capacity.availableSlots)
+    + ' · watchlist queue ' + queueCount;
   var rejectionCodes = [];
   (Array.isArray(scan.rejected) ? scan.rejected : []).forEach(function(item){
     (Array.isArray(item.codes) ? item.codes : []).forEach(function(code){ rejectionCodes.push(code); });
@@ -5256,7 +5270,7 @@ function renderVpsStats(data) {
     sampleNote.textContent = (closedCount < 50
       ? 'Sampel masih kecil: ' + closedCount + '/50 trade tertutup. Jangan simpulkan edge atau ubah strategi dari sampel ini; lanjutkan paper trial.'
       : 'Sampel mencapai ' + closedCount + ' trade tertutup. Tetap evaluasi per periode dan kondisi market sebelum menyimpulkan performa.')
-      + ' Filter aktif: ' + strategyLabel + ' · ' + cohortLabel + '.';
+      + ' Sharpe annualized (√365) baru dihitung setelah 30 hari kalender, dari PnL terealisasi, tanpa mark-to-market dan tanpa risk-free rate. Filter aktif: ' + strategyLabel + ' · ' + cohortLabel + '.';
   }
   var pf = m.profitFactor == null ? '--' : Number(m.profitFactor).toFixed(2);
   var kpis = [
@@ -5265,6 +5279,8 @@ function renderVpsStats(data) {
     ['Profit factor', pf, Number(m.profitFactor || 0) >= 1 ? '#3fb950' : '#f85149'],
     ['Expectancy', Number(m.expectancyR || 0).toFixed(3) + 'R', Number(m.expectancyR || 0) >= 0 ? '#3fb950' : '#f85149'],
     ['Net / Max DD', Number(m.netR || 0).toFixed(2) + 'R / ' + Number(m.maxDrawdownR || 0).toFixed(2) + 'R', Number(m.netR || 0) >= 0 ? '#3fb950' : '#f85149'],
+    ['Max DD %', Number(m.maxDrawdownPct || 0).toFixed(2) + '% ($' + Number(m.maxDrawdownPnl || 0).toFixed(2) + ')', Number(m.maxDrawdownPct || 0) > 10 ? '#f85149' : '#e3b341'],
+    ['Realized daily Sharpe (ann.)', m.realizedDailySharpe == null ? '-- (' + Number(m.realizedDailySharpeDays || 0) + '/30 days)' : Number(m.realizedDailySharpe).toFixed(2), '#58a6ff'],
     ['TP1 / TP2 / SL', (m.tp1Hits || 0) + ' / ' + (m.tp2Hits || 0) + ' / ' + (m.stopLosses || 0), '#e3b341'],
     ['Expired', (sample.pendingExpired || 0) + ' (' + Number(m.pendingExpiredRate || 0).toFixed(1) + '%)', '#e3b341'],
     ['Avg / Median R', Number(m.averageR || 0).toFixed(3) + ' / ' + Number(m.medianR || 0).toFixed(3), '#c9d1d9'],
@@ -6675,7 +6691,7 @@ function renderPositionsWidget() {
   if(!widget || !list) return;
 
   var active = BOT.activeTrades.filter(function(t){
-    return t.status === 'OPEN' || t.status === 'PENDING';
+    return t.status === 'OPEN' || t.status === 'TP1_PARTIAL' || t.status === 'PENDING';
   });
   var sortMode = G.posSort || 'status';
   active.sort(function(a,b){
@@ -6692,8 +6708,9 @@ function renderPositionsWidget() {
   widget.style.display = 'block';
 
   var open    = active.filter(function(t){return t.status==='OPEN';}).length;
+  var partial = active.filter(function(t){return t.status==='TP1_PARTIAL';}).length;
   var pending = active.filter(function(t){return t.status==='PENDING';}).length;
-  sumEl.textContent = open + ' open, ' + pending + ' pending';
+  sumEl.textContent = open + ' open, ' + partial + ' partial, ' + pending + ' pending';
 
   // Calculate total unrealized PnL
   var totalPnl = 0;
@@ -6706,7 +6723,9 @@ function renderPositionsWidget() {
         t.currentPrice = p.price;
         t.unrealPnl = ((p.price - entryP) / entryP) * t.size * ((t.dir||'LONG')==='LONG'?1:-1);
         totalPnl += t.unrealPnl;
-      }
+      } else totalPnl += Number(t.unrealPnl || 0);
+    } else if(t.status === 'TP1_PARTIAL') {
+      totalPnl += Number(t.unrealPnl || 0);
     }
   });
 
@@ -6716,6 +6735,7 @@ function renderPositionsWidget() {
   // Build position cards
   list.innerHTML = active.map(function(t) {
     var isPending = t.status === 'PENDING';
+    var isPartial = t.status === 'TP1_PARTIAL';
     var p = null;
     for(var i=0;i<G.pairs.length;i++){ if(G.pairs[i].s===t.sym){p=G.pairs[i];break;} }
     var curPrice = t.currentPrice || t.entryLimit;
@@ -6726,13 +6746,14 @@ function renderPositionsWidget() {
     var unrealPct= entryP > 0 ? ((curPrice - entryP) / entryP * 100 * (tradeDir==='LONG'?1:-1)) : 0;
 
     // Progress bar: how far from entry to TP
-    var slDist = Math.abs(entryP - t.sl);
-    var tpDist = Math.abs(t.tp1 - entryP);
+    var activeSl = isPartial ? (t.slAfterTp1 || t.sl) : t.sl;
+    var activeTp = isPartial ? t.tp2 : t.tp1;
+    var tpDist = Math.abs(activeTp - entryP);
     var curDist = (curPrice - entryP) * (tradeDir==='LONG'?1:-1);
     var progress = tpDist > 0 ? Math.max(0, Math.min(100, (curDist / tpDist) * 100)) : 0;
     var progressColor = progress >= 50 ? '#3fb950' : progress >= 0 ? '#e3b341' : '#f85149';
 
-    var statusCol = isPending ? '#e3b341' : '#3fb950';
+    var statusCol = isPending ? '#e3b341' : isPartial ? '#58a6ff' : '#3fb950';
     var pnlCol    = unreal >= 0 ? '#3fb950' : '#f85149';
     var adminAction = G.paperServer
       ? (PAPER_ADMIN_TOKEN ? (isPending ? '<button class="btn btn-sm" onclick="cancelAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="padding:2px 5px;color:#e3b341;border-color:rgba(227,179,65,.35);">Cancel</button>' : '<button class="btn btn-sm" onclick="closeAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="padding:2px 5px;color:#f85149;border-color:rgba(248,81,73,.35);">Close</button>') : '<span title="Masukkan admin token di Operations" style="color:#484f58;font-size:10px;">🔒</span>')
@@ -6740,8 +6761,8 @@ function renderPositionsWidget() {
 
     var priceStr = curPrice >= 1000 ? '$' + Math.round(curPrice).toLocaleString('en') : '$' + curPrice.toFixed(curPrice >= 1 ? 3 : 5);
     var entryStr = entryP  >= 1000 ? '$' + Math.round(entryP).toLocaleString('en')  : '$' + entryP.toFixed(entryP >= 1 ? 3 : 5);
-    var slStr    = t.sl    >= 1000 ? '$' + Math.round(t.sl).toLocaleString('en')    : '$' + t.sl.toFixed(t.sl >= 1 ? 3 : 5);
-    var tpStr    = t.tp1   >= 1000 ? '$' + Math.round(t.tp1).toLocaleString('en')   : '$' + t.tp1.toFixed(t.tp1 >= 1 ? 3 : 5);
+    var slStr    = activeSl >= 1000 ? '$' + Math.round(activeSl).toLocaleString('en') : '$' + activeSl.toFixed(activeSl >= 1 ? 3 : 5);
+    var tpStr    = activeTp >= 1000 ? '$' + Math.round(activeTp).toLocaleString('en') : '$' + activeTp.toFixed(activeTp >= 1 ? 3 : 5);
 
     return '<div style="background:#161b25;border:1px solid #21262d;border-radius:7px;padding:9px 11px;min-width:180px;flex:1;max-width:220px;">'
       // Header
@@ -6749,7 +6770,7 @@ function renderPositionsWidget() {
       + '<div style="display:flex;align-items:center;gap:5px;">'
       + '<b style="font-size:12px;">' + t.sym + '</b>'
       + '<span style="font-size:9px;color:' + (tradeDir==='LONG'?'#3fb950':'#f85149') + ';">' + tradeDir + '</span>'
-      + '<span style="font-size:9px;background:rgba(' + (isPending?'227,179,65':'63,185,80') + ',.12);color:' + statusCol + ';border:1px solid ' + statusCol + '33;padding:1px 5px;border-radius:3px;">' + t.status + '</span>'
+      + '<span style="font-size:9px;background:' + statusCol + '1f;color:' + statusCol + ';border:1px solid ' + statusCol + '55;padding:1px 5px;border-radius:3px;">' + t.status + '</span>'
       + '</div>'
       + adminAction
       + '</div>'
@@ -6761,7 +6782,7 @@ function renderPositionsWidget() {
       // SL / TP
       + '<div style="font-size:10px;margin-bottom:4px;">'
       + '<span style="color:#484f58;">SL: </span><span style="color:#f85149;">' + slStr + '</span>'
-      + ' <span style="color:#484f58;">TP: </span><span style="color:#3fb950;">' + tpStr + '</span>'
+      + ' <span style="color:#484f58;">' + (isPartial ? 'TP2: ' : 'TP1: ') + '</span><span style="color:#3fb950;">' + tpStr + '</span>'
       + '</div>'
       // Progress bar (only for OPEN)
       + (isPending ? '<div style="font-size:9px;color:#e3b341;">Waiting for price to reach limit...</div>'
