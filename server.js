@@ -4362,6 +4362,14 @@ const server = http.createServer(async (req, res) => {
       send(res, 405, JSON.stringify({error: 'Method not allowed'}));
       return;
     }
+    send(res, 200, JSON.stringify(paperStatus({details: false, stats: false})));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/details') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
     send(res, 200, JSON.stringify(paperStatus()));
     return;
   }

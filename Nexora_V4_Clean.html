@@ -5846,7 +5846,7 @@ function pollPaperBotStatus() {
 
 function loadPaperBotDetails() {
   if(!PAPER_API || !G.paperServer) return;
-  fetch(PAPER_API + '/status', {cache:'no-store'})
+  fetch(PAPER_API + '/details', {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(status){ if(status && status.ok) applyServerPaperStatus(status, false); })
     .catch(function(){ /* fast summary remains authoritative when details are slow */ });
