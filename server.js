@@ -696,7 +696,32 @@ function paperReject(rejected, pair, codes, reasons) {
   rejected.push({
     sym: pair && pair.sym,
     codes: normalizedCodes,
-    reasons: [...new Set((Array.isArray(reasons) ? reasons : []).filter(Boolean))]
+    reasons: [...new Set((Array.isArray(reasons) ? reasons : []).filter(Boolean))],
+    timeframeReasons: paperTimeframeReasons(pair)
+  });
+}
+
+function paperTimeframeReasons(pair) {
+  const names = ['H4', 'H1', 'M30', 'M15'];
+  const direction = pair && pair.mtfDirection && pair.mtfDirection !== 'NEUTRAL'
+    ? pair.mtfDirection : null;
+  const mtf = pair && pair.mtf && typeof pair.mtf === 'object' ? pair.mtf : {};
+  return names.map(timeframe => {
+    const item = mtf[timeframe] || {};
+    const itemDirection = item.direction || 'UNAVAILABLE';
+    const status = item.status || 'UNAVAILABLE';
+    let reason = 'data tidak tersedia';
+    if (status !== 'FULL') reason = 'data ' + status.toLowerCase();
+    else if (itemDirection === 'NEUTRAL') reason = 'netral';
+    else if (direction && itemDirection !== direction) reason = 'berlawanan dengan ' + direction;
+    else if (timeframe === 'M15') reason = 'trigger searah';
+    else if (timeframe === 'M30') reason = 'konfirmasi searah';
+    else reason = 'searah';
+    return {
+      timeframe, direction: itemDirection, status,
+      sampleSize: Number(item.sampleSize || 0),
+      reason
+    };
   });
 }
 
@@ -2399,8 +2424,15 @@ function paperMtfSummary(mtf, referenceNow) {
   const higher = [mtf.H4, mtf.H1].filter(item => item && item.status === 'FULL');
   const higherAligned = direction !== 'NEUTRAL' && higher.length === 2 &&
     higher.every(item => item.direction === direction);
+  const higherOpposed = direction !== 'NEUTRAL' && higher.some(item =>
+    item.direction !== 'NEUTRAL' && item.direction !== direction);
+  const higherAnchorAligned = direction !== 'NEUTRAL' && higher.some(item =>
+    item.direction === direction);
   const confirmAligned = direction !== 'NEUTRAL' && mtf.M30 &&
     mtf.M30.status === 'FULL' && mtf.M30.direction === direction;
+  const confirmOpposed = direction !== 'NEUTRAL' && mtf.M30 &&
+    mtf.M30.status === 'FULL' && mtf.M30.direction !== 'NEUTRAL' &&
+    mtf.M30.direction !== direction;
   const triggerAligned = direction !== 'NEUTRAL' && mtf.M15 && mtf.M15.direction === direction;
   const timestampsValid = names.every(name => {
     const item = mtf[name];
@@ -2418,7 +2450,8 @@ function paperMtfSummary(mtf, referenceNow) {
   return {
     direction, available: available.length, alignmentCount,
     longCount, shortCount, confluencePct,
-    higherAligned, confirmAligned, triggerAligned,
+    higherAligned, higherAnchorAligned, higherOpposed,
+    confirmAligned, confirmOpposed, triggerAligned,
     timestampsValid,
     staleCount, partialCount,
     mode: PAPER_SIGNAL_MODE,
@@ -2487,6 +2520,49 @@ function applyPaperMtf(pair, referenceNow) {
   pair.rank = Number((pair.sc * 0.5 + summary.confluencePct * 0.05 +
     (pair.dataQuality === 'FULL' ? 0.5 : 0)).toFixed(3));
   return pair;
+}
+
+function paperMtfGate(pair, minConfluence) {
+  const summary = pair && pair.mtfSummary ? pair.mtfSummary : {};
+  const mtf = pair && pair.mtf && typeof pair.mtf === 'object' ? pair.mtf : {};
+  const direction = pair && pair.mtfDirection && pair.mtfDirection !== 'NEUTRAL'
+    ? pair.mtfDirection : null;
+  const higherAnchorAligned = summary.higherAnchorAligned != null
+    ? summary.higherAnchorAligned : summary.higherAligned;
+  const higherOpposed = summary.higherOpposed === true ||
+    (direction && ['H4', 'H1'].some(tf => {
+      const item = mtf[tf];
+      return item && item.status === 'FULL' && item.direction !== 'NEUTRAL' && item.direction !== direction;
+    }));
+  const confirmOpposed = summary.confirmOpposed === true ||
+    (direction && mtf.M30 && mtf.M30.status === 'FULL' &&
+      mtf.M30.direction !== 'NEUTRAL' && mtf.M30.direction !== direction);
+  const triggerAligned = summary.triggerAligned === true ||
+    (direction && mtf.M15 && mtf.M15.status === 'FULL' && mtf.M15.direction === direction);
+  const codes = [];
+  const reasons = [];
+  if (higherOpposed) {
+    codes.push('HIGHER_TF_CONFLICT');
+    reasons.push('H4/H1 tidak boleh berlawanan dengan arah ' + (direction || 'setup'));
+  } else if (!higherAnchorAligned) {
+    codes.push('HIGHER_TF_CONFLICT');
+    reasons.push('minimal satu anchor H4/H1 harus searah');
+  }
+  if (confirmOpposed) {
+    codes.push('M30_CONFIRM_CONFLICT');
+    reasons.push('30M berlawanan; 30M netral masih diperbolehkan');
+  }
+  if (!triggerAligned) {
+    codes.push('M15_TRIGGER_CONFLICT');
+    reasons.push('trigger 15M belum searah');
+  }
+  if ((pair.mtfAlignment || 0) < PAPER_MTF_MIN_ALIGNMENT ||
+      (pair.confluencePct || 0) < Number(minConfluence || PAPER_MIN_CONFLUENCE)) {
+    codes.push('CONFLUENCE_LOW');
+    reasons.push('konfluensi ' + (pair.confluencePct || 0) + '% atau alignment ' +
+      (pair.mtfAlignment || 0) + '/4 belum memenuhi syarat');
+  }
+  return {ok: codes.length === 0, codes, reasons};
 }
 
 async function enrichPaperMtf(pair) {
@@ -2850,30 +2926,9 @@ async function runPaperScan(reason, requestedCycleKey) {
           [m15Neutral ? 'trigger 15M netral' : 'MTF tidak memiliki arah dominan']);
         continue;
       }
-      if (!pair.mtfSummary || !pair.mtfSummary.higherAligned ||
-          !pair.mtfSummary.confirmAligned || !pair.mtfSummary.triggerAligned) {
-        const conflictCodes = [];
-        const conflictReasons = [];
-        if (!pair.mtfSummary || !pair.mtfSummary.higherAligned) {
-          conflictCodes.push('HIGHER_TF_CONFLICT');
-          conflictReasons.push('H4/H1 tidak searah');
-        }
-        if (!pair.mtfSummary || !pair.mtfSummary.confirmAligned) {
-          conflictCodes.push('M30_CONFIRM_CONFLICT');
-          conflictReasons.push('30M tidak mengonfirmasi');
-        }
-        if (!pair.mtfSummary || !pair.mtfSummary.triggerAligned) {
-          conflictCodes.push('M15_TRIGGER_CONFLICT');
-          conflictReasons.push('trigger 15M tidak searah');
-        }
-        paperReject(rejected, pair, conflictCodes, conflictReasons);
-        continue;
-      }
-      if ((pair.mtfAlignment || 0) < PAPER_MTF_MIN_ALIGNMENT ||
-          (pair.confluencePct || 0) < cfg.minConfluence) {
-        paperReject(rejected, pair, ['CONFLUENCE_LOW'], [
-          'konfluensi MTF ' + (pair.confluencePct || 0) + '% di bawah ' + cfg.minConfluence + '%'
-        ]);
+      const mtfGate = paperMtfGate(pair, cfg.minConfluence);
+      if (!mtfGate.ok) {
+        paperReject(rejected, pair, mtfGate.codes, mtfGate.reasons);
         continue;
       }
       if (!pair.signalScores || (pair.signalScores.total || 0) < cfg.minSignalScore) {
@@ -2974,12 +3029,9 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperRuntime.lastScanError = null;
     const strictActiveCount = paperActiveCount();
     const hasMtfEligible = ranked.some(pair => pair.mtfStatus === 'FULL' &&
-      pair.mtfDirection !== 'NEUTRAL' && pair.mtfAlignment >= PAPER_MTF_MIN_ALIGNMENT &&
-      pair.confluencePct >= cfg.minConfluence &&
+      pair.mtfDirection !== 'NEUTRAL' && paperMtfGate(pair, cfg.minConfluence).ok &&
       pair.signalScores && pair.signalScores.total >= cfg.minSignalScore &&
-      pair.dataQuality === 'FULL' &&
-      pair.mtfSummary && pair.mtfSummary.higherAligned &&
-      pair.mtfSummary.confirmAligned && pair.mtfSummary.triggerAligned);
+      pair.dataQuality === 'FULL');
     const blockReason = dailyGuard ? 'DAILY_DRAWDOWN_GUARD' : !capacity
       ? (paperActiveCount() >= cfg.maxActive ? 'MAX_ACTIVE_REACHED'
         : activeRisk >= riskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
@@ -3459,17 +3511,18 @@ async function paperReplay(query) {
     const scan = {at: new Date(asOf).toISOString(), cycleKey: paperCycleKey(asOf - 1), sym,
       price: pair.price, direction: pair.mtfDirection, mtfAlignment: pair.mtfAlignment,
       confluencePct: pair.confluencePct, signalScore: pair.signalScores && pair.signalScores.total,
+      timeframeReasons: paperTimeframeReasons(pair),
       eligible: false, rejectionCodes: []};
     if (active) { scan.rejectionCodes.push('ACTIVE_POSITION'); recordRejection('ACTIVE_POSITION'); scans.push(scan); continue; }
     const reject = code => { scan.rejectionCodes.push(code); recordRejection(code); };
     if (pair.mtfStatus !== 'FULL') reject(pair.mtfStatus === 'STALE' ? 'MTF_STALE' : 'MTF_PARTIAL');
     else if (pair.mtfDirection === 'NEUTRAL') reject('MTF_NEUTRAL');
-    else if (!pair.mtfSummary.higherAligned) reject('HIGHER_TF_CONFLICT');
-    else if (!pair.mtfSummary.confirmAligned) reject('M30_CONFIRM_CONFLICT');
-    else if (!pair.mtfSummary.triggerAligned) reject('M15_TRIGGER_CONFLICT');
-    else if (pair.mtfAlignment < PAPER_MTF_MIN_ALIGNMENT || pair.confluencePct < PAPER_MIN_CONFLUENCE) reject('CONFLUENCE_LOW');
-    else if (!pair.signalScores || pair.signalScores.total < PAPER_MIN_SIGNAL_SCORE) reject('SIGNAL_SCORE_LOW');
-    else if (pair.dataQuality !== 'FULL') reject('DATA_REJECTED');
+    else {
+      const mtfGate = paperMtfGate(pair, PAPER_MIN_CONFLUENCE);
+      mtfGate.codes.forEach(reject);
+    }
+    if (!scan.rejectionCodes.length && (!pair.signalScores || pair.signalScores.total < PAPER_MIN_SIGNAL_SCORE)) reject('SIGNAL_SCORE_LOW');
+    if (!scan.rejectionCodes.length && pair.dataQuality !== 'FULL') reject('DATA_REJECTED');
     if (scan.rejectionCodes.length) { scans.push(scan); continue; }
     const setup = paperSetup(pair, {equity});
     const validation = validatePaperSetup(pair, setup);

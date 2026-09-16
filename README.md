@@ -85,11 +85,14 @@ baru dapat dibandingkan terpisah dari posisi lama. Trade lama diberi label
 `PRE_UPGRADE` atau `LEGACY`, tetap terlihat, tetapi tidak memakai slot maupun
 risk budget cohort baru.
 Sebelum order dibuat, kandidat wajib memiliki candle MTF 4H/1H/30M/15M lengkap,
-minimal 3 dari 4 timeframe searah, dan confluence default minimal 60%. Arah order
-ditentukan oleh MTF, bukan hanya perubahan 24 jam. Server menyimpan indikator,
-support/resistance, ATR, kualitas data (`FULL`, `PARTIAL`, `STALE`, atau `REJECTED`),
-dan alasan sinyal pada trade. Candle yang melewati batas freshness per timeframe
-ditolak dari auto-order agar data basi tidak ikut dieksekusi.
+minimal 3 dari 4 timeframe searah, dan confluence default minimal 60%. H4/H1 tidak
+boleh berlawanan dengan arah trade, minimal satu anchor H4/H1 harus searah, 15M
+wajib menjadi trigger, sedangkan 30M boleh netral tetapi tidak boleh berlawanan.
+Arah order ditentukan oleh MTF, bukan hanya perubahan 24 jam. Server menyimpan
+indikator, support/resistance, ATR, kualitas data (`FULL`, `PARTIAL`, `STALE`, atau
+`REJECTED`), alasan sinyal, serta alasan per timeframe untuk kandidat yang ditolak.
+Candle yang melewati batas freshness per timeframe ditolak dari auto-order agar data
+basi tidak ikut dieksekusi.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
 dibatasi 40%, risiko satu arah dibatasi 20%, dan daily loss guard default 3R.
 Trial strategy dapat menampung maksimal 80 record aktif agar sampel satu minggu
