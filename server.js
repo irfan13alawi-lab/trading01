@@ -3675,6 +3675,7 @@ function paperStatus() {
     trialStats: trialStats.metrics,
     trialStatsSample: trialStats.sample,
     runtime: {
+      startedAt: paperRuntime.startedAt,
       lastScanSuccessAt: paperRuntime.lastScanCompletedAt,
       lastMonitorSuccessAt: paperRuntime.lastMonitorAt,
       scanAttempts: paperRuntime.scanAttempts,

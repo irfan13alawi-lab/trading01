@@ -91,7 +91,10 @@ support/resistance, ATR, kualitas data (`FULL`, `PARTIAL`, `STALE`, atau `REJECT
 dan alasan sinyal pada trade. Candle yang melewati batas freshness per timeframe
 ditolak dari auto-order agar data basi tidak ikut dieksekusi.
 Order baru memakai risiko default 0,5% equity per trade dan total risiko aktif
-dibatasi 15%, risiko satu arah dibatasi 10%, dan daily loss guard default 3R;
+dibatasi 40%, risiko satu arah dibatasi 20%, dan daily loss guard default 3R.
+Trial strategy dapat menampung maksimal 80 record aktif agar sampel satu minggu
+tidak cepat habis karena order pending; ini tetap paper-only dan bukan rekomendasi
+untuk live trading.
 posisi `LEGACY` tidak dihapus atau diubah sizing-nya, serta tidak mengambil
 slot/risk budget bot baru. Duplikasi coin tetap diblokir agar tidak menambah
 exposure yang tidak disengaja. Setup dengan entry/SL/TP invalid tidak akan dibuat
@@ -152,9 +155,10 @@ sudo systemctl daemon-reload && sudo systemctl restart nexora-proxy
 
 Status server dapat dicek melalui `/paper/status` dan `/paper/alerts/status`.
 
-Untuk menerima peringatan ketika proses atau VPS Paper Bot berhenti, pasang juga
-`nexora-watchdog.service`. Buat `/etc/nexora/nexora.env` di VPS dengan permission
-`640` dan isi `TELEGRAM_BOT_TOKEN=...` serta `TELEGRAM_CHAT_ID=...`, lalu salin
+Untuk menerima peringatan ketika proses, scan, atau sumber data VPS Paper Bot
+bermasalah, pasang juga `nexora-watchdog.service`. Buat
+`/etc/nexora/nexora.env` di VPS dengan permission `640` dan isi
+`TELEGRAM_BOT_TOKEN=...` serta `TELEGRAM_CHAT_ID=...`, lalu salin
 kedua file service/script ke `/etc/systemd/system` dan aktifkan watchdog. Dashboard
 tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supaya
 riwayat paper trading tetap satu sumber.

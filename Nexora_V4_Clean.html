@@ -5597,7 +5597,7 @@ function renderServerPaperScan(status) {
   }
   var logCards = [
     logCard('Candidates', scan.candidates || 0, '#c9d1d9', candidates.length + ' detailed'),
-    logCard('Orders placed', placed, placed ? '#3fb950' : '#8b949e', reason),
+    logCard('Orders placed', placed + '/' + Number(scan.capacity && scan.capacity.requested || status.perScan || 3), placed ? '#3fb950' : '#8b949e', reason),
     logCard('Rejected', rejectedCount, rejectedCount ? '#f0883e' : '#3fb950', rejectionInfo, rejectionInfo),
     logCard('Daily realized PnL', (dailyPnl >= 0 ? '+' : '') + '$' + dailyPnl.toFixed(2), dailyPnl >= 0 ? '#3fb950' : '#f85149', 'UTC ' + (status.dailyPnlDate || '--')),
     logCard('Daily loss R', dailyR.toFixed(2) + 'R / -' + maxDailyR.toFixed(2) + 'R', dailyR <= -maxDailyR ? '#f85149' : dailyR < 0 ? '#e3b341' : '#3fb950', 'drawdown guard'),
