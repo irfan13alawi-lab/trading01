@@ -205,17 +205,19 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .pnl-positive{color:var(--green)!important;font-weight:600;}
 .pnl-negative{color:var(--red)!important;font-weight:600;}
 .pnl-neutral{color:var(--text2)!important;font-weight:600;}
-.drawdown-banner{display:none;align-items:flex-start;gap:12px;padding:12px 16px;margin:8px 16px 0;max-width:1468px;margin-left:auto;margin-right:auto;border-radius:8px;font-size:12px;line-height:1.5;}
-.drawdown-banner.breach{display:flex;background:rgba(255,50,50,.12);border:1px solid rgba(255,50,50,.5);border-left:4px solid #ff3232;color:#ff6666;animation:pulse-border 2s ease-in-out infinite;}
-.drawdown-banner.warn{display:flex;background:rgba(255,170,0,.10);border:1px solid rgba(255,170,0,.35);border-left:4px solid var(--yellow);color:var(--yellow);}
-.drawdown-banner .dd-copy{flex:1;min-width:0;}
-.drawdown-banner .dd-title{font-weight:800;letter-spacing:.25px;}
-.drawdown-banner button{background:transparent;border:1px solid currentColor;color:inherit;border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer;white-space:nowrap;}
+.drawdown-banner,.dd-banner{display:none;align-items:flex-start;gap:12px;padding:12px 16px;margin:8px 16px 0;max-width:1468px;margin-left:auto;margin-right:auto;border-radius:8px;font-size:12px;line-height:1.5;}
+.drawdown-banner.breach,.dd-banner.breach{display:flex;background:rgba(255,50,50,.12);border:1px solid rgba(255,50,50,.5);border-left:4px solid #ff3232;color:#ff6666;animation:pulse-border 2s ease-in-out infinite;}
+.drawdown-banner.warn,.dd-banner.warn{display:flex;background:rgba(255,170,0,.10);border:1px solid rgba(255,170,0,.35);border-left:4px solid var(--yellow);color:var(--yellow);}
+.drawdown-banner .dd-copy,.dd-banner .dd-copy{flex:1;min-width:0;}
+.drawdown-banner .dd-title,.dd-banner .dd-title{font-weight:800;letter-spacing:.25px;}
+.drawdown-banner button,.dd-banner button{background:transparent;border:1px solid currentColor;color:inherit;border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer;white-space:nowrap;}
 @keyframes pulse-border{0%,100%{border-left-color:#ff3232;}50%{border-left-color:#ff8888;}}
 .dd-gauge{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
 .dd-gauge-track{display:inline-block;width:64px;height:6px;border-radius:4px;background:var(--bg3);overflow:hidden;vertical-align:middle;}
 .dd-gauge-fill{display:block;height:100%;width:0;border-radius:4px;background:var(--green);transition:width .25s,background .25s;}
-.news-stats{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 10px;font-size:10px;color:var(--text2);}
+.dd-bar{height:100%;border-radius:4px;transition:width .25s,background .25s;}
+.dd-bar.warn{background:var(--yellow)!important;}.dd-bar.breach{background:var(--red)!important;}
+.news-stats,.news-stats-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 10px;font-size:10px;color:var(--text2);}
 .news-stat{padding:3px 7px;border-radius:4px;font-weight:700;}
 .news-stat.neg{background:rgba(255,60,60,.15);color:var(--red);}
 .news-stat.pos{background:rgba(0,255,136,.12);color:#00ff88;}
@@ -229,11 +231,25 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .news-sentiment.POSITIVE{background:rgba(0,255,136,.15);color:#00ff88;}
 .news-sentiment.NEGATIVE{background:rgba(255,85,85,.15);color:#ff5555;}
 .news-sentiment.NEUTRAL{background:rgba(150,150,150,.1);color:#888;}
+.sentiment-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 8px;margin-right:2px;}
+.sentiment-dot.positive{background:#00ff88;box-shadow:0 0 5px #00ff8844;}.sentiment-dot.negative{background:#ff5555;box-shadow:0 0 5px #ff555544;}.sentiment-dot.neutral{background:#555;}
+.sentiment-badge{font-size:10px;font-weight:700;padding:1px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.04em;}
+.sentiment-badge.positive{background:rgba(0,255,136,.15);color:#00ff88;}.sentiment-badge.negative{background:rgba(255,85,85,.15);color:#ff5555;}.sentiment-badge.neutral{background:rgba(150,150,150,.1);color:#888;}
+.news-stats-source{margin-left:auto;color:#444;font-size:10px;}
 .btn-analyze{background:transparent;border:1px solid #2a2a3e;color:#666;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;}
 .btn-analyze:hover{border-color:#00d4ff;color:#00d4ff;}
 .btn-analyze.done{color:#00ff88;border-color:#00ff8844;cursor:default;}
-.impact-panel{background:#080810;border:1px solid #1e1e2e;border-radius:8px;padding:10px 12px;display:none;margin-top:8px;}
+.impact-panel{background:#080810;border:1px solid #1e1e2e;border-radius:8px;padding:12px 14px;display:none;margin-top:8px;animation:fadeIn .2s ease-out;}
 .impact-panel.open{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
+.impact-label{font-size:10px;color:#444;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px;}
+.impact-row-1{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.dir-badge{font-size:12px;font-weight:700;padding:3px 10px;border-radius:6px;letter-spacing:.05em;}
+.dir-badge.NAIK{background:rgba(0,255,136,.18);color:#00ff88;border:1px solid rgba(0,255,136,.3);}.dir-badge.TURUN{background:rgba(255,85,85,.18);color:#ff5555;border:1px solid rgba(255,85,85,.3);}.dir-badge.NETRAL{background:rgba(150,150,150,.12);color:#888;border:1px solid #333;}
+.mag-badge{font-size:11px;color:#666;}.mag-badge.BESAR{color:#ffaa00;font-weight:600;}.mag-badge.SEDANG{color:#888;}.mag-badge.KECIL{color:#555;}
+.confidence-pct{margin-left:auto;font-size:11px;color:#555;}.confidence-pct span{color:#00d4ff;font-weight:600;font-family:monospace;}
+.impact-reasoning{font-size:12px;color:#999;line-height:1.6;padding:8px 0;border-top:1px solid #1a1a2a;border-bottom:1px solid #1a1a2a;margin:6px 0;}
+.impact-footer{display:flex;align-items:center;gap:8px;font-size:11px;margin-top:6px;}.impact-tf{color:#555;}.impact-coins{display:flex;gap:4px;flex-wrap:wrap;}.coin-tag{background:rgba(0,212,255,.1);color:#00d4ff;border-radius:3px;padding:0 5px;font-size:10px;font-weight:600;}
 .impact-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:700;margin-right:4px;}
 .impact-badge.NAIK{background:rgba(0,255,136,.2);color:#00ff88;border:1px solid rgba(0,255,136,.35);}
 .impact-badge.TURUN{background:rgba(255,85,85,.2);color:#ff5555;border:1px solid rgba(255,85,85,.35);}
@@ -277,7 +293,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="hstat"><span class="l">F&amp;G</span><span class="v" id="h-fg">--</span></div>
     <div class="hstat"><span class="l">Regime</span><span class="v" id="h-reg">--</span></div>
     <div class="hstat"><span class="l">Scanned</span><span class="v" id="h-cnt">0</span></div>
-    <div class="hstat"><span class="l">Drawdown</span><span class="v dd-gauge" id="h-dd"><span class="dd-gauge-track"><span class="dd-gauge-fill" id="h-dd-fill"></span></span><span id="h-dd-label">--</span></span></div>
+    <div class="hstat"><span class="l">Drawdown</span><span class="v dd-gauge" id="h-dd"><span class="dd-gauge-track"><span class="dd-gauge-fill dd-bar" id="dd-bar"></span></span><span id="dd-pct-text">--</span></span></div>
   </div>
   <div class="hright">
     <div class="market-picker" title="Pilih sumber dan jenis market">
@@ -306,7 +322,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   </div>
 </div>
 
-<div id="drawdown-banner" role="status" aria-live="polite"></div>
+<div id="dd-banner" role="status" aria-live="polite"></div>
 
 <!-- Active trades / bot panel -->
 <div id="active-trades-panel">
@@ -538,7 +554,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="card">
     <div class="card-h"><div class="card-t"><i class="fa-solid fa-newspaper"></i> Crypto News <span class="muted" id="news-updated">VPS cache 30m</span></div><button class="btn btn-sm btn-blue" onclick="loadNews(true)"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
     <div class="muted" style="line-height:1.7;margin:6px 0 10px;">Berita diambil melalui proxy VPS dari feed publik CoinDesk. Sentimen adalah label heuristik berbasis judul, bukan rekomendasi trading.</div>
-    <div class="news-stats" id="news-stats"><span class="news-stat neg">0 negatif</span><span class="news-stat pos">0 positif</span><span class="news-stat neu">0 netral</span><span>· Feed VPS · Cache 30m</span></div>
+    <div class="news-stats news-stats-bar" id="news-stats"><span class="news-stat neg" id="stat-neg">0 negatif</span><span class="news-stat pos" id="stat-pos">0 positif</span><span class="news-stat neu" id="stat-neu">0 netral</span><span class="news-stats-source">· Feed VPS · Cache 30m</span></div>
     <div id="news-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center;">
       <button class="pill on" onclick="setNewsFilter('all',this)">Semua</button><button class="pill" onclick="setNewsFilter('btc',this)">BTC</button><button class="pill" onclick="setNewsFilter('trending',this)">Trending</button>
       <select id="news-coin-filter" onchange="setNewsCoinFilter(this.value)" style="width:auto;min-width:115px;font-size:11px;padding:4px 8px;"><option value="">Semua Coin</option><option>BTC</option><option>ETH</option><option>SOL</option><option>BNB</option><option>XRP</option><option>ARB</option></select>
@@ -1882,6 +1898,11 @@ function setNewsCoinFilter(symbol) {
   G.newsCoinFilter = String(symbol || '').toUpperCase();
   renderNewsPage();
 }
+function newsDomKey(id) {
+  var raw=String(id||'news'), hash=0;
+  for(var i=0;i<raw.length;i++) hash=((hash<<5)-hash+raw.charCodeAt(i))|0;
+  return raw.replace(/[^A-Za-z0-9_-]/g,'-').slice(0,36)+'-'+Math.abs(hash);
+}
 function toggleNewsImpact(article) {
   if(!article) return;
   var id=article.getAttribute('data-news-id') || '';
@@ -1892,17 +1913,20 @@ function toggleNewsImpact(article) {
 }
 function renderImpactPanel(n) {
   var item=G.newsImpact[n.id], open=!!G.newsImpactOpen[n.id];
-  if(!item || !item.analysis) return '<div class="impact-panel'+(open?' open':'')+'"><div class="muted">Tekan Analisis untuk menghitung dampak berita.</div></div>';
+  var panelId='impact-'+newsDomKey(n.id);
+  if(!item || !item.analysis) return '<div id="'+panelId+'" class="impact-panel'+(open?' open':'')+'" data-news-id="'+sourceEsc(n.id)+'"><div class="muted">Tekan Analisis untuk menghitung dampak berita.</div></div>';
   var a=item.analysis, direction=String(a.direction||'NETRAL').toUpperCase(), magnitude=String(a.magnitude||'KECIL').toUpperCase();
   var provider=item.provider ? ' · '+sourceEsc(item.provider) : '';
-  return '<div class="impact-panel'+(open?' open':'')+'">'
-    + '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:7px;"><b style="font-size:11px;">🤖 AI Impact Analysis</b>'
-    + '<span class="impact-badge '+sourceEsc(direction)+'">'+(direction==='NAIK'?'↑ ':direction==='TURUN'?'↓ ':'• ')+sourceEsc(direction)+'</span>'
-    + '<span class="impact-badge '+sourceEsc(direction)+'">⚡ '+sourceEsc(magnitude)+'</span>'
-    + '<span class="muted">Keyakinan: <b>'+Number(a.confidence||0)+'%</b>'+provider+'</span></div>'
-    + '<div style="font-size:11px;line-height:1.55;margin-bottom:7px;">'+sourceEsc(a.reasoning||'Tidak ada penjelasan.')+'</div>'
-    + '<div class="muted">⏱ '+sourceEsc(a.timeframe||'--')+' · '+(Array.isArray(a.affected_coins)?a.affected_coins.map(function(c){return '<span class="badge bn" style="margin-left:3px;">'+sourceEsc(c)+'</span>';}).join(''):'')+'</div>'
-    + '</div>';
+  var dirIcon=direction==='NAIK'?'↑ NAIK':direction==='TURUN'?'↓ TURUN':'→ NETRAL';
+  var magIcon=magnitude==='BESAR'?'⚡ Dampak Besar':magnitude==='SEDANG'?'〰 Dampak Sedang':'· Dampak Kecil';
+  var coins=Array.isArray(a.affected_coins)?a.affected_coins.map(function(c){return '<span class="coin-tag">'+sourceEsc(c)+'</span>';}).join(''):'';
+  var risk=a.risk_note ? '<div style="color:#ffaa0088;font-size:10px;margin-top:6px;font-style:italic;">⚠ '+sourceEsc(a.risk_note)+'</div>' : '';
+  return '<div id="'+panelId+'" class="impact-panel'+(open?' open':'')+'" data-news-id="'+sourceEsc(n.id)+'">'
+    + '<div class="impact-label">🤖 AI Impact Analysis'+provider+'</div>'
+    + '<div class="impact-row-1"><span class="dir-badge '+sourceEsc(direction)+'">'+dirIcon+'</span><span class="mag-badge '+sourceEsc(magnitude)+'">'+magIcon+'</span><span class="confidence-pct">Keyakinan: <span>'+Number(a.confidence||0)+'%</span></span></div>'
+    + '<div class="impact-reasoning">'+sourceEsc(a.reasoning||'Tidak ada penjelasan.')+'</div>'
+    + '<div class="impact-footer"><span class="impact-tf">⏱ '+sourceEsc(a.timeframe||'--')+'</span><div class="impact-coins">'+coins+'</div></div>'
+    + risk + '</div>';
 }
 function analyzeNews(newsId, button) {
   var id=String(newsId||''), item=G.news.find(function(n){return n.id===id;});
@@ -1925,7 +1949,12 @@ function renderNewsPage() {
     var neg=G.news.filter(function(n){return n.sentiment==='NEGATIVE';}).length;
     var pos=G.news.filter(function(n){return n.sentiment==='POSITIVE';}).length;
     var neu=G.news.length-neg-pos;
-    stats.innerHTML='<span class="news-stat neg">'+neg+' negatif</span><span class="news-stat pos">'+pos+' positif</span><span class="news-stat neu">'+neu+' netral</span><span>· '+(G.news.length?'Feed VPS':'Provider unavailable')+' · Cache 30m</span>';
+    var negEl=document.getElementById('stat-neg'), posEl=document.getElementById('stat-pos'), neuEl=document.getElementById('stat-neu');
+    if(negEl) negEl.textContent=neg+' negatif';
+    if(posEl) posEl.textContent=pos+' positif';
+    if(neuEl) neuEl.textContent=neu+' netral';
+    var statsSource=stats.querySelector('.news-stats-source');
+    if(statsSource) statsSource.textContent='· '+(G.news.length?'Feed VPS':'Provider unavailable')+' · Cache 30m';
   }
   var riskHost=document.getElementById('news-risk-banner');
   if(riskHost) {
@@ -1940,10 +1969,12 @@ function renderNewsPage() {
   if(!rows.length){host.innerHTML='<div class="ld">Belum ada berita dari provider. Tekan Refresh atau coba lagi setelah cache 30m.</div>';return;}
   host.innerHTML=rows.map(function(n){
     var label=n.sentiment==='POSITIVE'?'Positif':n.sentiment==='NEGATIVE'?'Negatif':'Netral';
+    var sentimentClass=String(n.sentiment||'NEUTRAL').toLowerCase();
+    var domKey=newsDomKey(n.id);
     var href=n.url?sourceEsc(n.url):'#';
     var loading=!!G.newsImpactLoading[n.id], analysed=!!G.newsImpact[n.id];
     var action=loading?'⏳ Menganalisis…':analysed?'✓ Dianalisis':'🤖 Analisis';
-    return '<article class="card" data-news-id="'+sourceEsc(n.id)+'" style="padding:12px;"><div class="news-article-head" onclick="toggleNewsImpact(this.closest(\'article\'))" title="Klik untuk buka/tutup analisis"><span class="news-dot '+sourceEsc(n.sentiment)+'"></span><span class="news-sentiment '+sourceEsc(n.sentiment)+'">'+label+'</span><span class="muted" style="margin-left:auto;font-size:10px;">'+sourceEsc(newsTimeAgo(n.ts))+'</span></div><div style="display:flex;gap:8px;align-items:flex-start;margin:8px 0 5px;"><div class="news-title" style="flex:1;color:#c9d1d9;font-weight:700;line-height:1.45;cursor:pointer;" onclick="toggleNewsImpact(this.closest(\'article\'))">'+sourceEsc(n.title)+'</div><button class="btn-analyze'+(analysed?' done':'')+'" '+(loading||analysed?'disabled':'')+' onclick="event.stopPropagation();analyzeNews(this.closest(\'article\').dataset.newsId,this)">'+action+'</button></div><div class="muted" style="font-size:10px;">'+sourceEsc(n.source)+(n.author?' · '+sourceEsc(n.author):'')+(n.symbols.length?' · '+sourceEsc(n.symbols.join(' · ')):'')+' · '+sourceEsc(newsTime(n.ts))+(n.url?' · <a href="'+href+'" target="_blank" rel="noopener">Buka</a>':'')+'</div>'+renderImpactPanel(n)+'</article>';
+    return '<article class="card" data-news-id="'+sourceEsc(n.id)+'" style="padding:12px;"><div class="news-article-head" onclick="toggleNewsImpact(this.closest(\'article\'))" title="Klik untuk buka/tutup"><span class="news-dot sentiment-dot '+sourceEsc(n.sentiment)+' '+sentimentClass+'"></span><span class="news-sentiment sentiment-badge '+sourceEsc(n.sentiment)+' '+sentimentClass+'">'+label+'</span><span class="muted" style="margin-left:auto;font-size:10px;">'+sourceEsc(newsTimeAgo(n.ts))+'</span></div><div style="display:flex;gap:8px;align-items:flex-start;margin:8px 0 5px;"><div class="news-title" style="flex:1;color:#c9d1d9;font-weight:700;line-height:1.45;cursor:pointer;" onclick="toggleNewsImpact(this.closest(\'article\'))">'+sourceEsc(n.title)+'</div><button id="btn-'+domKey+'" class="btn-analyze'+(analysed?' done':'')+'" data-news-id="'+sourceEsc(n.id)+'" '+(loading||analysed?'disabled':'')+' onclick="event.stopPropagation();analyzeNews(this.dataset.newsId,this)">'+action+'</button></div><div class="news-meta muted" style="font-size:10px;"><span class="news-source">'+sourceEsc(n.source)+'</span>'+(n.author?' · <span class="news-author">'+sourceEsc(n.author)+'</span>':'')+(n.symbols.length?' · '+sourceEsc(n.symbols.join(' · ')):'')+' · <span class="news-time">'+sourceEsc(newsTime(n.ts))+'</span>'+(n.url?' · <a class="news-open" href="'+href+'" target="_blank" rel="noopener">↗ Buka</a>':'')+'</div>'+renderImpactPanel(n)+'</article>';
   }).join('');
 }
 function loadNews(force) {
@@ -3208,9 +3239,9 @@ function renderEquity() {
     var row = byStrategy[key];
     return {key:key,n:row.n,w:row.w,l:row.l,r:row.r,pnl:row.pnl};
   }).sort(function(a,b){return b.r-a.r;});
-  var pnlRanked = trades.slice().sort(function(a,b){return Number(a.pnl || 0)-Number(b.pnl || 0);});
-  var worstTrade = pnlRanked.length ? pnlRanked[0] : null;
-  var bestTrade = pnlRanked.length ? pnlRanked[pnlRanked.length-1] : null;
+  var rRanked = trades.slice().sort(function(a,b){return Number(a.r || 0)-Number(b.r || 0);});
+  var worstTrade = rRanked.length ? rRanked[0] : null;
+  var bestTrade = rRanked.length ? rRanked[rRanked.length-1] : null;
   function durationLabel(ms) {
     if(!ms) return '--';
     var mins = Math.round(ms/60000);
@@ -6732,28 +6763,35 @@ function colorAllPnl() {
     var el=document.getElementById(id); if(el) colorPnl(el);
   });
   document.querySelectorAll('[data-pnl-value]').forEach(function(el){colorPnl(el,el.getAttribute('data-pnl-value'));});
+  document.querySelectorAll('[data-pnl],.pnl-value,.upnl-value,.daily-pnl-value,.net-r-value,.position-card .pnl,.equity-table td.pnl,.equity-table td.netr,.ops-pnl').forEach(function(el){colorPnl(el);});
+}
+function colorize(element) {
+  colorPnl(element);
+}
+function applyPnlColors() {
+  colorAllPnl();
 }
 function dismissDrawdownBanner() {
   drawdownDismissed = true;
-  var banner=document.getElementById('drawdown-banner');
+  var banner=document.getElementById('dd-banner');
   if(banner) banner.style.display='none';
 }
 function renderDrawdownBanner(status) {
-  var banner=document.getElementById('drawdown-banner');
-  var fill=document.getElementById('h-dd-fill');
-  var label=document.getElementById('h-dd-label');
+  var banner=document.getElementById('dd-banner');
+  var fill=document.getElementById('dd-bar');
+  var label=document.getElementById('dd-pct-text');
   if(!banner) return;
   var dd=Number(status && status.drawdown && status.drawdown.current_pct != null ? status.drawdown.current_pct : status && status.drawdownPct || 0);
   var limit=Number(status && status.drawdown && status.drawdown.limit_pct != null ? status.drawdown.limit_pct : status && status.maxDrawdownPct || 2.5);
   if(!Number.isFinite(dd)) dd=0; if(!Number.isFinite(limit)||limit<=0) limit=2.5;
   var breached=!!(status && (status.drawdown && status.drawdown.is_breached || status.drawdownGuard)) || dd>=limit;
   var near=!breached && dd>limit*.8;
-  var safe=dd<limit*.5;
-  if(fill) { fill.style.width=Math.max(0,Math.min(100,dd/limit*100))+'%'; fill.style.background=breached?'var(--red)':near?'var(--yellow)':'var(--green)'; }
+  var safe=dd<limit*.8;
+  if(fill) { fill.style.width=Math.max(0,Math.min(100,dd/limit*100))+'%'; fill.style.background=breached?'var(--red)':near?'var(--yellow)':'var(--green)'; fill.classList.toggle('warn',near); fill.classList.toggle('breach',breached); }
   if(label) { label.textContent=dd.toFixed(2)+'% / '+limit.toFixed(2)+'%'; label.style.color=breached?'var(--red)':near?'var(--yellow)':'var(--green)'; }
   banner.className=''; banner.innerHTML=''; banner.style.display='none';
   if(safe || drawdownDismissed) return;
-  banner.className='drawdown-banner '+(breached?'breach':'warn');
+  banner.className='dd-banner drawdown-banner '+(breached?'breach':'warn');
   banner.innerHTML='<div style="font-size:18px;line-height:1;">'+(breached?'🚨':'⚠️')+'</div><div class="dd-copy"><div class="dd-title">'+(breached?'MAX DRAWDOWN TERCAPAI — Entry baru DITAHAN':'Drawdown mendekati batas')+'</div><div>DD saat ini: <b>'+dd.toFixed(2)+'%</b> · Batas: <b>'+limit.toFixed(2)+'%</b> · '+(breached?'Bot tidak akan membuat entry baru sampai guard dilepas.':'Pantau risiko sebelum menambah posisi.')+'</div></div><button onclick="dismissDrawdownBanner()">✕ Dismiss</button>';
 }
 
@@ -7272,6 +7310,7 @@ setPaperMode(false, true);
 detectPaperBot();
 pollSourceHealth();
 doRefresh();
+applyPnlColors();
 startNewsRefreshTimer();
 setInterval(doRefresh, 60000);
 setInterval(pollSourceHealth, 15000);

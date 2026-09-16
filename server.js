@@ -380,21 +380,27 @@ function newsAffectedCoins(row) {
 function fallbackNewsImpact(row) {
   const title = newsArticleText(row);
   const lower = title.toLowerCase();
-  const sentiment = newsArticleSentiment(row);
-  const majorNegative = /hack|exploit|fraud|scam|ban|crash|bankrupt|lawsuit|liquidat/.test(lower);
-  const majorPositive = /etf|approved|approval|partnership|adoption|institution|surge|record high/.test(lower);
-  const direction = sentiment === 'NEGATIVE' ? 'TURUN' : sentiment === 'POSITIVE' ? 'NAIK' : 'NETRAL';
-  const magnitude = majorNegative || majorPositive ? 'BESAR' : direction === 'NETRAL' ? 'KECIL' : 'SEDANG';
-  const confidence = direction === 'NETRAL' ? 38 : majorNegative || majorPositive ? 72 : 58;
-  const timeframe = majorNegative || majorPositive ? 'pendek (1-4j)' : 'menengah (4-24j)';
+  const negativeKeywords = ['reject','fail','hack','ban','crash','sanction','exploit','fraud','scam','bankrupt','lawsuit','liquidation','liquidated','outflow','sell-off'];
+  const positiveKeywords = ['approve','etf','partnership','adoption','bullish','approval','approved','institution','surge','rally','inflow','launch','breakout','record high'];
+  const matchKeywords = keywords => keywords.filter(keyword => lower.includes(keyword));
+  const negativeMatches = matchKeywords(negativeKeywords);
+  const positiveMatches = matchKeywords(positiveKeywords);
+  const negativeScore = negativeMatches.length;
+  const positiveScore = positiveMatches.length;
+  const direction = negativeScore > positiveScore ? 'TURUN' : positiveScore > negativeScore ? 'NAIK' : 'NETRAL';
+  const totalMatches = negativeScore + positiveScore;
+  const majorMagnitude = /senate|sec|fed|billion|etf|government/.test(lower);
+  const magnitude = majorMagnitude ? 'BESAR' : totalMatches >= 2 ? 'SEDANG' : 'KECIL';
+  const confidence = Math.max(40, Math.min(85, 40 + totalMatches * 10));
+  const timeframe = majorMagnitude || totalMatches >= 2 ? 'pendek (1-4j)' : 'menengah (4-24j)';
   const affected = newsAffectedCoins(row);
   const coinText = affected.length ? affected.join(', ') : 'pasar crypto terkait';
   const reasoning = direction === 'TURUN'
-    ? 'Judul mengandung katalis negatif; tekanan jual berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
+    ? 'Judul mengandung ' + negativeMatches.join(', ') + '; tekanan jual berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
     : direction === 'NAIK'
-      ? 'Judul mengandung katalis positif; minat beli berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
+      ? 'Judul mengandung ' + positiveMatches.join(', ') + '; minat beli berpotensi meningkat pada ' + coinText + '. Ini adalah estimasi rule-based, bukan sinyal trading.'
       : 'Tidak ada katalis arah yang cukup jelas dari judul; dampak harga kemungkinan netral atau terbatas.';
-  return {direction, magnitude, confidence, timeframe, reasoning, affected_coins: affected.length ? affected : ['BTC']};
+  return {direction, magnitude, confidence, timeframe, reasoning, affected_coins: affected.length ? affected : ['BTC'], risk_note: null};
 }
 
 function parseImpactJson(text) {
@@ -424,7 +430,8 @@ function normaliseImpactAnalysis(value, fallback) {
   return {
     direction, magnitude, confidence, timeframe,
     reasoning: String(raw.reasoning || base.reasoning).trim().slice(0, 500),
-    affected_coins: affected_coins.length ? affected_coins : ['BTC']
+    affected_coins: affected_coins.length ? affected_coins : ['BTC'],
+    risk_note: raw.risk_note == null ? null : String(raw.risk_note).trim().slice(0, 300) || null
   };
 }
 
@@ -434,7 +441,7 @@ function impactPrompt(row) {
   const currencies = newsAffectedCoins(row).join(', ') || 'unknown';
   return 'Analisis dampak berita crypto ini secara singkat dan konservatif.\n' +
     'Judul: ' + title + '\nSentimen heuristik: ' + sentiment + '\nCoin terkait: ' + currencies + '\n\n' +
-    'Balas JSON valid saja dengan shape: {"direction":"NAIK|TURUN|NETRAL","magnitude":"BESAR|SEDANG|KECIL","confidence":0,"timeframe":"pendek (1-4j)|menengah (4-24j)|panjang (1-7h)","reasoning":"1-2 kalimat bahasa Indonesia","affected_coins":["BTC"]}. Jangan memberi rekomendasi finansial.';
+    'Balas JSON valid saja dengan shape: {"direction":"NAIK|TURUN|NETRAL","magnitude":"BESAR|SEDANG|KECIL","confidence":0,"timeframe":"pendek (1-4j)|menengah (4-24j)|panjang (1-7h)","reasoning":"1-2 kalimat bahasa Indonesia","affected_coins":["BTC"],"risk_note":null}. Jangan memberi rekomendasi finansial.';
 }
 
 async function requestNewsImpactAi(row) {
