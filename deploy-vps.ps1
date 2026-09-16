@@ -46,8 +46,6 @@ curl -fsS --max-time 15 http://127.0.0.1:18085/paper/summary >/tmp/nexora-summar
 grep -Fq '"ok":true' /tmp/nexora-health.json
 grep -Fq '"ok":true' /tmp/nexora-summary.json
 printf 'DEPLOY_OK\n'
-cat /tmp/nexora-health.json
-cat /tmp/nexora-summary.json
 '@
 
 $remoteScript = $remoteScript.Replace('$RAW_BASE', $rawBase)
