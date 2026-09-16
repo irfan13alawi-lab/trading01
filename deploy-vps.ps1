@@ -16,7 +16,15 @@ curl -fsSL --retry 3 --max-time 60 "$RAW_BASE/server.js" -o "$tmpdir/server.js"
 curl -fsSL --retry 3 --max-time 60 "$RAW_BASE/Nexora_V4_Clean.html" -o "$tmpdir/index.html"
 test -s "$tmpdir/server.js"
 test -s "$tmpdir/index.html"
-node --check "$tmpdir/server.js"
+node_bin="$(command -v node || true)"
+if [ -z "$node_bin" ] && [ -x /home/ubuntu/.local/bin/node ]; then
+  node_bin=/home/ubuntu/.local/bin/node
+fi
+if [ -z "$node_bin" ]; then
+  printf 'node runtime not found\n' >&2
+  exit 127
+fi
+"$node_bin" --check "$tmpdir/server.js"
 grep -Fq "PAPER VPS CHECKING..." "$tmpdir/index.html"
 grep -Fq "build v4.8-p0p2" "$tmpdir/index.html"
 grep -Fq "MONITORING_ONLY" "$tmpdir/server.js"
