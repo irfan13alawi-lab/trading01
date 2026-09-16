@@ -52,6 +52,7 @@ cat /tmp/nexora-summary.json
 
 $remoteScript = $remoteScript.Replace('$RAW_BASE', $rawBase)
 $remoteScript = $remoteScript -replace "`r`n", "`n"
+$remoteScript = $remoteScript.Replace("`r", '')
 if (-not (Test-Path -LiteralPath $KeyPath)) {
   throw "SSH key not found: $KeyPath"
 }
