@@ -99,7 +99,7 @@ const PAPER_TIMEFRAME_MAX_AGE_MS = {
   M30: 90 * 60 * 1000,
   M15: 45 * 60 * 1000
 };
-const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
@@ -365,13 +365,13 @@ function newsArticleSentiment(row) {
   if (explicit.includes('NEG') || explicit.includes('BEAR')) return 'NEGATIVE';
   if (explicit.includes('POS') || explicit.includes('BULL')) return 'POSITIVE';
   const title = newsArticleText(row).toLowerCase();
-  if (/hack|exploit|lawsuit|ban|fraud|scam|liquidat|crash|reject|outflow|sell-off/.test(title)) return 'NEGATIVE';
-  if (/surge|rally|approval|approved|adoption|inflow|partnership|launch|breakout|record high|etf/.test(title)) return 'POSITIVE';
+  if (/hack|exploit|lawsuit|ban|fraud|scam|liquidat|crash|reject|sue|fail|sanction|down|outflow|sell-off/.test(title)) return 'NEGATIVE';
+  if (/surge|rally|approval|approved|adoption|inflow|partnership|launch|upgrade|buy|bullish|breakout|record high|etf/.test(title)) return 'POSITIVE';
   return 'NEUTRAL';
 }
 
 function newsAffectedCoins(row) {
-  const text = (newsArticleText(row) + ' ' + String(row && (row.CATEGORY_DATA || row.categories || row.CATEGORIES || row.TAGS || '') || '')).toUpperCase();
+  const text = (newsArticleText(row) + ' ' + String(row && (row.CATEGORY_DATA || row.categories || row.CATEGORIES || row.TAGS || row.CURRENCIES || row.currencies || '') || '')).toUpperCase();
   const known = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LINK','AVAX','DOT','ARB','OP','INJ','SUI','PEPE','FET','WIF','LTC','SHIB','TRX','MATIC','ATOM','UNI'];
   return known.filter(sym => new RegExp('\\b' + sym + '\\b').test(text) ||
     (sym === 'BTC' && /BITCOIN/.test(text)) || (sym === 'ETH' && /ETHEREUM/.test(text))).slice(0, 8);
@@ -380,8 +380,8 @@ function newsAffectedCoins(row) {
 function fallbackNewsImpact(row) {
   const title = newsArticleText(row);
   const lower = title.toLowerCase();
-  const negativeKeywords = ['reject','fail','hack','ban','crash','sanction','exploit','fraud','scam','bankrupt','lawsuit','liquidation','liquidated','outflow','sell-off'];
-  const positiveKeywords = ['approve','etf','partnership','adoption','bullish','approval','approved','institution','surge','rally','inflow','launch','breakout','record high'];
+  const negativeKeywords = ['reject','fail','hack','ban','crash','sanction','sue','fraud','down','exploit','scam','bankrupt','lawsuit','liquidation','liquidated','outflow','sell-off'];
+  const positiveKeywords = ['approve','etf','partnership','adoption','launch','upgrade','buy','bullish','approval','approved','institution','surge','rally','inflow','breakout','record high'];
   const matchKeywords = keywords => keywords.filter(keyword => lower.includes(keyword));
   const negativeMatches = matchKeywords(negativeKeywords);
   const positiveMatches = matchKeywords(positiveKeywords);
@@ -389,9 +389,9 @@ function fallbackNewsImpact(row) {
   const positiveScore = positiveMatches.length;
   const direction = negativeScore > positiveScore ? 'TURUN' : positiveScore > negativeScore ? 'NAIK' : 'NETRAL';
   const totalMatches = negativeScore + positiveScore;
-  const majorMagnitude = /senate|sec|fed|billion|etf|government/.test(lower);
+  const majorMagnitude = /senate|sec|fed|billion|government|blackrock|etf/.test(lower);
   const magnitude = majorMagnitude ? 'BESAR' : totalMatches >= 2 ? 'SEDANG' : 'KECIL';
-  const confidence = Math.max(40, Math.min(85, 40 + totalMatches * 10));
+  const confidence = Math.max(40, Math.min(85, 40 + totalMatches * 8));
   const timeframe = majorMagnitude || totalMatches >= 2 ? 'pendek (1-4j)' : 'menengah (4-24j)';
   const affected = newsAffectedCoins(row);
   const coinText = affected.length ? affected.join(', ') : 'pasar crypto terkait';
