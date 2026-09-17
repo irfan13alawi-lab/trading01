@@ -318,7 +318,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- Header -->
 <div id="hdr">
-  <div class="logo"><i class="fa-solid fa-bolt"></i> NEXORA <span class="v">CMD CENTER V4</span> <span id="app-build" class="v" title="Build yang sedang disajikan VPS">build v4.8-p0p2</span></div>
+  <div class="logo"><i class="fa-solid fa-bolt"></i> NEXORA <span class="v">CMD CENTER V4</span> <span id="app-build" class="v" title="Build yang sedang disajikan VPS">build v4.9-research</span></div>
   <div class="hstats">
     <div class="hstat"><span class="l">BTC Dom</span><span class="v" id="h-dom">--</span></div>
     <div class="hstat"><span class="l">BTC</span><span class="v" id="h-btc">--</span></div>
@@ -5579,8 +5579,10 @@ function renderServerPaperScan(status) {
   }).join('');
   var placed = placedCandidates.length;
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
-  var trialInfo = (status.strategyVersion || 'MTF_ATR_V2') + ' · cohort ' + (status.cohortId || '--');
   var capacity = scan.capacity || {};
+  var researchMode = capacity.mode === 'RESEARCH_COLLECTION';
+  var trialInfo = (researchMode ? 'RESEARCH_COLLECTION' : (status.strategyVersion || 'MTF_ATR_V2')) +
+    ' · cohort ' + (researchMode && status.research ? (status.research.cohortId || '--') : (status.cohortId || '--'));
   var queueCount = Array.isArray(status.watchlistQueue) ? status.watchlistQueue.length : 0;
   var rejectionCodes = [];
   (Array.isArray(scan.rejected) ? scan.rejected : []).forEach(function(item){
@@ -5591,9 +5593,11 @@ function renderServerPaperScan(status) {
   var dailyPnl = Number(status.dailyRealizedPnl || 0);
   var dailyR = Number(status.dailyLossR || capacity.dailyLossR || 0);
   var maxDailyR = Number(status.maxDailyLossR || 3);
-  var slotsNow = Number(status.availableSlots == null ? capacity.availableSlots || 0 : status.availableSlots);
-  var riskUsed = Number(status.activeRisk || 0);
-  var riskLimit = Number(status.riskBudget || 0);
+  var slotsNow = researchMode
+    ? Number(status.research && status.research.availableSlots || capacity.researchAvailableSlots || 0)
+    : Number(status.availableSlots == null ? capacity.availableSlots || 0 : status.availableSlots);
+  var riskUsed = researchMode ? Number(status.research && status.research.activeRisk || 0) : Number(status.activeRisk || 0);
+  var riskLimit = researchMode ? Number(status.research && status.research.riskBudget || 0) : Number(status.riskBudget || 0);
   function logCard(label, value, color, detail, title) {
     return '<div class="vps-log-card" title="' + sourceEsc(title || detail || '') + '">'
       + '<span class="vps-log-label">' + sourceEsc(label) + '</span>'
@@ -5655,8 +5659,10 @@ function applyServerPaperStatus(status, announce) {
   var serverRunning = status.running !== false;
   var paperPaused = !!status.paused, paperKilled = !!status.killSwitch;
   var paperOperational = serverRunning && !paperPaused && !paperKilled;
+  var research = status.research || {};
+  var researchActive = paperOperational && research.active === true;
   var entryPaused = status.entryState === 'ENTRY_PAUSED';
-  var entryActive = paperOperational && !entryPaused;
+  var entryActive = paperOperational && !entryPaused && !researchActive;
   if(!wasServer && BOT.paperMode) stopBotTimers();
   G.paperServer = true;
   BOT.paperMode = false;
@@ -5687,18 +5693,20 @@ function applyServerPaperStatus(status, announce) {
   var lbl = document.getElementById('paper-mode-lbl');
   var panel = document.getElementById('active-trades-panel');
   if(btn) {
-    btn.style.background = entryActive ? 'rgba(63,185,80,.2)' : paperOperational ? 'rgba(227,179,65,.14)' : paperPaused ? 'rgba(227,179,65,.14)' : 'rgba(248,81,73,.12)';
-    btn.style.borderColor = entryActive ? 'rgba(63,185,80,.5)' : paperOperational ? 'rgba(227,179,65,.45)' : paperPaused ? 'rgba(227,179,65,.45)' : 'rgba(248,81,73,.45)';
-    btn.style.color = entryActive ? '#3fb950' : paperOperational ? '#e3b341' : paperPaused ? '#e3b341' : '#f85149';
-    btn.title = entryActive
-      ? 'Paper Bot berjalan di VPS — browser boleh ditutup'
+     btn.style.background = researchActive || entryActive ? 'rgba(63,185,80,.2)' : paperOperational ? 'rgba(227,179,65,.14)' : paperPaused ? 'rgba(227,179,65,.14)' : 'rgba(248,81,73,.12)';
+     btn.style.borderColor = researchActive || entryActive ? 'rgba(63,185,80,.5)' : paperOperational ? 'rgba(227,179,65,.45)' : paperPaused ? 'rgba(227,179,65,.45)' : 'rgba(248,81,73,.45)';
+     btn.style.color = researchActive || entryActive ? '#3fb950' : paperOperational ? '#e3b341' : paperPaused ? '#e3b341' : '#f85149';
+     btn.title = researchActive
+       ? 'Strict Trial sedang ditahan; Research Collection aktif di VPS dengan risiko terpisah'
+       : entryActive
+       ? 'Paper Bot berjalan di VPS — browser boleh ditutup'
       : paperOperational && entryPaused ? 'Service VPS aktif; entry baru ditahan, posisi lama tetap dimonitor'
       : paperPaused ? 'Paper Bot dijeda di VPS' : paperKilled ? 'Kill switch paper bot aktif'
       : 'Paper Bot VPS tidak berjalan — browser fallback tidak digunakan';
   }
   if(lbl) {
-    lbl.textContent = entryActive ? 'PAPER VPS ON · ENTRY ACTIVE' : paperOperational && status.monitoringOnly ? 'PAPER VPS ON · MONITORING ONLY' : paperOperational && entryPaused ? 'PAPER VPS ON · ENTRY PAUSED' : paperPaused ? 'PAPER VPS PAUSED' : paperKilled ? 'PAPER VPS KILLED' : 'PAPER VPS STOPPED';
-    lbl.style.color = entryActive ? '#3fb950' : paperOperational ? '#e3b341' : paperPaused ? '#e3b341' : '#f85149';
+     lbl.textContent = researchActive ? 'PAPER VPS ON · RESEARCH COLLECTION' : entryActive ? 'PAPER VPS ON · ENTRY ACTIVE' : paperOperational && status.monitoringOnly ? 'PAPER VPS ON · MONITORING ONLY' : paperOperational && entryPaused ? 'PAPER VPS ON · ENTRY PAUSED' : paperPaused ? 'PAPER VPS PAUSED' : paperKilled ? 'PAPER VPS KILLED' : 'PAPER VPS STOPPED';
+     lbl.style.color = researchActive || entryActive ? '#3fb950' : paperOperational ? '#e3b341' : paperPaused ? '#e3b341' : '#f85149';
   }
   if(panel) panel.style.display = 'flex';
   var perScan = document.getElementById('bot-per-scan');
@@ -5742,10 +5750,16 @@ function applyServerPaperStatus(status, announce) {
       : status.entryState === 'OFFLINE' ? 'MONITORING/OFFLINE' : '';
     var guardReason = !serverRunning ? 'service VPS berhenti' : paperPaused ? 'bot dijeda' : paperKilled ? 'kill switch aktif'
       : (status.blockReason ? (reasonMap[status.blockReason] || status.blockReason) : 'siap menerima setup baru');
-    guard.textContent = (stateLabel ? stateLabel + ' · ' : 'Guard: ') + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
+    var researchCount = Number(status.researchActiveCount || research.activeCount || 0);
+    var researchDd = Number(research.drawdownPct || 0);
+    var researchHard = Number(research.hardDrawdownPct || 50);
+    var researchText = research.enabled ? ' · Research ' + researchCount + '/' + Number(research.maxActive || 80)
+      + ' · RDD ' + researchDd.toFixed(2) + '/' + researchHard.toFixed(0) + '%' : '';
+    var displayState = researchActive ? 'RESEARCH ACTIVE' : stateLabel;
+    guard.textContent = (displayState ? displayState + ' · ' : 'Guard: ') + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
       + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1)
-      + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%';
-    guard.style.color = !serverRunning || paperKilled || status.drawdownGuard ? '#f85149' : (status.blockReason ? '#e3b341' : '#3fb950');
+      + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%' + researchText;
+    guard.style.color = !serverRunning || paperKilled || (status.drawdownGuard && !researchActive) || research.hardStop ? '#f85149' : (status.blockReason && !researchActive ? '#e3b341' : '#3fb950');
     guard.title = status.guardMessage || (status.lastError ? 'Last error: ' + status.lastError : '');
   }
   if(status.equity != null) {

@@ -49,7 +49,7 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 8;
+const PAPER_SCHEMA_VERSION = 9;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -82,6 +82,24 @@ const PAPER_TP1_CLOSE_PCT = Math.max(10, Math.min(90,
 const PAPER_STRATEGY_VERSION = String(process.env.PAPER_STRATEGY_VERSION || 'MTF_ATR_V2');
 const PAPER_DEFAULT_COHORT_ID = String(process.env.PAPER_COHORT_ID ||
   ('trial-' + new Date().toISOString().slice(0, 10)));
+// Research Collection is a separate paper cohort. It is used only while the
+// strict trial is paused by its 2.5% drawdown guard, so the clean trial
+// statistics remain comparable while the one-week data collection continues.
+const PAPER_RESEARCH_STRATEGY_VERSION = 'RESEARCH_COLLECTION';
+const PAPER_RESEARCH_COHORT_ID = String(process.env.PAPER_RESEARCH_COHORT_ID ||
+  ('research-' + new Date().toISOString().slice(0, 10)));
+const PAPER_RESEARCH_ENABLED = String(process.env.PAPER_RESEARCH_ENABLED || 'true').toLowerCase() !== 'false';
+const PAPER_RESEARCH_PER_SCAN = Math.max(1, Math.min(3,
+  Number.isFinite(Number(process.env.PAPER_RESEARCH_PER_SCAN))
+    ? Number(process.env.PAPER_RESEARCH_PER_SCAN) : 3));
+const PAPER_RESEARCH_RISK_PCT = Math.max(0.1, Math.min(1,
+  Number.isFinite(Number(process.env.PAPER_RESEARCH_RISK_PCT))
+    ? Number(process.env.PAPER_RESEARCH_RISK_PCT) : 0.25));
+const PAPER_RESEARCH_MAX_ACTIVE = Math.max(3, Math.min(100,
+  Number.isFinite(Number(process.env.PAPER_RESEARCH_MAX_ACTIVE))
+    ? Number(process.env.PAPER_RESEARCH_MAX_ACTIVE) : PAPER_MAX_ACTIVE));
+const PAPER_RESEARCH_WARNING_DD_PCT = 10;
+const PAPER_RESEARCH_HARD_DD_PCT = 50;
 const PAPER_STRATEGY_KEYS = ['MTF_ATR_V2', 'PRE_UPGRADE', 'LEGACY'];
 const PAPER_DEFAULT_STRATEGY_SETTINGS = {
   MTF_ATR_V2: {enabled: true, maxActive: PAPER_MAX_ACTIVE, riskPct: PAPER_RISK_PCT, minRR: PAPER_MIN_RR, slPct: 0, tp1R: 2, tp2R: 3},
@@ -1018,6 +1036,11 @@ function defaultPaperState() {
     equityPeak: PAPER_STARTING_EQUITY,
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: PAPER_DEFAULT_COHORT_ID,
+    researchEnabled: PAPER_RESEARCH_ENABLED,
+    researchStrategyVersion: PAPER_RESEARCH_STRATEGY_VERSION,
+    researchCohortId: PAPER_RESEARCH_COHORT_ID,
+    researchStartingEquity: PAPER_STARTING_EQUITY,
+    researchEquityPeak: PAPER_STARTING_EQUITY,
     startedAt: new Date().toISOString(),
     lastScanAt: null,
     lastCycleKey: null,
@@ -1121,7 +1144,20 @@ function loadPaperState() {
       Number.isFinite(previousEquityPeak) && previousEquityPeak > 0 ? previousEquityPeak : 0,
       normalizedStartingEquity
     );
+    const researchStartingEquity = Number(state.researchStartingEquity);
+    const normalizedResearchStartingEquity = Number.isFinite(researchStartingEquity) && researchStartingEquity > 0
+      ? researchStartingEquity : normalizedStartingEquity;
+    const previousResearchEquityPeak = Number(state.researchEquityPeak);
+    state.researchEnabled = PAPER_RESEARCH_ENABLED && state.researchEnabled !== false;
+    state.researchStrategyVersion = PAPER_RESEARCH_STRATEGY_VERSION;
+    state.researchCohortId = state.researchCohortId || PAPER_RESEARCH_COHORT_ID;
+    state.researchStartingEquity = normalizedResearchStartingEquity;
+    state.researchEquityPeak = Math.max(
+      Number.isFinite(previousResearchEquityPeak) && previousResearchEquityPeak > 0 ? previousResearchEquityPeak : 0,
+      normalizedResearchStartingEquity
+    );
     if (!Number.isFinite(previousEquityPeak) || previousEquityPeak <= 0) state._needsSave = true;
+    if (!Number.isFinite(previousResearchEquityPeak) || previousResearchEquityPeak <= 0) state._needsSave = true;
     state.strategyVersion = state.strategyVersion || PAPER_STRATEGY_VERSION;
     state.cohortId = state.cohortId || PAPER_DEFAULT_COHORT_ID;
     if (previousSchemaVersion < PAPER_SCHEMA_VERSION) state._needsSave = true;
@@ -1708,7 +1744,9 @@ function paperSetup(pair, options) {
     : Math.min(entry - riskDistance * 3, tp1 * 0.99, nextTarget || Number.POSITIVE_INFINITY));
   const sizingEquity = Number.isFinite(Number(setupOptions.equity))
     ? Number(setupOptions.equity) : paperEquity();
-  const riskDollar = Math.max(0, sizingEquity * cfg.riskPct / 100);
+  const sizingRiskPct = Number.isFinite(Number(setupOptions.riskPct))
+    ? Math.max(0.1, Math.min(2, Number(setupOptions.riskPct))) : cfg.riskPct;
+  const riskDollar = Math.max(0, sizingEquity * sizingRiskPct / 100);
   const contracts = stopDistance > 0 ? riskDollar / stopDistance : 0;
   return {
     dir,
@@ -1718,7 +1756,7 @@ function paperSetup(pair, options) {
     atr: Number(atr.toFixed(8)),
     contracts: Number(contracts.toFixed(6)),
     size: Number((contracts * entry).toFixed(2)),
-    riskPct: cfg.riskPct,
+    riskPct: Number(sizingRiskPct.toFixed(2)),
     riskDollar: Number(riskDollar.toFixed(2))
   };
 }
@@ -1799,6 +1837,15 @@ function paperIsTrialTrade(trade) {
     String(trade.cohortId || PAPER_DEFAULT_COHORT_ID) === String(paperState.cohortId);
 }
 
+function paperIsResearchTrade(trade) {
+  return trade && paperTradeStrategyVersion(trade) === PAPER_RESEARCH_STRATEGY_VERSION &&
+    String(trade.cohortId || paperState.researchCohortId) === String(paperState.researchCohortId);
+}
+
+function paperResearchEnabled() {
+  return PAPER_RESEARCH_ENABLED && paperState.researchEnabled !== false;
+}
+
 function paperIsPreUpgradeTrade(trade) {
   return paperTradeStrategyVersion(trade) === 'PRE_UPGRADE';
 }
@@ -1817,6 +1864,10 @@ function paperPreUpgradeActiveCount() {
   return paperState.activeTrades.filter(t => paperIsActive(t) && paperIsPreUpgradeTrade(t)).length;
 }
 
+function paperResearchActiveCount() {
+  return paperState.activeTrades.filter(t => paperIsActive(t) && paperIsResearchTrade(t)).length;
+}
+
 function paperRealizedPnl(includeLegacy) {
   return paperState.closedTrades
     .filter(trade => includeLegacy || paperIsTrialTrade(trade))
@@ -1828,6 +1879,55 @@ function paperUnrealizedPnl(includeLegacy) {
     .filter(trade => (trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL') &&
       (includeLegacy || paperIsTrialTrade(trade)))
     .reduce((sum, trade) => sum + paperNumber(trade.unrealPnl), 0);
+}
+
+function paperResearchRealizedPnl() {
+  return paperState.closedTrades
+    .filter(trade => paperIsResearchTrade(trade))
+    .reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
+}
+
+function paperResearchUnrealizedPnl() {
+  return paperState.activeTrades
+    .filter(trade => paperIsResearchTrade(trade) &&
+      (trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL'))
+    .reduce((sum, trade) => sum + paperNumber(trade.unrealPnl), 0);
+}
+
+function paperResearchEquity() {
+  return paperNumber(paperState.researchStartingEquity || paperState.startingEquity || PAPER_STARTING_EQUITY) +
+    paperResearchRealizedPnl() + paperResearchUnrealizedPnl();
+}
+
+function paperResearchEquityPeak() {
+  return Math.max(
+    paperNumber(paperState.researchEquityPeak),
+    paperNumber(paperState.researchStartingEquity || paperState.startingEquity || PAPER_STARTING_EQUITY)
+  );
+}
+
+function paperUpdateResearchEquityPeak() {
+  const current = paperResearchEquity();
+  const peak = paperResearchEquityPeak();
+  if (current > peak) {
+    paperState.researchEquityPeak = Number(current.toFixed(2));
+    return true;
+  }
+  if (paperState.researchEquityPeak !== peak) paperState.researchEquityPeak = Number(peak.toFixed(2));
+  return false;
+}
+
+function paperResearchDrawdownPct() {
+  const peak = paperResearchEquityPeak();
+  const current = paperResearchEquity();
+  return peak > 0 ? Math.max(0, (peak - current) / peak * 100) : 0;
+}
+
+function paperResearchDailyLossR() {
+  const today = new Date().toISOString().slice(0, 10);
+  return paperState.closedTrades
+    .filter(trade => paperIsResearchTrade(trade) && String(trade.closedAt || '').slice(0, 10) === today)
+    .reduce((sum, trade) => sum + paperNumber(trade.r), 0);
 }
 
 function paperEquity(includeLegacy) {
@@ -1872,6 +1972,12 @@ function paperTradeRiskDollar(trade) {
 function paperActiveRiskDollar(includeLegacy) {
   return paperState.activeTrades
     .filter(trade => paperIsActive(trade) && (includeLegacy || paperIsTrialTrade(trade)))
+    .reduce((sum, trade) => sum + paperTradeRiskDollar(trade), 0);
+}
+
+function paperResearchActiveRiskDollar() {
+  return paperState.activeTrades
+    .filter(trade => paperIsActive(trade) && paperIsResearchTrade(trade))
     .reduce((sum, trade) => sum + paperTradeRiskDollar(trade), 0);
 }
 
@@ -1981,6 +2087,7 @@ function paperTradeView(trade) {
     events: Array.isArray(trade.events) ? trade.events.slice(0, 50) : [],
     strategyVersion: trade.strategyVersion || paperTradeStrategyVersion(trade),
     cohortId: trade.cohortId || null,
+    researchCollection: paperIsResearchTrade(trade),
     signalCreatedAt: trade.signalCreatedAt || null,
     candleAtByTf: trade.candleAtByTf || null,
     mode: trade.mode || trade.signalMode || null,
@@ -2864,7 +2971,10 @@ function applyPaperInstrumentMetadata(pairs, instruments) {
 async function runPaperScan(reason, requestedCycleKey) {
   const cfg = paperSettings();
   paperUpdateEquityPeak();
+  paperUpdateResearchEquityPeak();
   const drawdownGuard = paperDrawdownPct() >= PAPER_MAX_DRAWDOWN_PCT;
+  const researchDrawdownPct = paperResearchDrawdownPct();
+  const researchHardStop = researchDrawdownPct >= PAPER_RESEARCH_HARD_DD_PCT;
   if (!paperState.enabled || paperState.paused || paperState.killSwitch || !cfg.strategyEnabled ||
       !paperWithinTradingHours(cfg) || paperBusy) return;
   const cycleKey = requestedCycleKey || paperCycleKey(Date.now());
@@ -2890,7 +3000,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     ranked = mtfCandidates.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     const activeSymbols = new Map();
     paperState.activeTrades
-      .filter(t => paperIsActive(t) && paperIsTrialTrade(t))
+      .filter(t => paperIsActive(t))
       .forEach(t => activeSymbols.set(t.sym, (activeSymbols.get(t.sym) || 0) + 1));
     const equity = paperEquity();
     const activeRisk = paperActiveRiskDollar();
@@ -2898,31 +3008,45 @@ async function runPaperScan(reason, requestedCycleKey) {
     const perTradeRisk = equity * cfg.riskPct / 100;
     const dailyLossR = paperDailyLossR();
     const dailyGuard = dailyLossR <= -cfg.maxDailyLossR;
+    const researchMode = paperResearchEnabled() && drawdownGuard && !dailyGuard && !researchHardStop;
+    const researchEquity = paperResearchEquity();
+    const researchActiveRisk = paperResearchActiveRiskDollar();
+    const researchRiskBudget = researchEquity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
+    const researchPerTradeRisk = researchEquity * PAPER_RESEARCH_RISK_PCT / 100;
+    const researchRiskSlots = researchPerTradeRisk > 0
+      ? Math.floor(Math.max(0, researchRiskBudget - researchActiveRisk) / researchPerTradeRisk)
+      : 0;
+    const researchCapacity = Math.min(
+      dailyGuard || researchHardStop ? 0 : Math.max(0, PAPER_RESEARCH_MAX_ACTIVE - paperResearchActiveCount()),
+      researchRiskSlots);
     const riskSlots = perTradeRisk > 0
       ? Math.floor(Math.max(0, riskBudget - activeRisk) / perTradeRisk)
       : 0;
     const capacity = Math.min(
       dailyGuard ? 0 : Math.max(0, cfg.maxActive - paperActiveCount()), riskSlots);
-    // A risk guard pauses entry, not market analysis. Keep collecting valid
-    // signals during the trial so the dashboard can show what would have
-    // qualified without creating additional paper exposure.
-    const monitoringGuard = drawdownGuard || dailyGuard;
+    // Strict Trial pauses at 2.5% DD. Research Collection can continue from
+    // its own equity ledger until the explicit 50% emergency stop, while all
+    // MTF, RR, data-quality, symbol, direction and capacity checks remain.
+    const monitoringGuard = dailyGuard || (drawdownGuard && !researchMode) || researchHardStop;
     const directionRisk = {LONG: 0, SHORT: 0};
     const directionCount = {LONG: 0, SHORT: 0};
     paperState.activeTrades
-      .filter(t => paperIsActive(t) && paperIsTrialTrade(t) && directionRisk[t.dir] != null)
+      .filter(t => paperIsActive(t) && (researchMode ? paperIsResearchTrade(t) : paperIsTrialTrade(t)) && directionRisk[t.dir] != null)
       .forEach(t => {
         directionRisk[t.dir] += paperTradeRiskDollar(t);
         directionCount[t.dir] += 1;
       });
     const correlatedActiveCount = paperState.activeTrades
-      .filter(t => paperIsActive(t) && paperIsTrialTrade(t)).length;
+      .filter(t => paperIsActive(t) && (researchMode ? paperIsResearchTrade(t) : paperIsTrialTrade(t))).length;
     const selected = [];
+    const researchSelected = [];
     const monitoringEligible = [];
     const rejected = [];
-    const targetCount = monitoringGuard ? cfg.perScan : Math.min(cfg.perScan, capacity);
+    const targetCount = researchMode ? Math.min(PAPER_RESEARCH_PER_SCAN, researchCapacity)
+      : monitoringGuard ? cfg.perScan : Math.min(cfg.perScan, capacity);
     for (const pair of ranked) {
-      const acceptedCount = monitoringGuard ? monitoringEligible.length : selected.length;
+      const acceptedCount = monitoringGuard ? monitoringEligible.length
+        : researchMode ? researchSelected.length : selected.length;
       if (acceptedCount >= targetCount) break;
       if (!paperSymbolAllowed(pair.sym, cfg)) {
         paperReject(rejected, pair, ['SYMBOL_FILTERED'], ['symbol whitelist/blacklist filter']);
@@ -2956,7 +3080,8 @@ async function runPaperScan(reason, requestedCycleKey) {
         paperReject(rejected, pair, ['DATA_REJECTED'], ['data quality ' + pair.dataQuality]);
         continue;
       }
-      const setup = paperSetup(pair);
+      const setup = paperSetup(pair, researchMode
+        ? {equity: researchEquity, riskPct: PAPER_RESEARCH_RISK_PCT} : undefined);
       const setupValidation = validatePaperSetup(pair, setup);
       if (!setupValidation.ok) {
         paperReject(rejected, pair, setupValidation.reasonCodes, setupValidation.reasons);
@@ -2966,7 +3091,8 @@ async function runPaperScan(reason, requestedCycleKey) {
         monitoringEligible.push({pair, setup, setupValidation});
         continue;
       }
-      const directionBudget = equity * PAPER_MAX_DIRECTION_RISK_PCT / 100;
+      const placementEquity = researchMode ? researchEquity : equity;
+      const directionBudget = placementEquity * PAPER_MAX_DIRECTION_RISK_PCT / 100;
       if (directionRisk[setup.dir] + setupValidation.expectedLoss > directionBudget * 1.05) {
         paperReject(rejected, pair, ['DIRECTION_RISK_FULL'], [
           'risk ' + setup.dir + ' melewati budget ' + PAPER_MAX_DIRECTION_RISK_PCT + '%'
@@ -2979,13 +3105,14 @@ async function runPaperScan(reason, requestedCycleKey) {
         ]);
         continue;
       }
-      if (correlatedActiveCount + selected.length >= PAPER_MAX_HIGH_CORR_POSITIONS) {
+      const profileSelectedCount = researchMode ? researchSelected.length : selected.length;
+      if (correlatedActiveCount + profileSelectedCount >= PAPER_MAX_HIGH_CORR_POSITIONS) {
         paperReject(rejected, pair, ['CORRELATED_EXPOSURE_FULL'], [
           'exposure crypto berkorelasi tinggi sudah mencapai ' + PAPER_MAX_HIGH_CORR_POSITIONS
         ]);
         continue;
       }
-      selected.push({pair, setup, setupValidation});
+      (researchMode ? researchSelected : selected).push({pair, setup, setupValidation});
       activeSymbols.set(pair.sym, (activeSymbols.get(pair.sym) || 0) + 1);
       directionRisk[setup.dir] += setupValidation.expectedLoss;
       directionCount[setup.dir] += 1;
@@ -3004,12 +3131,25 @@ async function runPaperScan(reason, requestedCycleKey) {
         expectedLoss: item.setupValidation.expectedLoss,
         signalCreatedAt: new Date().toISOString(),
         cycleKey,
-        guardReason: drawdownGuard ? 'MAX_DRAWDOWN_REACHED' : 'DAILY_DRAWDOWN_GUARD'
-      };
-    });
-    const placed = selected.map(item => {
+         guardReason: researchHardStop ? 'RESEARCH_HARD_DD_REACHED'
+           : drawdownGuard ? 'MAX_DRAWDOWN_REACHED' : 'DAILY_DRAWDOWN_GUARD'
+       };
+     });
+    const selectedForPlacement = researchMode ? researchSelected : selected;
+    const placed = selectedForPlacement.map(item => {
       const pair = item.pair;
       const setup = item.setup;
+      const profile = researchMode ? {
+        mode: PAPER_RESEARCH_STRATEGY_VERSION,
+        signalMode: PAPER_RESEARCH_STRATEGY_VERSION,
+        strategyVersion: PAPER_RESEARCH_STRATEGY_VERSION,
+        cohortId: paperState.researchCohortId
+      } : {
+        mode: PAPER_SIGNAL_MODE,
+        signalMode: PAPER_SIGNAL_MODE,
+        strategyVersion: PAPER_STRATEGY_VERSION,
+        cohortId: paperState.cohortId
+      };
       const id = 'VPS-' + String(++paperState.nextId).padStart(6, '0');
       const candidate = paperCandidateView(pair);
       const trade = {
@@ -3026,9 +3166,9 @@ async function runPaperScan(reason, requestedCycleKey) {
         createdAt: Date.now(), openedAt: null, cycleKey,
         score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
         volume: pair.volume, volumeRatio: pair.volumeRatio, mtf: pair.mtf,
-        timeframe: '15M', tf: '15M', mode: PAPER_SIGNAL_MODE,
-        signalMode: PAPER_SIGNAL_MODE, dataQuality: pair.dataQuality,
-        strategyVersion: PAPER_STRATEGY_VERSION, cohortId: paperState.cohortId,
+         timeframe: '15M', tf: '15M', mode: profile.mode,
+         signalMode: profile.signalMode, dataQuality: pair.dataQuality,
+         strategyVersion: profile.strategyVersion, cohortId: profile.cohortId,
         signalCreatedAt: new Date().toISOString(),
         candleAtByTf: Object.fromEntries(['H4', 'H1', 'M30', 'M15'].map(tf =>
           [tf, pair.mtf && pair.mtf[tf] ? pair.mtf[tf].lastClosedCandleAt || pair.mtf[tf].candleAt : null])),
@@ -3048,8 +3188,8 @@ async function runPaperScan(reason, requestedCycleKey) {
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
         executionModel: 'LIMIT_STRICT',
         executionClass: 'STRICT', legacy: false,
-        reason: 'Auto VPS: 15M scan | ' + candidate.evidence.join('; ')
-      };
+         reason: (researchMode ? 'Research VPS: 15M scan | ' : 'Auto VPS: 15M scan | ') + candidate.evidence.join('; ')
+       };
       paperAddTradeEvent(trade, 'ORDER_PLACED', {price: setup.entry, reason: cycleKey, size: setup.size});
       paperState.activeTrades.push(trade);
       console.log('[paper] placed', id, pair.sym, setup.dir, '@', setup.entry);
@@ -3064,15 +3204,23 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperRuntime.lastScanCompletedAt = paperState.lastScanAt;
     paperRuntime.lastScanError = null;
     const strictActiveCount = paperActiveCount();
+    const researchActiveCount = paperResearchActiveCount();
     const hasMtfEligible = ranked.some(pair => pair.mtfStatus === 'FULL' &&
       pair.mtfDirection !== 'NEUTRAL' && paperMtfGate(pair, cfg.minConfluence).ok &&
       pair.signalScores && pair.signalScores.total >= cfg.minSignalScore &&
       pair.dataQuality === 'FULL');
-    const blockReason = drawdownGuard ? 'MAX_DRAWDOWN_REACHED' : dailyGuard ? 'DAILY_DRAWDOWN_GUARD' : !capacity
-      ? (paperActiveCount() >= cfg.maxActive ? 'MAX_ACTIVE_REACHED'
-        : activeRisk >= riskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
+    const profileCapacity = researchMode ? researchCapacity : capacity;
+    const profileActiveCount = researchMode ? researchActiveCount : strictActiveCount;
+    const profileMaxActive = researchMode ? PAPER_RESEARCH_MAX_ACTIVE : cfg.maxActive;
+    const profileActiveRisk = researchMode ? researchActiveRisk : activeRisk;
+    const profileRiskBudget = researchMode ? researchRiskBudget : riskBudget;
+    const profilePerScan = researchMode ? PAPER_RESEARCH_PER_SCAN : cfg.perScan;
+    const blockReason = researchHardStop ? 'RESEARCH_HARD_DD_REACHED'
+      : drawdownGuard ? 'MAX_DRAWDOWN_REACHED' : dailyGuard ? 'DAILY_DRAWDOWN_GUARD' : !profileCapacity
+      ? (profileActiveCount >= profileMaxActive ? 'MAX_ACTIVE_REACHED'
+        : profileActiveRisk >= profileRiskBudget ? 'RISK_BUDGET_REACHED' : 'NO_CAPACITY')
       : (!placed.length ? (hasMtfEligible ? 'NO_VALID_UNALLOCATED_SETUP' : 'NO_VALID_MTF_SETUP') :
-        placed.length < cfg.perScan ? 'PARTIAL_CAPACITY' : null);
+        placed.length < profilePerScan ? 'PARTIAL_CAPACITY' : null);
     paperState.lastBlockReason = blockReason;
     if (monitoringSignals.length) {
       paperState.monitoringSignals = monitoringSignals
@@ -3083,22 +3231,28 @@ async function runPaperScan(reason, requestedCycleKey) {
       cycleKey, at: paperState.lastScanAt, reason: reason || '15M close',
       watchlistPriority: ranked.filter(pair => pair.watchlistPriority).map(pair => pair.sym),
       candidates: ranked.length,
-      selected: monitoringGuard ? monitoringSignals : ranked.slice(0, 10).map(paperCandidateView),
+      selected: researchMode ? placed : monitoringGuard ? monitoringSignals : ranked.slice(0, 10).map(paperCandidateView),
       placed,
+      strictPlaced: researchMode ? [] : placed,
+      researchPlaced: researchMode ? placed : [],
       monitoringOnly: monitoringSignals,
       rejected: rejected.slice(0, 20),
       capacity: {
-        requested: cfg.perScan, placed: placed.length,
+        mode: researchMode ? PAPER_RESEARCH_STRATEGY_VERSION : PAPER_STRATEGY_VERSION,
+        requested: profilePerScan, placed: placed.length,
         availableSlots: Math.max(0, cfg.maxActive - strictActiveCount),
         availableRisk: Number(Math.max(0, riskBudget - activeRisk).toFixed(2)),
+        researchAvailableSlots: Math.max(0, PAPER_RESEARCH_MAX_ACTIVE - researchActiveCount),
+        researchAvailableRisk: Number(Math.max(0, researchRiskBudget - researchActiveRisk).toFixed(2)),
         dailyLossR: Number(dailyLossR.toFixed(2)),
+        researchDrawdownPct: Number(researchDrawdownPct.toFixed(2)),
         blockReason
       }
     });
     paperState.recentScans = paperState.recentScans.slice(0, PAPER_MAX_RECENT_SCANS);
     savePaperState();
-    console.log('[paper] scan complete', cycleKey, 'placed', placed.length,
-      monitoringGuard ? '(monitoring only: ' + monitoringSignals.length + ')' : '');
+    console.log('[paper] scan complete', cycleKey, 'mode', researchMode ? 'research' : 'strict',
+      'placed', placed.length, monitoringGuard ? '(monitoring only: ' + monitoringSignals.length + ')' : '');
     // Order-bearing scans are always reported. Empty-scan summaries are an
     // explicit opt-in because they create a recurring message every 15 minutes.
     if (placed.length || TELEGRAM_SCAN_SUMMARY) {
@@ -3645,6 +3799,9 @@ function paperStatus(options) {
     .reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
   const equity = paperEquity();
   const strictActiveCount = paperActiveCount();
+  const researchActiveCount = paperResearchActiveCount();
+  const researchEquity = paperResearchEquity();
+  const researchActiveRisk = paperResearchActiveRiskDollar();
   const legacyActiveCount = paperLegacyActiveCount();
   const preUpgradeActiveCount = paperPreUpgradeActiveCount();
   const activeRisk = paperActiveRiskDollar();
@@ -3668,12 +3825,28 @@ function paperStatus(options) {
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: paperState.cohortId
   }) : null;
+  const researchStats = includeStats ? paperStats({
+    strategyVersion: PAPER_RESEARCH_STRATEGY_VERSION,
+    cohortId: paperState.researchCohortId
+  }) : null;
   const dailyLossR = paperDailyLossR();
+  const researchDailyLossR = paperResearchDailyLossR();
   paperUpdateEquityPeak();
+  paperUpdateResearchEquityPeak();
   const equityPeak = paperEquityPeak();
+  const researchEquityPeak = paperResearchEquityPeak();
   const drawdownPct = paperDrawdownPct();
+  const researchDrawdownPct = paperResearchDrawdownPct();
   const drawdownGuard = drawdownPct >= PAPER_MAX_DRAWDOWN_PCT;
+  const researchDrawdownWarning = researchDrawdownPct >= PAPER_RESEARCH_WARNING_DD_PCT;
+  const researchHardStop = researchDrawdownPct >= PAPER_RESEARCH_HARD_DD_PCT;
   const dailyGuard = dailyLossR <= -cfg.maxDailyLossR;
+  const researchActive = paperResearchEnabled() && paperStarted && !paperState.paused &&
+    !paperState.killSwitch && cfg.strategyEnabled && paperWithinTradingHours(cfg) &&
+    drawdownGuard && !dailyGuard && !researchHardStop;
+  const researchEntryState = !paperStarted || paperState.killSwitch ? 'OFFLINE'
+    : researchHardStop ? 'HARD_STOP' : researchActive ? 'ACTIVE'
+      : paperState.paused || dailyGuard ? 'PAUSED' : 'STANDBY';
   const persistedBlockReason = paperState.lastBlockReason;
   const blockReason = paperState.killSwitch ? 'KILL_SWITCH' : paperState.paused ? 'PAUSED' :
     !cfg.strategyEnabled ? 'STRATEGY_DISABLED' : !paperWithinTradingHours(cfg) ? 'OUTSIDE_TRADING_HOURS' :
@@ -3690,7 +3863,9 @@ function paperStatus(options) {
   const entryState = !paperStarted || paperState.killSwitch ? 'OFFLINE'
     : entryPaused ? 'ENTRY_PAUSED' : 'ENTRY_ACTIVE';
   const guardMessage = drawdownGuard
-    ? 'Current DD ' + Number(drawdownPct.toFixed(2)) + '% is above the ' + Number(PAPER_MAX_DRAWDOWN_PCT.toFixed(2)) + '% limit; new entries are paused while existing positions remain monitored.'
+    ? (researchActive
+      ? 'Strict Trial paused at DD ' + Number(drawdownPct.toFixed(2)) + '%; Research Collection is active with separate equity and 0.25% risk. Emergency stop: 50% DD.'
+      : 'Current DD ' + Number(drawdownPct.toFixed(2)) + '% is above the ' + Number(PAPER_MAX_DRAWDOWN_PCT.toFixed(2)) + '% limit; new entries are paused while existing positions remain monitored.')
     : dailyGuard ? 'Daily loss guard is active; new entries are paused while existing positions remain monitored.'
     : entryState === 'ENTRY_ACTIVE' ? 'New paper entries are allowed.' : 'Paper service is not accepting new entries.';
   const lastScan = Array.isArray(paperState.recentScans) ? paperState.recentScans[0] : null;
@@ -3709,14 +3884,40 @@ function paperStatus(options) {
     tp1ClosePct: cfg.tp1ClosePct, maxDailyLossR: cfg.maxDailyLossR,
     maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
     entryState,
-    monitoringOnly: drawdownGuard || dailyGuard,
+    mode: researchActive ? PAPER_RESEARCH_STRATEGY_VERSION : entryState === 'ENTRY_ACTIVE' ? 'STRICT_TRIAL' : 'MONITORING_ONLY',
+    monitoringOnly: (drawdownGuard && !researchActive) || dailyGuard || researchHardStop,
     guardMessage,
     resumeThresholdPct: PAPER_MAX_DRAWDOWN_PCT,
+    research: {
+      enabled: paperResearchEnabled(), mode: PAPER_RESEARCH_STRATEGY_VERSION,
+      strategyVersion: PAPER_RESEARCH_STRATEGY_VERSION, cohortId: paperState.researchCohortId,
+      entryState: researchEntryState, active: researchActive,
+      perScan: PAPER_RESEARCH_PER_SCAN, riskPct: PAPER_RESEARCH_RISK_PCT,
+      maxActive: PAPER_RESEARCH_MAX_ACTIVE, warningDrawdownPct: PAPER_RESEARCH_WARNING_DD_PCT,
+      hardDrawdownPct: PAPER_RESEARCH_HARD_DD_PCT,
+      startingEquity: Number(paperNumber(paperState.researchStartingEquity).toFixed(2)),
+      equityPeak: Number(researchEquityPeak.toFixed(2)),
+      drawdownPct: Number(researchDrawdownPct.toFixed(2)),
+      drawdownWarning: researchDrawdownWarning, hardStop: researchHardStop,
+      activeCount: researchActiveCount,
+      availableSlots: Math.max(0, PAPER_RESEARCH_MAX_ACTIVE - researchActiveCount),
+      realizedPnl: Number(paperResearchRealizedPnl().toFixed(2)),
+      unrealizedPnl: Number(paperResearchUnrealizedPnl().toFixed(2)),
+      equity: Number(researchEquity.toFixed(2)),
+      activeRisk: Number(researchActiveRisk.toFixed(2)),
+      riskBudget: Number((researchEquity * PAPER_MAX_ACTIVE_RISK_PCT / 100).toFixed(2)),
+      dailyLossR: Number(researchDailyLossR.toFixed(2)),
+      stats: researchStats ? researchStats.metrics : null,
+      statsSample: researchStats ? researchStats.sample : null
+    },
     monitoringSignalCount: Array.isArray(paperState.monitoringSignals) ? paperState.monitoringSignals.length : 0,
     lastScanSummary: lastScan ? {
       cycleKey: lastScan.cycleKey || null, at: lastScan.at || null,
       reason: lastScan.reason || null, candidates: Number(lastScan.candidates || 0),
       placed: Array.isArray(lastScan.placed) ? lastScan.placed.length : 0,
+      mode: lastScan.capacity && lastScan.capacity.mode || PAPER_STRATEGY_VERSION,
+      strictPlaced: Array.isArray(lastScan.strictPlaced) ? lastScan.strictPlaced.length : 0,
+      researchPlaced: Array.isArray(lastScan.researchPlaced) ? lastScan.researchPlaced.length : 0,
       rejected: Array.isArray(lastScan.rejected) ? lastScan.rejected.length : 0,
       monitoringOnly: Array.isArray(lastScan.monitoringOnly) ? lastScan.monitoringOnly.length : 0,
       blockReason: lastScan.capacity && lastScan.capacity.blockReason || null
@@ -3738,6 +3939,7 @@ function paperStatus(options) {
     freshnessMaxAgeSec: Object.fromEntries(Object.entries(PAPER_TIMEFRAME_MAX_AGE_MS)
       .map(([tf, ms]) => [tf, Math.round(ms / 1000)])),
     strictActiveCount, trialActiveCount: strictActiveCount,
+    researchActiveCount, researchAvailableSlots: Math.max(0, PAPER_RESEARCH_MAX_ACTIVE - researchActiveCount),
     legacyActiveCount, preUpgradeActiveCount, availableSlots,
     trialDirectionCounts,
     startingEquity: paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY),
@@ -3759,6 +3961,7 @@ function paperStatus(options) {
     riskBudget: Number(riskBudget.toFixed(2)),
     availableRisk: Number(availableRisk.toFixed(2)),
     dailyLossR: Number(dailyLossR.toFixed(2)),
+    researchDailyLossR: Number(researchDailyLossR.toFixed(2)),
     dailyPnlDate,
     dailyRealizedPnl: Number(dailyRealizedPnl.toFixed(2)),
     dailySummary: paperDailySummaryView(dailyPnlDate),
@@ -3800,7 +4003,9 @@ function paperStatus(options) {
       stats: stats.metrics,
       statsSample: stats.sample,
       trialStats: trialStats.metrics,
-      trialStatsSample: trialStats.sample
+      trialStatsSample: trialStats.sample,
+      researchStats: researchStats ? researchStats.metrics : null,
+      researchStatsSample: researchStats ? researchStats.sample : null
     } : {}),
     runtime: {
       startedAt: paperRuntime.startedAt,
@@ -3846,6 +4051,12 @@ function paperDiagnostics() {
       maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
       maxDailyLossR: cfg.maxDailyLossR, tp1ClosePct: cfg.tp1ClosePct,
       maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
+      research: {
+        enabled: paperResearchEnabled(), perScan: PAPER_RESEARCH_PER_SCAN,
+        riskPct: PAPER_RESEARCH_RISK_PCT, maxActive: PAPER_RESEARCH_MAX_ACTIVE,
+        warningDrawdownPct: PAPER_RESEARCH_WARNING_DD_PCT,
+        hardDrawdownPct: PAPER_RESEARCH_HARD_DD_PCT
+      },
       monitorGranularity: '1m'
     },
     runtime: {
@@ -3864,7 +4075,8 @@ function paperDiagnostics() {
       trialDirectionCounts: status.trialDirectionCounts,
       dailyLossR: status.dailyLossR, dailyGuard: status.dailyGuard,
       equityPeak: status.equityPeak, drawdownPct: status.drawdownPct,
-      drawdownGuard: status.drawdownGuard, maxDrawdownPct: status.maxDrawdownPct
+      drawdownGuard: status.drawdownGuard, maxDrawdownPct: status.maxDrawdownPct,
+      mode: status.mode, research: status.research
     }
   };
 }
@@ -4137,7 +4349,11 @@ function paperStats(query) {
   let cumulative = 0;
   let peak = 0;
   let maxDrawdownR = 0;
-  const startingEquity = paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY);
+  const researchScope = filters.strategyVersion === PAPER_RESEARCH_STRATEGY_VERSION ||
+    filters.cohortId === String(paperState.researchCohortId || '');
+  const startingEquity = paperNumber(researchScope
+    ? (paperState.researchStartingEquity || paperState.startingEquity || PAPER_STARTING_EQUITY)
+    : (paperState.startingEquity || PAPER_STARTING_EQUITY));
   let realizedEquity = startingEquity;
   let equityPeak = startingEquity;
   let maxDrawdownPnl = 0;
@@ -4348,10 +4564,14 @@ const server = http.createServer(async (req, res) => {
       port: PORT,
       paperBot: paperStarted,
       paperBotEnabled: paperState.enabled,
-      paperStrategyVersion: PAPER_STRATEGY_VERSION,
-      strategyVersion: PAPER_STRATEGY_VERSION,
-      schemaVersion: PAPER_SCHEMA_VERSION,
-      time: new Date().toISOString(),
+       paperStrategyVersion: PAPER_STRATEGY_VERSION,
+       strategyVersion: PAPER_STRATEGY_VERSION,
+       schemaVersion: PAPER_SCHEMA_VERSION,
+       researchCollection: {
+         enabled: paperResearchEnabled(), strategyVersion: PAPER_RESEARCH_STRATEGY_VERSION,
+         hardDrawdownPct: PAPER_RESEARCH_HARD_DD_PCT
+       },
+       time: new Date().toISOString(),
       fallbacks: {enabled: PAPER_FALLBACK_ENABLED, order: ['Bitget', 'Binance Futures', 'OKX Swap']},
       sources: sourceHealthView()
     }));

@@ -26,8 +26,10 @@ if [ -z "$node_bin" ]; then
 fi
 "$node_bin" --check "$tmpdir/server.js"
 grep -Fq "PAPER VPS CHECKING..." "$tmpdir/index.html"
-grep -Fq "build v4.8-p0p2" "$tmpdir/index.html"
+grep -Fq "build v4.9-research" "$tmpdir/index.html"
 grep -Fq "MONITORING_ONLY" "$tmpdir/server.js"
+grep -Fq "RESEARCH_COLLECTION" "$tmpdir/server.js"
+grep -Fq "PAPER_RESEARCH_HARD_DD_PCT = 50" "$tmpdir/server.js"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 if [ -f /home/ubuntu/nexora-proxy/server.js ]; then
