@@ -785,6 +785,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <button class="btn btn-sm btn-green" onclick="saveTradeLog()"><i class="fa-solid fa-check"></i> Save Trade</button>
     </div>
 
+    <div id="tj-tp1-events" style="margin:12px 0;"></div>
+
     <div class="tbl-wrap">
       <table>
         <thead><tr>
@@ -3184,6 +3186,7 @@ function exportJournal() {
 }
 
 function renderEquity() {
+  renderPaperTp1Events();
   var useVpsEquity = G.paperServer && Array.isArray(G.vpsClosed);
   var allTrades = useVpsEquity ? G.vpsClosed : G.trades;
   populateJournalFilters(allTrades);
@@ -5537,12 +5540,18 @@ function applyServerClosedTrades(closedTrades) {
        dataQualityReason: t.dataQualityReason || '',
        signalReasons: Array.isArray(t.signalReasons) ? t.signalReasons : [],
        scoreBreakdown: t.scoreBreakdown || null,
+       events: Array.isArray(t.events) ? t.events : [],
       openedAt: t.openedAt || '',
       closedAt: t.closedAt || '',
       durationMs: t.openedAt && t.closedAt ? Math.max(0, new Date(t.closedAt) - new Date(t.openedAt)) : 0,
        mfePnl: Number(t.mfePnl || 0),
        maePnl: Number(t.maePnl || 0),
        tp1Hit: !!t.tp1Hit, realizedPnlTp1: Number(t.realizedPnlTp1 || 0),
+       tp1: Number(t.tp1 || 0), tp2: Number(t.tp2 || 0), sl: Number(t.sl || 0),
+       slAfterTp1: Number(t.slAfterTp1 || 0),
+       tp1ClosePct: Number(t.tp1ClosePct == null ? 50 : t.tp1ClosePct),
+       tp1RemainingPct: t.tp1RemainingPct == null ? null : Number(t.tp1RemainingPct),
+       remainingSize: t.remainingSize == null ? null : Number(t.remainingSize),
       outcome: t.outcome || 'BE',
       exitReason: t.closeReason || '',
       good: t.outcome === 'WIN' ? 'Paper Bot VPS reached target' : '',
@@ -5552,6 +5561,78 @@ function applyServerClosedTrades(closedTrades) {
       pnl: Number(t.pnl || 0)
     };
   });
+  renderPaperTp1Events();
+}
+
+// TP1 is a partial close, not a second completed trade. Keep it visible in
+// the journal as an event while preserving the closed-trade statistics.
+function renderPaperTp1Events() {
+  var host = document.getElementById('tj-tp1-events');
+  if(!host) return;
+
+  var entries = [];
+  var seen = {};
+  function scopeLabel(t) {
+    if(t && (t.researchCollection === true || t.strategyVersion === 'RESEARCH_COLLECTION')) return {label:'RESEARCH', color:'#a371f7'};
+    if(t && t.strategyVersion === 'PRE_UPGRADE') return {label:'PRE-UPGRADE', color:'#8b949e'};
+    if(t && (t.executionClass === 'LEGACY' || t.legacy === true || t.strategyVersion === 'LEGACY')) return {label:'LEGACY', color:'#8b949e'};
+    return {label:'STRICT', color:'#58a6ff'};
+  }
+  function addTrade(t, finalState) {
+    if(!t || !Array.isArray(t.events)) return;
+    var scope = scopeLabel(t);
+    t.events.forEach(function(e) {
+      if(!e || e.type !== 'TP1_PARTIAL' || !e.at) return;
+      var key = String(t.id || t.sym || '?') + '|' + String(e.at);
+      if(seen[key]) return;
+      seen[key] = true;
+      var closePct = Number(t.tp1ClosePct == null ? 50 : t.tp1ClosePct);
+      var remainingPct = t.tp1RemainingPct == null ? Math.max(0, 100 - closePct) : Number(t.tp1RemainingPct);
+      entries.push({
+        id: String(t.id || '?'), sym: t.sym || '?', dir: t.dir || '--',
+        scope: scope.label, scopeColor: scope.color, at: e.at,
+        price: Number(e.price || t.tp1 || 0), closePct: closePct,
+        remainingPct: remainingPct,
+        remainingSize: t.remainingSize == null ? Number(e.size || 0) : Number(t.remainingSize),
+        state: finalState || (t.status === 'TP1_PARTIAL' ? 'ACTIVE' : t.status || 'CLOSED'),
+        sl: Number(t.slAfterTp1 || t.entryActual || t.entryLimit || 0),
+        outcome: t.outcome || ''
+      });
+    });
+  }
+  (Array.isArray(BOT.activeTrades) ? BOT.activeTrades : []).forEach(function(t){ addTrade(t, t.status === 'TP1_PARTIAL' ? 'ACTIVE' : t.status); });
+  (Array.isArray(G.vpsClosed) ? G.vpsClosed : []).forEach(function(t){ addTrade(t, 'CLOSED'); });
+  entries.sort(function(a,b){ return new Date(b.at).getTime() - new Date(a.at).getTime(); });
+
+  if(!entries.length) {
+    host.innerHTML = '<div style="border:1px solid #21262d;border-radius:8px;padding:10px;color:#8b949e;font-size:10px;">' +
+      '<b style="color:#c9d1d9;">TP1 Events</b> · Belum ada partial close yang tercatat.</div>';
+    return;
+  }
+  var rows = entries.map(function(e) {
+    var at = new Date(e.at);
+    var time = isNaN(at.getTime()) ? sourceEsc(e.at) : at.toLocaleString('id-ID');
+    var stateColor = e.state === 'ACTIVE' ? '#58a6ff' : '#8b949e';
+    var statusText = e.state === 'ACTIVE' ? 'ACTIVE · sisa posisi berjalan' : 'CLOSED' + (e.outcome ? ' · ' + sourceEsc(e.outcome) : '');
+    return '<tr>'
+      + '<td class="tl" style="white-space:nowrap;color:#8b949e;">' + time + '</td>'
+      + '<td class="tl"><b>' + sourceEsc(e.sym) + '</b><br><span style="font-size:9px;color:' + e.scopeColor + ';">' + e.scope + '</span></td>'
+      + '<td class="' + (e.dir === 'LONG' ? 'up' : e.dir === 'SHORT' ? 'dn' : 'nu') + '">' + sourceEsc(e.dir) + '</td>'
+      + '<td>' + fP(e.price) + '</td>'
+      + '<td style="color:#58a6ff;">-' + e.closePct.toFixed(0) + '%</td>'
+      + '<td style="color:#8b949e;">' + e.remainingPct.toFixed(0) + '% · ' + (e.remainingSize ? fP(e.remainingSize) : '--') + '</td>'
+      + '<td style="color:#e3b341;">SL BE ' + (e.sl ? fP(e.sl) : '--') + '</td>'
+      + '<td style="color:' + stateColor + ';white-space:nowrap;">' + statusText + '</td>'
+      + '</tr>';
+  }).join('');
+  host.innerHTML = '<div style="border:1px solid rgba(88,166,255,.25);border-radius:8px;padding:10px 10px 0;">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:11px;">'
+    + '<b style="color:#c9d1d9;"><i class="fa-solid fa-code-branch"></i> TP1 Events</b>'
+    + '<span class="muted">' + entries.length + ' partial close · tidak dihitung sebagai trade baru</span></div>'
+    + '<div class="tbl-wrap" style="max-height:260px;margin-bottom:10px;"><table><thead><tr>'
+    + '<th class="tl">Waktu</th><th class="tl">Symbol / Cohort</th><th>Dir</th><th>TP1</th><th>Closed</th><th>Remaining</th><th>Stop</th><th>Status</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '</div>';
 }
 
 function renderServerPaperScan(status) {
@@ -6797,6 +6878,7 @@ function closeTrade(trade, exitPrice, outcome, reason, closeTime) {
 function updateActiveTradesPanel() {
   var panel = document.getElementById('active-trades-panel');
   if(!panel) return;
+  renderPaperTp1Events();
 
   var isLegacy = function(t){ return t.executionClass === 'LEGACY' || t.legacy === true; };
   var paperStatus = G.paperStatus || {};
