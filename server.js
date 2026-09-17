@@ -1046,22 +1046,34 @@ function paperTimeframeReasons(pair) {
   });
 }
 
+function paperAlertScope(trade) {
+  if (trade && (trade.researchCollection === true ||
+      trade.strategyVersion === PAPER_RESEARCH_STRATEGY_VERSION ||
+      trade.mode === PAPER_RESEARCH_STRATEGY_VERSION ||
+      trade.signalMode === PAPER_RESEARCH_STRATEGY_VERSION)) return 'RESEARCH';
+  if (trade && (trade.strategyVersion === PAPER_STRATEGY_VERSION ||
+      trade.executionModel === 'LIMIT_STRICT' || trade.executionClass === 'STRICT')) return 'STRICT';
+  return 'LEGACY';
+}
+
 function paperScanAlert(cycleKey, placed) {
-  return 'NEXORA PAPER SCAN ' + cycleKey + '\n' +
+  const scopes = [...new Set((placed || []).map(paperAlertScope))];
+  const scope = scopes.length === 1 ? scopes[0] : scopes.length ? 'MIXED' : 'STRICT';
+  return 'NEXORA PAPER SCAN [' + scope + '] ' + cycleKey + '\n' +
     (placed.length ? placed.map(trade =>
-      trade.sym + ' ' + trade.dir + ' PENDING @ ' + trade.entryLimit +
+      '[' + paperAlertScope(trade) + '] ' + trade.sym + ' ' + trade.dir + ' PENDING @ ' + trade.entryLimit +
       ' | SL ' + trade.sl + ' | TP1 ' + trade.tp1
     ).join('\n') : 'Tidak ada setup baru');
 }
 
 function paperFillAlert(trade) {
-  return 'NEXORA PAPER LIMIT FILLED\n' +
+  return 'NEXORA PAPER LIMIT FILLED [' + paperAlertScope(trade) + ']\n' +
     trade.sym + ' ' + trade.dir + ' @ ' + trade.entryActual +
     '\nSL ' + trade.sl + ' | TP1 ' + trade.tp1;
 }
 
 function paperCloseAlert(trade) {
-  return 'NEXORA PAPER ' + (trade.outcome || 'CLOSED') + '\n' +
+  return 'NEXORA PAPER ' + (trade.outcome || 'CLOSED') + ' [' + paperAlertScope(trade) + ']\n' +
     trade.sym + ' ' + trade.dir + ' exit @ ' + trade.exitPrice +
     '\nR: ' + trade.r + ' | PnL: $' + trade.pnl +
     '\n' + (trade.closeReason || '');
@@ -1076,7 +1088,7 @@ function paperCapacityAlert(status) {
 }
 
 function paperPartialAlert(trade) {
-  return 'NEXORA PAPER TP1 PARTIAL\n' +
+  return 'NEXORA PAPER TP1 PARTIAL [' + paperAlertScope(trade) + ']\n' +
     trade.sym + ' ' + trade.dir + ' @ ' + trade.tp1 +
     '\nClosed ' + trade.tp1ClosePct + '% | remaining ' + trade.remainingSize +
     '\nSL moved to breakeven';
