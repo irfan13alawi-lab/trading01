@@ -122,6 +122,10 @@ const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || process.env.
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
+const TELEGRAM_COMMANDS_ENABLED = TELEGRAM_ALERTS_ENABLED &&
+  String(process.env.TELEGRAM_COMMANDS_ENABLED || 'true').toLowerCase() !== 'false';
+const TELEGRAM_POLL_INTERVAL_MS = 8000;
+const TELEGRAM_COMMAND_MAX_CHARS = 3500;
 const PAPER_FALLBACK_ENABLED = String(process.env.PAPER_FALLBACK_ENABLED || 'true').toLowerCase() !== 'false';
 const PAPER_WATCHLIST_ALERTS_ENABLED = String(process.env.PAPER_WATCHLIST_ALERTS || '').toLowerCase() === 'true';
 // This service is paper-only, but the operational endpoints can still pause
@@ -172,7 +176,15 @@ const telegramState = {
   lastAttemptAt: null,
   lastSuccessAt: null,
   lastErrorAt: null,
-  lastError: null
+  lastError: null,
+  commandsReceived: 0,
+  commandsReplied: 0,
+  lastCommandAt: null,
+  lastCommand: null,
+  lastPollAt: null,
+  lastPollSuccessAt: null,
+  lastPollErrorAt: null,
+  lastPollError: null
 };
 const alertCooldowns = new Map();
 
@@ -694,6 +706,183 @@ async function sendConfiguredAlert(text) {
   return results.some(Boolean);
 }
 
+function telegramTrim(text) {
+  const value = String(text || '');
+  return value.length <= TELEGRAM_COMMAND_MAX_CHARS
+    ? value : value.slice(0, TELEGRAM_COMMAND_MAX_CHARS - 24) + '\n…pesan dipotong';
+}
+
+function telegramFormatTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return date.toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta', hour12: false,
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  }) + ' WIB';
+}
+
+function telegramFormatNumber(value, digits) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  if (Math.abs(number) >= 1000) return number.toFixed(2);
+  if (Math.abs(number) >= 1) return number.toFixed(digits == null ? 4 : digits)
+    .replace(/0+$/, '').replace(/\.$/, '');
+  return number.toPrecision(8).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function telegramCommandHelp() {
+  return 'NEXORA PAPER BOT\n' +
+    '/status — status bot, mode, guard, dan scan terakhir\n' +
+    '/positions — posisi PENDING/OPEN/TP1\n' +
+    '/help — bantuan perintah';
+}
+
+function telegramCommandStatus() {
+  const status = paperStatus({details: false, stats: false});
+  const scan = status.lastScanSummary || {};
+  const research = status.research || {};
+  const daily = status.dailySummary || {};
+  const summary = status.summary || {};
+  return telegramTrim(
+    'NEXORA PAPER STATUS\n' +
+    'Bot: ' + (status.running ? 'ON' : 'OFFLINE') +
+      ' | Scan: ' + status.interval + '\n' +
+    'Mode: ' + status.mode + '\n' +
+    'Entry strict: ' + status.entryState + '\n' +
+    'Guard: ' + (status.guardMessage || '-') + '\n' +
+    'DD strict: ' + Number(status.drawdownPct || 0).toFixed(2) + '% / ' +
+      Number(status.maxDrawdownPct || 0).toFixed(2) + '%\n' +
+    'Research: ' + (research.entryState || '-') +
+      ' | DD ' + Number(research.drawdownPct || 0).toFixed(2) + '% / ' +
+      Number(research.hardDrawdownPct || 0).toFixed(2) + '%\n' +
+    'Equity strict: $' + Number(status.equity || 0).toFixed(2) +
+      ' | Research: $' + Number(research.equity || 0).toFixed(2) + '\n' +
+    'Aktif: ' + Number(summary.open || 0) + ' open, ' +
+      Number(summary.partial || 0) + ' partial, ' + Number(summary.pending || 0) + ' pending\n' +
+    'Scan terakhir: ' + Number(scan.placed || 0) + ' dibuat, ' +
+      Number(scan.rejected || 0) + ' ditolak\n' +
+    'Next scan: ' + telegramFormatTime(status.nextScanAt) + '\n' +
+    'Hari ini: ' + Number(daily.trades || 0) + ' trade | ' +
+      Number(daily.wins || 0) + '/' + Number(daily.losses || 0) + ' W/L | ' +
+      Number(daily.netR || 0).toFixed(2) + 'R'
+  );
+}
+
+function telegramCommandPositions() {
+  const status = paperStatus({details: true, stats: false});
+  const trades = Array.isArray(status.activeTrades) ? status.activeTrades : [];
+  if (!trades.length) return 'NEXORA ACTIVE POSITIONS\nTidak ada posisi aktif atau pending.';
+  const lines = ['NEXORA ACTIVE POSITIONS (' + trades.length + ')'];
+  trades.slice(0, 30).forEach((trade, index) => {
+    const bucket = trade.researchCollection ? 'RESEARCH' : 'STRICT';
+    lines.push(
+      '', (index + 1) + '. ' + trade.id + ' · ' + bucket,
+      trade.sym + ' ' + trade.dir + ' · ' + trade.status,
+      'Entry: ' + telegramFormatNumber(trade.entryActual || trade.entryLimit) +
+        ' | Now: ' + telegramFormatNumber(trade.currentPrice),
+      'SL: ' + telegramFormatNumber(trade.sl) +
+        ' | TP1: ' + telegramFormatNumber(trade.tp1) +
+        ' | TP2: ' + telegramFormatNumber(trade.tp2),
+      'PnL: $' + Number(trade.unrealPnl || 0).toFixed(2) +
+        ' | RR: ' + (trade.rr == null ? '-' : trade.rr)
+    );
+  });
+  if (trades.length > 30) lines.push('', '…dan ' + (trades.length - 30) + ' posisi lainnya');
+  return telegramTrim(lines.join('\n'));
+}
+
+function telegramCommandFromText(text) {
+  const match = String(text || '').trim().match(/^\/([a-z0-9_]+)(?:@[^\s]+)?(?:\s|$)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+async function telegramApiRequest(pathname, params) {
+  if (!TELEGRAM_ALERTS_ENABLED) return [];
+  const query = new URLSearchParams(params || {}).toString();
+  const target = 'https://api.telegram.org/bot' + TELEGRAM_BOT_TOKEN + pathname +
+    (query ? '?' + query : '');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetchFn(target, {
+      method: 'GET', headers: {'User-Agent': 'NexoraPaperBot/1.0'}, signal: controller.signal
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error('Telegram HTTP ' + response.status);
+    let payload;
+    try { payload = JSON.parse(body); } catch (_) { payload = null; }
+    if (!payload || payload.ok !== true) {
+      throw new Error(payload && payload.description || 'Telegram response invalid');
+    }
+    return payload.result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function handleTelegramCommand(message, command) {
+  const replies = {
+    start: telegramCommandHelp,
+    help: telegramCommandHelp,
+    status: telegramCommandStatus,
+    positions: telegramCommandPositions
+  };
+  const createReply = replies[command];
+  if (!createReply) return false;
+  const sent = await sendTelegramMessage(createReply());
+  if (sent) telegramState.commandsReplied += 1;
+  return sent;
+}
+
+let telegramPollBusy = false;
+
+async function pollTelegramCommands() {
+  if (!TELEGRAM_COMMANDS_ENABLED || telegramPollBusy) return;
+  telegramPollBusy = true;
+  telegramState.lastPollAt = new Date().toISOString();
+  let changed = false;
+  try {
+    const offset = Number.isFinite(Number(paperState.telegramUpdateOffset))
+      ? Math.max(0, Math.floor(Number(paperState.telegramUpdateOffset))) : 0;
+    const updates = await telegramApiRequest('/getUpdates', {
+      offset: String(offset), limit: '100', timeout: '0'
+    });
+    telegramState.lastPollSuccessAt = new Date().toISOString();
+    telegramState.lastPollError = null;
+    for (const update of Array.isArray(updates) ? updates : []) {
+      const updateId = Number(update && update.update_id);
+      if (!Number.isFinite(updateId)) continue;
+      paperState.telegramUpdateOffset = Math.max(
+        Number(paperState.telegramUpdateOffset || 0), updateId + 1
+      );
+      changed = true;
+      const message = update.message || update.edited_message;
+      if (!message || !message.chat || String(message.chat.id) !== TELEGRAM_CHAT_ID) continue;
+      const command = telegramCommandFromText(message.text);
+      if (!command) continue;
+      telegramState.commandsReceived += 1;
+      telegramState.lastCommandAt = new Date().toISOString();
+      telegramState.lastCommand = command;
+      await handleTelegramCommand(message, command);
+    }
+    if (changed) savePaperState();
+  } catch (error) {
+    telegramState.lastPollErrorAt = new Date().toISOString();
+    telegramState.lastPollError = error.message;
+    console.error('[telegram] command polling failed:', error.message);
+  } finally {
+    telegramPollBusy = false;
+  }
+}
+
+function startTelegramCommandBot() {
+  if (!TELEGRAM_COMMANDS_ENABLED) return;
+  console.log('[telegram] command listener ON: /start /status /positions /help');
+  setTimeout(() => void pollTelegramCommands(), 2500);
+  setInterval(() => void pollTelegramCommands(), TELEGRAM_POLL_INTERVAL_MS);
+}
+
 function sendRateLimitedAlert(key, text, cooldownMs) {
   const now = Date.now();
   const last = alertCooldowns.get(key) || 0;
@@ -1050,6 +1239,7 @@ function defaultPaperState() {
     lastBlockReason: null,
     lastSavedAt: null,
     nextId: 0,
+    telegramUpdateOffset: 0,
     oiSnapshot: {},
     oiHistory: {},
     activeTrades: [],
@@ -1133,6 +1323,9 @@ function loadPaperState() {
       watchlistAlerts: Array.isArray(parsed.watchlistAlerts) ? parsed.watchlistAlerts
         .map(paperNormaliseWatchlistAlert).filter(Boolean).slice(0, 5) : [],
       alertState: {...defaultPaperState().alertState, ...(parsed.alertState || {})},
+      telegramUpdateOffset: Number.isFinite(Number(parsed.telegramUpdateOffset)) &&
+        Number(parsed.telegramUpdateOffset) >= 0
+        ? Math.floor(Number(parsed.telegramUpdateOffset)) : 0,
       schemaVersion: PAPER_SCHEMA_VERSION
     };
     const startingEquity = Number(state.startingEquity);
@@ -4533,6 +4726,7 @@ function startPaperBot() {
   paperStarted = true;
   paperRuntime.startedAt = new Date().toISOString();
   console.log('[paper] VPS Paper Bot ON: scan every 15M, top 3, pending expiry 120m');
+  startTelegramCommandBot();
   void sendConfiguredAlert('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
   if (PAPER_DAILY_SUMMARY_SCHEDULER) {
     console.log('[paper] Daily alert scheduler opt-in:', TELEGRAM_ALERTS_ENABLED || Boolean(DISCORD_WEBHOOK_URL) ? 'configured' : 'no alert channel configured');
@@ -4780,6 +4974,16 @@ const server = http.createServer(async (req, res) => {
       lastAttemptAt: telegramState.lastAttemptAt,
       lastSuccessAt: telegramState.lastSuccessAt,
       lastError: telegramState.lastError,
+      commands: {
+        enabled: TELEGRAM_COMMANDS_ENABLED,
+        received: telegramState.commandsReceived,
+        replied: telegramState.commandsReplied,
+        lastCommandAt: telegramState.lastCommandAt,
+        lastCommand: telegramState.lastCommand,
+        lastPollAt: telegramState.lastPollAt,
+        lastPollSuccessAt: telegramState.lastPollSuccessAt,
+        lastPollError: telegramState.lastPollError
+      },
       discord: {
         enabled: Boolean(DISCORD_WEBHOOK_URL),
         sent: discordState.sent,
