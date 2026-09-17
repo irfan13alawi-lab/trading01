@@ -359,8 +359,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- Active trades / bot panel -->
 <div id="active-trades-panel">
-  <div class="hstat"><span class="l">Bot Trades (STRICT)</span><span class="v" id="bot-trade-cnt">0</span></div>
-  <div class="hstat"><span class="l">Legacy</span><span class="v" id="bot-legacy-count">0</span></div>
+  <div class="hstat"><span class="l">Strict Trades</span><span class="v" id="bot-trade-cnt">0</span></div>
+  <div class="hstat"><span class="l">Research Active</span><span class="v" id="bot-research-count">0</span></div>
+  <div class="hstat"><span class="l">Legacy Active</span><span class="v" id="bot-legacy-count">0</span></div>
+  <div class="hstat"><span class="l">All Active</span><span class="v" id="bot-all-active-count">0</span></div>
+  <div class="hstat"><span class="l">Strict Win Rate</span><span class="v" id="bot-winrate">--</span></div>
   <div class="hstat"><span class="l">Total uPnL (all paper)</span><span class="v" id="bot-upnl">$0</span></div>
   <div class="hstat"><span class="l">Daily PnL (UTC)</span><span class="v" id="bot-daily-pnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
@@ -383,7 +386,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 <!-- Nav -->
 <div id="nav">
   <div class="nt on" id="nt-mkt" onclick="sp('p-mkt', this)"><i class="fa-solid fa-chart-line"></i> Market</div>
-  <div class="nt" id="nt-scan" onclick="sp('p-scan', this)"><i class="fa-solid fa-radar"></i> Scanner V4.4 <span class="nb" id="nb">0</span></div>
+  <div class="nt" id="nt-scan" onclick="sp('p-scan', this)"><i class="fa-solid fa-radar"></i> Scanner V4.9 <span class="nb" id="nb">0</span></div>
   <div class="nt" id="nt-pump" onclick="sp('p-pump', this)"><i class="fa-solid fa-fire"></i> PumpRadar</div>
   <div class="nt" id="nt-news" onclick="sp('p-news', this)"><i class="fa-solid fa-newspaper"></i> News <span class="nb" id="news-count">0</span></div>
   <div class="nt" id="nt-wl" onclick="sp('p-wl', this)"><i class="fa-solid fa-star"></i> Watchlist</div>
@@ -524,7 +527,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
   <div class="card">
     <div class="card-h">
-      <div class="card-t"><i class="fa-solid fa-radar"></i> Scanner V4.4
+      <div class="card-t"><i class="fa-solid fa-radar"></i> Scanner V4.9
         <span class="muted">Regime: <b id="scan-reg">--</b></span>
         <span class="muted" id="scan-ts"></span>
       </div>
@@ -1046,7 +1049,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="g6">
     <div class="kpi"><div class="l">Bot status</div><div class="v" id="ops-status">--</div><div class="s" id="ops-status-sub">VPS</div></div>
     <div class="kpi"><div class="l">Equity</div><div class="v" id="ops-equity">--</div><div class="s">strict cohort</div></div>
-    <div class="kpi"><div class="l">Open / Pending</div><div class="v" id="ops-open">--</div><div class="s">managed by VPS</div></div>
+    <div class="kpi"><div class="l">All Open / Pending</div><div class="v" id="ops-open">--</div><div class="s">strict + research + legacy</div></div>
     <div class="kpi"><div class="l">Daily R</div><div class="v" id="ops-daily">--</div><div class="s" id="ops-daily-sub">guard</div></div>
     <div class="kpi"><div class="l">Last scan</div><div class="v" style="font-size:12px;" id="ops-last-scan">--</div><div class="s" id="ops-next-scan">next --</div></div>
     <div class="kpi"><div class="l">Data errors</div><div class="v" id="ops-errors">--</div><div class="s">diagnostics</div></div>
@@ -1309,10 +1312,13 @@ function setMarketSelection() {
 }
 
 function fP(v) {
-  if (v == null) return '--';
-  if (v >= 1000) return '$' + v.toLocaleString('en', {maximumFractionDigits:1});
-  if (v >= 1) return '$' + v.toFixed(3);
-  return '$' + v.toFixed(6);
+  var n = Number(v);
+  if (!Number.isFinite(n)) return '--';
+  if (n === 0) return '$0';
+  if (n >= 1000) return '$' + n.toLocaleString('en', {maximumFractionDigits:1});
+  if (n >= 1) return '$' + n.toFixed(3);
+  var decimals = n >= 0.01 ? 4 : n >= 0.001 ? 5 : Math.min(12, Math.max(6, Math.ceil(-Math.log10(Math.abs(n))) + 3));
+  return '$' + n.toFixed(decimals).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
 }
 function fC(v) { return v == null ? '--' : (v >= 0 ? '+' : '') + (+v).toFixed(2) + '%'; }
 function fV(v) {
@@ -1725,6 +1731,25 @@ function buildPairsFromBinance(rows, fg, news) {
   });
 }
 
+function loadBtcDominance() {
+  var el = document.getElementById('h-dom');
+  if (!el) return;
+  var url = PROXY_BASE ? PROXY_BASE + '/coingecko/api/v3/global' : CG + '/global';
+  el.title = PROXY_BASE ? 'BTC dominance dari CoinGecko melalui VPS' : 'BTC dominance dari CoinGecko';
+  apfCached(url, 300000).then(function(g) {
+    var dom = g && g.data && g.data.market_cap_percentage;
+    var btcDom = dom && Number(dom.btc);
+    if (!Number.isFinite(btcDom)) throw new Error('BTC dominance tidak tersedia');
+    el.textContent = btcDom.toFixed(1) + '%';
+    el.style.color = btcDom >= 55 ? '#58a6ff' : '#e3b341';
+    el.title += ' · diperbarui ' + new Date().toLocaleTimeString('id-ID');
+  }).catch(function() {
+    el.textContent = '--';
+    el.style.color = '#8b949e';
+    el.title = 'BTC dominance belum tersedia dari CoinGecko';
+  });
+}
+
 // Shared post-processing after pairs are built
 function continueRefresh(pairs, fg, news) {
     try {
@@ -1752,18 +1777,9 @@ function continueRefresh(pairs, fg, news) {
     if (at.length) { nb.textContent = at.length; nb.style.display = 'inline'; } else { nb.style.display = 'none'; }
 
     // KPIs
-    // CoinGecko global is optional. Skip it on the VPS because the public
-    // endpoint is rate-limited there and would only create console noise.
-    if (!PROXY_BASE) {
-      setTimeout(function(){
-        apfCached(CG + '/global', 300000).then(function(g) {
-          if (g && g.data) {
-            var dom = g.data.market_cap_percentage;
-            if (dom && dom.btc) document.getElementById('h-dom').textContent = dom.btc.toFixed(1) + '%';
-          }
-        }).catch(function(){});
-      }, 5000);
-    }
+    // Use the VPS proxy when the dashboard is served from the VPS. This
+    // keeps BTC dominance same-origin and avoids a browser-side CORS/rate-limit failure.
+    setTimeout(loadBtcDominance, 250);
 
     ['BTC','ETH','SOL'].forEach(function(sym, i) {
       var p = fp(sym);
@@ -2446,20 +2462,32 @@ function renderFund(pairs) {
 }
 
 function renderOI(pairs) {
+  var oiChart = document.getElementById('c-oi');
   if (!pairs.some(hasDerivatives)) {
-    var oiChart = document.getElementById('c-oi');
     if (oiChart) oiChart.innerHTML = '<div class="ld" style="padding:60px 10px;">Open Interest hanya tersedia pada market Futures</div>';
     return;
   }
-  var top = pairs.slice().sort(function(a,b){return Math.abs(b.oi)-Math.abs(a.oi);}).slice(0,15);
+  // The first derivatives snapshot is a baseline, so OI delta is intentionally
+  // null until the next snapshot. The chart must still show the real OI USD.
+  var available = pairs.filter(function(p){ return hasDerivatives(p) && Number(p.oiUSD) > 0; });
+  if (!available.length) {
+    if (oiChart) oiChart.innerHTML = '<div class="ld" style="padding:60px 10px;">OI Futures belum tersedia — menunggu snapshot Bitget.</div>';
+    return;
+  }
+  var top = available.slice().sort(function(a,b){return Number(b.oiUSD)-Number(a.oiUSD);}).slice(0,15);
+  var categories = top.map(function(p){return p.s;});
   hcChart('c-oi', {
     chart:{type:'bar',backgroundColor:'transparent',margin:[10,10,20,55],style:{fontFamily:'inherit'}},title:{text:null},
-    xAxis:{categories:top.map(function(p){return p.s;}),labels:{style:{color:'#8b949e',fontSize:'9px'}},lineWidth:0,tickWidth:0},
-    yAxis:{title:null,gridLineColor:'#21262d',labels:{style:{color:'#484f58',fontSize:'9px'},format:'{value}%'}},
+    xAxis:{categories:categories,labels:{style:{color:'#8b949e',fontSize:'9px'}},lineWidth:0,tickWidth:0},
+    yAxis:{title:null,gridLineColor:'#21262d',labels:{style:{color:'#484f58',fontSize:'9px'},formatter:function(){return fV(this.value);}}},
     legend:{enabled:false},
-    tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){return '<b>'+this.x+'</b> OI: '+(this.y>=0?'+':'')+this.y.toFixed(2)+'%';}},
+    tooltip:{backgroundColor:'#0d1117',borderColor:'#21262d',style:{color:'#c9d1d9',fontSize:'11px'},formatter:function(){
+      var idx = categories.indexOf(this.x), p = idx >= 0 ? top[idx] : null;
+      var delta = p && p.oi != null ? '<br>Delta: ' + (p.oi >= 0 ? '+' : '') + Number(p.oi).toFixed(2) + '%' : '<br>Delta: menunggu snapshot berikutnya';
+      return '<b>'+this.x+'</b><br>OI USD: '+fV(this.y)+delta;
+    }},
     plotOptions:{bar:{colorByPoint:true,borderWidth:0,borderRadius:2}},
-    series:[{name:'OI',data:top.map(function(p){return {y:p.oi,color:p.oi>=0?'#3fb950':'#f85149'};})}],
+    series:[{name:'OI USD',data:top.map(function(p){return {y:Number(p.oiUSD),color:p.oi == null ? '#388bfd' : p.oi >= 0 ? '#3fb950' : '#f85149'};})}],
     credits:{enabled:false}
   });
 }
@@ -5553,7 +5581,9 @@ function renderServerPaperScan(status) {
       return '<span style="color:' + tfColor + ';border:1px solid #21262d;border-radius:3px;padding:1px 3px;margin-right:2px;">' + tf + ' ' + sourceEsc(tfDir) + '</span>';
     }).join('');
     var mtf = (c.mtfAlignment || mtfSummary.alignmentCount || 0) + '/4 TF';
-    var conf = c.confluencePct != null ? c.confluencePct + '%' : '--';
+    var confValue = c.confluencePct == null ? NaN : Number(c.confluencePct);
+    var conf = Number.isFinite(confValue) ? confValue.toFixed(0) + '%' : '--';
+    var confColor = !Number.isFinite(confValue) ? '#8b949e' : confValue >= 85 ? '#3fb950' : confValue >= 75 ? '#e3b341' : '#f85149';
     var reasonsArray = Array.isArray(c.signalReasons) && c.signalReasons.length ? c.signalReasons : c.evidence;
     var reasons = Array.isArray(reasonsArray) ? reasonsArray.slice(0, 4).join(' · ') : '';
     var ind = c.indicators || (c.mtf && c.mtf.M15 && c.mtf.M15.indicators) || {};
@@ -5571,7 +5601,7 @@ function renderServerPaperScan(status) {
     if(isWatchPriority) stateLine += ' <span style="color:#58a6ff;">· WATCHLIST PRIORITY</span>';
     return '<div style="display:inline-block;vertical-align:top;min-width:230px;max-width:32%;margin:4px 6px 0 0;padding:7px 8px;border:1px solid ' + (isMonitoring ? 'rgba(227,179,65,.45)' : isPlaced ? 'rgba(63,185,80,.35)' : '#21262d') + ';border-radius:5px;background:rgba(255,255,255,.015);" title="' + sourceEsc(reasons) + '">'
       + '<div><b>' + sourceEsc(c.sym || '?') + '</b> <span style="color:' + dirColor + ';">' + sourceEsc(dir) + '</span>'
-      + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · ' + sourceEsc(conf) + '</span> · ' + stateLine + '</div>'
+      + ' <span style="color:#8b949e;">' + sourceEsc(mtf) + ' · <b style="color:' + confColor + ';">' + sourceEsc(conf) + '</b></span> · ' + stateLine + '</div>'
       + '<div style="font-size:9px;margin-top:4px;">' + tfLine + '</div>'
       + '<div style="font-size:9px;color:#8b949e;margin-top:3px;">' + sourceEsc(marketLine) + ' · Quality <span style="color:' + qualityColor + ';">' + sourceEsc(quality) + '</span>' + (isMonitoring ? ' · <span style="color:#e3b341;">recorded, no order</span>' : '') + '</div>'
       + levels + scoreLine + indicatorLine
@@ -5705,7 +5735,7 @@ function applyServerPaperStatus(status, announce) {
       : 'Paper Bot VPS tidak berjalan — browser fallback tidak digunakan';
   }
   if(lbl) {
-     lbl.textContent = researchActive ? 'PAPER VPS ON · RESEARCH COLLECTION' : entryActive ? 'PAPER VPS ON · ENTRY ACTIVE' : paperOperational && status.monitoringOnly ? 'PAPER VPS ON · MONITORING ONLY' : paperOperational && entryPaused ? 'PAPER VPS ON · ENTRY PAUSED' : paperPaused ? 'PAPER VPS PAUSED' : paperKilled ? 'PAPER VPS KILLED' : 'PAPER VPS STOPPED';
+     lbl.textContent = researchActive ? 'PAPER VPS ON · RESEARCH ACTIVE' : entryActive ? 'PAPER VPS ON · ENTRY ACTIVE' : paperOperational && status.monitoringOnly ? 'PAPER VPS ON · MONITORING ONLY' : paperOperational && entryPaused ? 'PAPER VPS ON · ENTRY PAUSED' : paperPaused ? 'PAPER VPS PAUSED' : paperKilled ? 'PAPER VPS KILLED' : 'PAPER VPS STOPPED';
      lbl.style.color = researchActive || entryActive ? '#3fb950' : paperOperational ? '#e3b341' : paperPaused ? '#e3b341' : '#f85149';
   }
   if(panel) panel.style.display = 'flex';
@@ -5755,12 +5785,23 @@ function applyServerPaperStatus(status, announce) {
     var researchHard = Number(research.hardDrawdownPct || 50);
     var researchText = research.enabled ? ' · Research ' + researchCount + '/' + Number(research.maxActive || 80)
       + ' · RDD ' + researchDd.toFixed(2) + '/' + researchHard.toFixed(0) + '%' : '';
-    var displayState = researchActive ? 'RESEARCH ACTIVE' : stateLabel;
+    var displayState = researchActive ? 'RESEARCH ACTIVE · strict entry paused' : stateLabel;
     guard.textContent = (displayState ? displayState + ' · ' : 'Guard: ') + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
       + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1)
       + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%' + researchText;
     guard.style.color = !serverRunning || paperKilled || (status.drawdownGuard && !researchActive) || research.hardStop ? '#f85149' : (status.blockReason && !researchActive ? '#e3b341' : '#3fb950');
     guard.title = status.guardMessage || (status.lastError ? 'Last error: ' + status.lastError : '');
+  }
+  var wrEl = document.getElementById('bot-winrate');
+  if(wrEl) {
+    var strictMetrics = status.trialStats || {};
+    var strictSample = status.trialStatsSample || {};
+    var strictClosed = Number(strictSample.closed != null ? strictSample.closed : strictMetrics.closed || 0);
+    var strictWinRate = Number(strictMetrics.winRate);
+    var warnWinRate = strictClosed >= 10 && Number.isFinite(strictWinRate) && strictWinRate < 40;
+    wrEl.textContent = strictClosed > 0 && Number.isFinite(strictWinRate) ? strictWinRate.toFixed(1) + '%' : '--';
+    wrEl.style.color = warnWinRate ? '#f85149' : strictWinRate >= 50 ? '#3fb950' : strictClosed ? '#e3b341' : '#8b949e';
+    wrEl.title = strictClosed ? 'Strict cohort: ' + Number(strictMetrics.wins || 0) + ' win / ' + Number(strictMetrics.losses || 0) + ' loss · closed ' + strictClosed + (warnWinRate ? ' · WARNING: di bawah 40%' : '') : 'Belum ada cukup trade closed untuk menilai win rate';
   }
   if(status.equity != null) {
     var equity = Number(status.equity);
@@ -6758,7 +6799,14 @@ function updateActiveTradesPanel() {
   if(!panel) return;
 
   var isLegacy = function(t){ return t.executionClass === 'LEGACY' || t.legacy === true; };
+  var paperStatus = G.paperStatus || {};
+  var isResearch = function(t){ return t.researchCollection === true || t.strategyVersion === 'RESEARCH_COLLECTION'; };
+  var isStrictCohort = function(t){ return !isLegacy(t) && !isResearch(t) &&
+    String(t.strategyVersion || '') === String(paperStatus.strategyVersion || 'MTF_ATR_V2') &&
+    String(t.cohortId || '') === String(paperStatus.cohortId || ''); };
   var botTrades = BOT.activeTrades.filter(function(t){ return !isLegacy(t); });
+  var strictTrades = BOT.activeTrades.filter(isStrictCohort);
+  var researchTrades = BOT.activeTrades.filter(isResearch);
   var legacyTrades = BOT.activeTrades.filter(isLegacy);
   var open   = botTrades.filter(function(t){return t.status==='OPEN';});
   var partial= botTrades.filter(function(t){return t.status==='TP1_PARTIAL';});
@@ -6767,9 +6815,35 @@ function updateActiveTradesPanel() {
 
   // Update header counts
   var cnt = document.getElementById('bot-trade-cnt');
-  if(cnt) cnt.textContent = open.length + ' open / ' + partial.length + ' partial / ' + pending.length + ' pending';
+  var strictOpen = strictTrades.filter(function(t){return t.status==='OPEN';});
+  var strictPartial = strictTrades.filter(function(t){return t.status==='TP1_PARTIAL';});
+  var strictPending = strictTrades.filter(function(t){return t.status==='PENDING';});
+  if(cnt) cnt.textContent = strictOpen.length + ' open / ' + strictPartial.length + ' partial / ' + strictPending.length + ' pending';
+  var researchCnt = document.getElementById('bot-research-count');
+  if(researchCnt) {
+    var serverResearchCount = paperStatus.researchActiveCount;
+    researchCnt.textContent = serverResearchCount != null ? Number(serverResearchCount) : researchTrades.length;
+    researchCnt.title = 'RESEARCH_COLLECTION — data collection terpisah dari strict cohort';
+  }
   var legacyCnt = document.getElementById('bot-legacy-count');
-  if(legacyCnt) legacyCnt.textContent = legacyTrades.filter(function(t){return t.status==='OPEN'||t.status==='PENDING';}).length;
+  if(legacyCnt) legacyCnt.textContent = legacyTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL'||t.status==='PENDING';}).length;
+  var allActiveCnt = document.getElementById('bot-all-active-count');
+  if(allActiveCnt) {
+    var allActiveTrades = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL'||t.status==='PENDING';});
+    allActiveCnt.textContent = allActiveTrades.length;
+    allActiveCnt.title = 'Semua posisi aktif: strict + research + pre-upgrade + legacy';
+  }
+  var winRateEl = document.getElementById('bot-winrate');
+  if(winRateEl) {
+    var trialMetrics = paperStatus.trialStats || {};
+    var trialSample = paperStatus.trialStatsSample || {};
+    var closedCount = Number(trialSample.closed != null ? trialSample.closed : trialMetrics.closed || 0);
+    var winRate = Number(trialMetrics.winRate);
+    var warning = closedCount >= 10 && Number.isFinite(winRate) && winRate < 40;
+    winRateEl.textContent = closedCount && Number.isFinite(winRate) ? winRate.toFixed(1) + '%' : '--';
+    winRateEl.style.color = warning ? '#f85149' : winRate >= 50 ? '#3fb950' : closedCount ? '#e3b341' : '#8b949e';
+    winRateEl.title = closedCount ? 'Strict cohort closed ' + closedCount + ' · ' + (warning ? 'WARNING di bawah 40%' : 'monitoring') : 'Belum ada trade strict yang closed';
+  }
 
   // Unrealized PnL
   var allUnrealTrades = BOT.activeTrades.filter(function(t){return t.status==='OPEN'||t.status==='TP1_PARTIAL';});
@@ -6801,8 +6875,8 @@ function updateActiveTradesPanel() {
 
   listEl.innerHTML = allActive.map(function(t) {
     var price = t.currentPrice || t.entryLimit;
-    var priceStr = price >= 1000 ? '$'+Math.round(price).toLocaleString('en') : '$'+price.toFixed(price>=1?3:5);
-    var entryStr = t.entryLimit >= 1000 ? '$'+Math.round(t.entryLimit).toLocaleString('en') : '$'+t.entryLimit.toFixed(t.entryLimit>=1?3:5);
+    var priceStr = fP(price);
+    var entryStr = fP(t.entryLimit);
     var statusCol = t.status==='OPEN'?'#3fb950':t.status==='TP1_PARTIAL'?'#58a6ff':t.status==='PENDING'?'#e3b341':'#484f58';
     var unreal = t.unrealPnl || 0;
     var unrealStr = (t.status==='OPEN' || t.status==='TP1_PARTIAL') ? ' | PnL: <span class="'+(unreal>0?'pnl-positive':unreal<0?'pnl-negative':'pnl-neutral')+'" data-pnl-value="'+unreal+'">'+(unreal>=0?'+':'')+'$'+unreal.toFixed(2)+'</span>' : '';
@@ -6907,8 +6981,8 @@ function renderDrawdownBanner(status) {
 
 function renderSourceHealth(sources) {
   var names = [
-    ['bitget', 'Bitget'], ['bingx', 'BingX'], ['gate', 'Gate.io'],
-    ['coingecko', 'CoinGecko'], ['binance', 'Binance Futures'], ['okx', 'OKX Swap'], ['altme', 'Fear & Greed'], ['coinpaprika', 'CoinPaprika'], ['cryptocompare', 'Crypto News'], ['macro', 'Macro calendar']
+    ['bitget', 'Bitget', 'PAPER PRIMARY'], ['bingx', 'BingX', 'derivatives cross-check'], ['gate', 'Gate.io', 'derivatives cross-check'],
+    ['coingecko', 'CoinGecko', 'BTC dominance / spot'], ['binance', 'Binance Futures', 'PAPER fallback / selected market'], ['okx', 'OKX Swap', 'PAPER fallback'], ['altme', 'Fear & Greed', 'market context'], ['coinpaprika', 'CoinPaprika', 'market context'], ['cryptocompare', 'Crypto News', 'optional news'], ['macro', 'Macro calendar', 'optional events']
   ];
   var live = 0, stale = 0, errors = 0;
   var html = names.map(function(pair) {
@@ -6921,19 +6995,22 @@ function renderSourceHealth(sources) {
     if(display === 'LIVE') live++;
     if(display === 'DELAYED') stale++;
     if(display === 'ERROR') errors++;
+    var ageText = lastOk ? ' · ' + (age < 60 ? Math.round(age) + 's' : Math.floor(age / 60) + 'm') + ' old' : '';
     var detail = display === 'LIVE' || display === 'DELAYED'
-      ? ((item.lastLatencyMs != null ? item.lastLatencyMs + ' ms' : 'reachable') + (lastOk ? ' · ' + lastOk.toLocaleTimeString('id-ID') : ''))
+      ? ((item.lastLatencyMs != null ? item.lastLatencyMs + ' ms' : 'reachable') + (lastOk ? ' · ' + lastOk.toLocaleTimeString('id-ID') : '') + ageText)
       : (item.lastError || 'Belum dipakai');
     return '<div class="kpi" title="' + sourceEsc(item.lastPath || '') + '">'
       + '<div class="l">' + pair[1] + '</div>'
       + '<div class="v" style="font-size:14px;color:' + color + ';">' + display + '</div>'
-      + '<div class="s">' + sourceEsc(detail) + '</div></div>';
+      + '<div class="s">' + sourceEsc(pair[2]) + ' · ' + sourceEsc(detail) + '</div></div>';
   }).join('');
   var grid = document.getElementById('source-health-grid');
   if(grid) grid.innerHTML = html;
   var summary = document.getElementById('source-health-summary');
   if(summary) {
-    summary.textContent = live + '/' + names.length + ' LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' error' : '');
+    var primary = sources && sources.bitget ? sources.bitget : {};
+    var primaryState = primary.displayStatus || primary.status || 'UNKNOWN';
+    summary.textContent = 'Paper primary: ' + primaryState + ' · ' + live + '/' + names.length + ' feeds LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' error' : '');
     summary.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
   }
 }
