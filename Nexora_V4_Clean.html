@@ -6104,7 +6104,7 @@ function refreshOpsPage() {
     var opsLast = document.getElementById('ops-last-scan');
     var opsNext = document.getElementById('ops-next-scan');
     var opsErrors = document.getElementById('ops-errors');
-    if(opsStatus) { opsStatus.innerHTML = '<span class="status-chip ' + col + '">' + sourceEsc(label) + '</span>'; document.getElementById('ops-status-sub').textContent = 'service VPS · ' + sourceEsc(status.strategyVersion || '--'); }
+    if(opsStatus) { opsStatus.innerHTML = '<span class="status-chip ' + col + '">' + sourceEsc(label) + '</span>'; document.getElementById('ops-status-sub').textContent = 'service VPS · mode ' + sourceEsc(status.mode || status.strategyVersion || '--'); }
     if(opsEquity) opsEquity.textContent = '$' + Number(status.equity || 0).toFixed(2);
     if(opsOpen) opsOpen.textContent = Number(status.summary && status.summary.open || 0) + ' / ' + Number(status.summary && status.summary.pending || 0);
     if(opsDaily) { opsDaily.textContent = (Number(status.dailyLossR || 0) >= 0 ? '+' : '') + Number(status.dailyLossR || 0).toFixed(2) + 'R'; opsDaily.style.color = status.dailyGuard ? '#f85149' : Number(status.dailyLossR || 0) < 0 ? '#e3b341' : '#3fb950'; }
@@ -6809,14 +6809,15 @@ function updateActiveTradesPanel() {
     var cancelBtn = G.paperServer
       ? (PAPER_ADMIN_TOKEN ? (t.status==='PENDING' ? '<button onclick="cancelAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="margin-left:auto;background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.3);color:#e3b341;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">cancel</button>' : '<button onclick="closeAdminTrade(\'' + sourceEsc(t.id) + '\');event.stopPropagation();" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.3);color:#f85149;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">close</button>') : '<span style="margin-left:auto;color:#484f58;">🔒</span>')
       : '<button onclick="cancelTrade('+t.id+')" style="margin-left:auto;background:rgba(248,81,73,.08);border:1px solid #21262d;color:#484f58;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:9px;font-family:inherit;">x</button>';
-    var classLabel = isLegacy(t) ? 'LEGACY' : 'STRICT';
-    var classColor = isLegacy(t) ? '#8b949e' : '#58a6ff';
+    var isResearch = t.strategyVersion === 'RESEARCH_COLLECTION' || t.researchCollection === true;
+    var classLabel = isResearch ? 'RESEARCH' : isLegacy(t) ? 'LEGACY' : 'STRICT';
+    var classColor = isResearch ? '#a371f7' : isLegacy(t) ? '#8b949e' : '#58a6ff';
     var conf = t.confluencePct != null ? ' · Conf '+t.confluencePct+'%' : '';
     var mtf = t.mtfAlignment ? ' · MTF '+t.mtfAlignment+'/4' : '';
     var reasonTitle = Array.isArray(t.signalReasons) ? t.signalReasons.join(' · ') : '';
     return '<div onclick="openVpsChartForTrade(\'' + sourceEsc(t.sym || '') + '\')" style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:10px;cursor:pointer;" title="Klik untuk membuka chart VPS '+sourceEsc(t.sym || '')+'">'
       + '<span style="color:'+statusCol+';font-size:9px;min-width:50px;">'+t.status+'</span>'
-      + '<span style="color:'+classColor+';font-size:8px;min-width:38px;">'+(t.strategyVersion==='PRE_UPGRADE'?'PRE-UP':isLegacy(t)?'LEGACY':'MTF V2')+'</span>'
+      + '<span style="color:'+classColor+';font-size:8px;min-width:52px;">'+sourceEsc(t.strategyVersion==='PRE_UPGRADE'?'PRE-UP':classLabel)+'</span>'
       + '<b>'+t.sym+'</b>'
       + '<span style="color:#8b949e;" title="'+sourceEsc(reasonTitle)+'">'+sourceEsc(t.dir||'')+sourceEsc(mtf)+sourceEsc(conf)+'</span>'
       + '<span style="color:#484f58;">Lmt: '+entryStr+'</span>'
