@@ -735,6 +735,10 @@ function telegramCommandHelp() {
   return 'NEXORA PAPER BOT\n' +
     '/status — status bot, mode, guard, dan scan terakhir\n' +
     '/positions — posisi PENDING/OPEN/TP1\n' +
+    '/summary — ringkasan hasil hari ini\n' +
+    '/stats — statistik Strict dan Research\n' +
+    '/scan — hasil scan dan penolakan terakhir\n' +
+    '/health — kesehatan VPS dan scheduler\n' +
     '/help — bantuan perintah';
 }
 
@@ -766,6 +770,111 @@ function telegramCommandStatus() {
     'Hari ini: ' + Number(daily.trades || 0) + ' trade | ' +
       Number(daily.wins || 0) + '/' + Number(daily.losses || 0) + ' W/L | ' +
       Number(daily.netR || 0).toFixed(2) + 'R'
+  );
+}
+
+function telegramCommandSummary() {
+  const status = paperStatus({details: false, stats: true});
+  const daily = status.dailySummary || {};
+  const research = status.research || {};
+  return telegramTrim(
+    'NEXORA DAILY SUMMARY ' + (daily.date || new Date().toISOString().slice(0, 10)) + '\n' +
+    'Trades: ' + Number(daily.trades || 0) +
+      ' | Win/Loss: ' + Number(daily.wins || 0) + '/' + Number(daily.losses || 0) +
+      ' | Net: ' + Number(daily.netR || 0).toFixed(2) + 'R\n' +
+    'PnL hari ini: $' + Number(daily.pnl || 0).toFixed(2) +
+      ' | Daily guard: ' + (daily.guard ? 'ON' : 'OK') + '\n' +
+    'Equity Strict: $' + Number(status.equity || 0).toFixed(2) +
+      ' | Research: $' + Number(research.equity || 0).toFixed(2) + '\n' +
+    'Strict DD: ' + Number(status.drawdownPct || 0).toFixed(2) + '% / ' +
+      Number(status.maxDrawdownPct || 0).toFixed(2) + '%\n' +
+    'Research DD: ' + Number(research.drawdownPct || 0).toFixed(2) + '% / ' +
+      Number(research.hardDrawdownPct || 0).toFixed(2) + '%'
+  );
+}
+
+function telegramStatsRow(label, stats, sample) {
+  const metrics = stats || {};
+  const count = sample || {};
+  return label + ': ' + Number(count.closed || 0) + ' closed | ' +
+    Number(count.wins || 0) + '/' + Number(count.losses || 0) + ' W/L | WR ' +
+    Number(metrics.winRate || 0).toFixed(1) + '% | Net ' +
+    Number(metrics.netR || 0).toFixed(2) + 'R | PF ' +
+    (metrics.profitFactor == null ? '-' : Number(metrics.profitFactor).toFixed(2)) +
+    ' | DD ' + Number(metrics.maxDrawdownPct || 0).toFixed(2) + '%';
+}
+
+function telegramCommandStats() {
+  const status = paperStatus({details: false, stats: true});
+  return telegramTrim(
+    'NEXORA PAPER STATS\n' +
+    'Strict Trial (' + (status.cohortId || '-') + ')\n' +
+    telegramStatsRow('Hasil', status.trialStats, status.trialStatsSample) + '\n' +
+    'Research Collection (' + ((status.research && status.research.cohortId) || '-') + ')\n' +
+    telegramStatsRow('Hasil', status.researchStats, status.researchStatsSample) + '\n' +
+    'Total historis: ' + Number(status.statsSample && status.statsSample.closed || 0) +
+      ' closed | Net ' + Number(status.stats && status.stats.netR || 0).toFixed(2) + 'R'
+  );
+}
+
+function telegramCommandScan() {
+  const status = paperStatus({details: true, stats: false});
+  const scan = Array.isArray(status.recentScans) ? status.recentScans[0] : null;
+  if (!scan) return 'NEXORA LAST SCAN\nBelum ada hasil scan.';
+  const placed = Array.isArray(scan.placed) ? scan.placed : [];
+  const rejected = Array.isArray(scan.rejected) ? scan.rejected : [];
+  const lines = [
+    'NEXORA LAST SCAN',
+    'Waktu: ' + telegramFormatTime(scan.at),
+    'Cycle: ' + (scan.cycleKey || '-'),
+    'Mode: ' + ((scan.capacity && scan.capacity.mode) || scan.mode || '-'),
+    'Kandidat: ' + Number(scan.candidates || 0) +
+      ' | Dibuat: ' + placed.length + ' | Ditolak: ' + rejected.length
+  ];
+  if (placed.length) {
+    lines.push('', 'ORDER DIBUAT:');
+    placed.slice(0, 3).forEach(trade => lines.push(
+      trade.sym + ' ' + trade.dir + ' PENDING @ ' + telegramFormatNumber(trade.entryLimit) +
+        ' | SL ' + telegramFormatNumber(trade.sl) +
+        ' | TP1 ' + telegramFormatNumber(trade.tp1)
+    ));
+  }
+  if (rejected.length) {
+    lines.push('', 'PENOLAKAN PER TIMEFRAME:');
+    rejected.slice(0, 8).forEach(item => {
+      const timeframe = Array.isArray(item.timeframeReasons)
+        ? item.timeframeReasons.map(row => row.timeframe + ':' + row.reason).join(' · ')
+        : 'detail timeframe tidak tersedia';
+      lines.push((item.sym || '-') + ' — ' +
+        (Array.isArray(item.codes) && item.codes.length ? item.codes.join('/') : 'REJECTED') +
+        '\n' + timeframe);
+    });
+    if (rejected.length > 8) lines.push('…dan ' + (rejected.length - 8) + ' penolakan lain');
+  }
+  return telegramTrim(lines.join('\n'));
+}
+
+function telegramCommandHealth() {
+  const status = paperStatus({details: false, stats: false});
+  const runtime = status.runtime || {};
+  const commands = telegramState;
+  const scanAge = status.lastScanAt ? Math.max(0, Math.round((Date.now() - Date.parse(status.lastScanAt)) / 60000)) : null;
+  return telegramTrim(
+    'NEXORA VPS HEALTH\n' +
+    'Bot: ' + (status.running ? 'ONLINE' : 'OFFLINE') +
+      ' | Mode: ' + status.mode + '\n' +
+    'Scheduler: setiap ' + status.interval +
+      ' | Next: ' + telegramFormatTime(status.nextScanAt) + '\n' +
+    'Last scan: ' + telegramFormatTime(status.lastScanAt) +
+      (scanAge == null ? '' : ' (' + scanAge + ' menit lalu)') + '\n' +
+    'Last monitor: ' + telegramFormatTime(status.lastMonitorAt) + '\n' +
+    'Scan sukses/gagal: ' + Number(runtime.scansSucceeded || 0) + '/' +
+      Number(runtime.scansFailed || 0) +
+      ' | Monitor: ' + Number(runtime.monitorsSucceeded || 0) + '/' +
+      Number(runtime.monitorsFailed || 0) + '\n' +
+    'Telegram command listener: ' + (TELEGRAM_COMMANDS_ENABLED ? 'ON' : 'OFF') +
+      ' | Poll: ' + telegramFormatTime(commands.lastPollSuccessAt) + '\n' +
+    'Error terakhir: ' + (status.lastError || commands.lastPollError || 'tidak ada')
   );
 }
 
@@ -826,7 +935,11 @@ async function handleTelegramCommand(message, command) {
     start: telegramCommandHelp,
     help: telegramCommandHelp,
     status: telegramCommandStatus,
-    positions: telegramCommandPositions
+    positions: telegramCommandPositions,
+    summary: telegramCommandSummary,
+    stats: telegramCommandStats,
+    scan: telegramCommandScan,
+    health: telegramCommandHealth
   };
   const createReply = replies[command];
   if (!createReply) return false;
