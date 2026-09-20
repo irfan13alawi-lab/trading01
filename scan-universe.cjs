@@ -82,6 +82,39 @@ function tickerPrice(row) {
   return null;
 }
 
+function sharedEntryGateRejectionCodes(candidate) {
+  const item = candidate && typeof candidate === 'object' ? candidate : {};
+  const reasons = [];
+  const funding = Number(item.fund);
+  const change24h = Number(item.chg);
+  const volume = Number(item.volume);
+  const price = Number(item.price);
+  // Keep these thresholds identical to the existing shared entry gate in
+  // server.js. The gate is now evaluated after MTF so scan coverage is honest;
+  // it still decides whether a candidate can reach either paper ledger.
+  if (Number.isFinite(funding) && funding >= 0.005) reasons.push('FUNDING_ABOVE_LIMIT');
+  if (!Number.isFinite(change24h) || Math.abs(change24h) > 3.5) reasons.push('EXTREME_24H_CHANGE');
+  if (!Number.isFinite(volume) || volume <= 0) reasons.push('MISSING_VOLUME');
+  if (!Number.isFinite(price) || price <= 0) reasons.push('INVALID_PRICE');
+  return reasons;
+}
+
+function partitionSharedEntryGate(candidates) {
+  const passed = [];
+  const rejected = [];
+  const rejectionCounts = Object.create(null);
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const codes = sharedEntryGateRejectionCodes(candidate);
+    if (!codes.length) {
+      passed.push(candidate);
+      continue;
+    }
+    rejected.push({candidate, codes});
+    for (const code of codes) rejectionCounts[code] = (rejectionCounts[code] || 0) + 1;
+  }
+  return {passed, rejected, rejectionCounts: {...rejectionCounts}};
+}
+
 function tickerQuoteVolume(row) {
   for (const key of ['quoteVolume', 'usdtVolume', 'quoteVolume24h', 'quoteTurnover24h', '_nexoraQuoteVolume']) {
     const value = finitePositive(row && row[key]);
@@ -200,7 +233,9 @@ module.exports = {
   isEligibleBaseSymbol,
   isUsdtPerpetualTicker,
   parseTimestampMs,
+  tickerPrice,
+  sharedEntryGateRejectionCodes,
+  partitionSharedEntryGate,
   selectLiquidUniverse
 };
-
 

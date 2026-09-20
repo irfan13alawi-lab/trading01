@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const {
   normalizeBaseSymbol,
   isEligibleBaseSymbol,
+  sharedEntryGateRejectionCodes,
+  partitionSharedEntryGate,
   selectLiquidUniverse
 } = require('./scan-universe.cjs');
 
@@ -123,5 +125,39 @@ test('rejects non-perpetual contract metadata even with a USDT-like symbol', () 
   assert.equal(result.rejectionCounts.NOT_USDT_PERPETUAL, 1);
 });
 
+test('keeps all 60 selected tickers available for MTF while classifying the unchanged entry gate', () => {
+  const candidates = Array.from({length: 60}, (_, i) => ({
+    sym: 'TKN' + String(i).padStart(2, '0'),
+    price: 10,
+    volume: 2_000_000,
+    fund: 0.0001,
+    chg: 1
+  }));
+  candidates[0].fund = 0.005;
+  candidates[1].chg = 3.6;
+  candidates[2].volume = 0;
+  candidates[3].price = 0;
+  candidates[4].fund = 0.006;
+  candidates[4].chg = -4;
+
+  // Selection does not silently remove strategy-gated tickers. The caller can
+  // submit the selected set for MTF first, then partition it for paper entry.
+  const selected = select(candidates.map((candidate, i) => ticker(candidate.sym, 2_000_000, {
+    lastPr: String(candidate.price || 10),
+    fundingRate: String(candidate.fund),
+    change24h: String(candidate.chg / 100)
+  })));
+  assert.equal(selected.selectedCount, 60);
+  assert.equal(candidates.length, 60);
+
+  const partition = partitionSharedEntryGate(candidates);
+  assert.equal(partition.passed.length, 55);
+  assert.equal(partition.rejected.length, 5);
+  assert.equal(partition.rejectionCounts.FUNDING_ABOVE_LIMIT, 2);
+  assert.equal(partition.rejectionCounts.EXTREME_24H_CHANGE, 2);
+  assert.equal(partition.rejectionCounts.MISSING_VOLUME, 1);
+  assert.equal(partition.rejectionCounts.INVALID_PRICE, 1);
+  assert.deepEqual(sharedEntryGateRejectionCodes({price: 1, volume: 1, fund: 0, chg: 0}), []);
+});
 
 

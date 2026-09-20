@@ -6461,8 +6461,11 @@ function renderPaperUniverseTelemetry(universe) {
   if(!el) return;
   if(!universe) { el.textContent = 'Universe scan: belum ada telemetry tersimpan untuk scan terakhir.'; return; }
   var rejects = universe.rejectionCounts || {};
+  var gateRejects = universe.entryGateRejectionCounts || {};
   var topRejects = Object.keys(rejects).sort(function(a,b){return Number(rejects[b]||0)-Number(rejects[a]||0);})
     .slice(0,4).map(function(key){return sourceEsc(key)+' '+Number(rejects[key]||0);}).join(' · ') || 'none';
+  var topGateRejects = Object.keys(gateRejects).sort(function(a,b){return Number(gateRejects[b]||0)-Number(gateRejects[a]||0);})
+    .slice(0,4).map(function(key){return sourceEsc(key)+' '+Number(gateRejects[key]||0);}).join(' · ') || 'none';
   var status = String(universe.status || 'OK');
   var color = status === 'FAILED' ? '#f85149' : universe.selectedCount < universe.target ? '#e3b341' : '#3fb950';
   var actual = Number(universe.selectedCount || 0) + '/' + Number(universe.target || 60);
@@ -6473,15 +6476,18 @@ function renderPaperUniverseTelemetry(universe) {
     +' · raw '+Number(universe.rawTickerCount||0)
     +' → eligible '+Number(universe.eligibleCount||0)
     +' → terpilih '+sourceEsc(actual)
-    +' · MTF '+Number(universe.mtfEvaluated||0)+' diperiksa ('+Number(universe.mtfFull||0)+' full, '
+    +' · MTF '+Number(universe.mtfEvaluated||0)+'/'+Number(universe.selectedCount||0)+' diperiksa ('+Number(universe.mtfFull||0)+' full, '
       +Number(universe.mtfPartial||0)+' partial, '+Number(universe.mtfStale||0)+' stale, '
       +Number(universe.mtfUnavailable||0)+' unavailable)'
+    +' · gate entry '+Number(universe.entryGateEligibleCount||0)+' lolos / '
+      +Number(universe.entryGateRejectedCount||0)+' ditolak'
     +' · parallel '+Number(universe.concurrency||2)
     +' · sumber '+sourceEsc(universe.source||'--')
     +' · durasi '+(Number(universe.durationMs||0)/1000).toFixed(1)+'s'
     +' · 429 (jendela scan) '+Number(universe.rateLimitResponses||0)
     +(universe.overrun?' · <span style="color:#f85149;">melewati interval 15 menit</span>':'')
-    +'<br><span class="muted">Penolakan ticker terbanyak: '+topRejects+sourceEsc(insufficient)+'</span>'
+    +'<br><span class="muted">Penolakan ticker: '+topRejects+sourceEsc(insufficient)
+      +' · Gate entry (diterapkan setelah MTF): '+topGateRejects+'</span>'
     +(universe.error?'<br><span style="color:#f85149;">Error scan: '+sourceEsc(universe.error)+'</span>':'');
 }
 function pollPaperDiagnostics() {

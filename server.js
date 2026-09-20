@@ -8,6 +8,8 @@ const {
   UNIVERSE_VERSION,
   normalizeBaseSymbol,
   isEligibleBaseSymbol,
+  tickerPrice,
+  partitionSharedEntryGate,
   selectLiquidUniverse
 } = require('./scan-universe.cjs');
 
@@ -70,7 +72,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.1-liquid-top60-2026-09-21');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.2-liquid-top60-mtf-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -2558,7 +2560,7 @@ function buildPaperPairs(payload) {
   rows.forEach(row => {
     const sym = paperTickerSymbol(row);
     if (!sym || !isEligibleBaseSymbol(sym)) return;
-    const price = paperNumber(row.lastPr || row.last || row.close || row.markPrice);
+    const price = tickerPrice(row);
     if (!price) return;
     const chg = row.change24h != null
       ? paperNumber(row.change24h) * 100
@@ -2606,10 +2608,6 @@ function buildPaperPairs(payload) {
     pair.scoreBreakdown = pair.contextScoreBreakdown;
     pair.sc = pair.contextScoreBreakdown.total;
     pair.tier = paperTier(pair.sc);
-    // Do not discard a candidate before MTF analysis. A weak 24H move can
-    // still be a valid pullback when the four intraday timeframes agree.
-    if (pair.fund >= 0.005 || Math.abs(pair.chg) > 3.5 ||
-        pair.volume <= 0 || pair.price <= 0) return null;
     let rank = pair.sc * 0.4;
     const fundingBonus = pair.fund <= -0.0005 ? 3
       : pair.fund < 0 ? 2
@@ -4682,6 +4680,10 @@ async function runPaperScan(reason, requestedCycleKey) {
       mtfPartial: 0,
       mtfUnavailable: 0,
       filteredBeforeMtf: 0,
+      entryGateEligibleCount: 0,
+      entryGateRejectedCount: 0,
+      entryGateRejectionCounts: {},
+      entryGateRejectedSymbols: [],
       durationMs: 0,
       rateLimitResponses: 0,
       overrun: false
@@ -4705,8 +4707,9 @@ async function runPaperScan(reason, requestedCycleKey) {
     universeTelemetry.filteredBeforeMtf = Math.max(0, universe.selectedCount - ranked.length);
     ranked.forEach(pair => { pair.watchlistPriority = prioritySet.has(pair.sym); });
     ranked.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
-    // MTF is part of eligibility, not a post-selection decoration. Enrich the
-    // strongest market-context candidates before choosing the three orders.
+    // Evaluate every selected, validated universe member up to the configured
+    // 60-symbol cap. Shared strategy-entry gates are applied only after MTF so
+    // the scan reports its real coverage without weakening order eligibility.
     const mtfCandidates = ranked.slice(0, PAPER_MTF_MAX_CANDIDATES);
     universeTelemetry.mtfCandidates = mtfCandidates.length;
     universeTelemetry.mtfEvaluated = mtfCandidates.length;
@@ -4717,8 +4720,16 @@ async function runPaperScan(reason, requestedCycleKey) {
       else if (pair.mtfStatus === 'PARTIAL') universeTelemetry.mtfPartial += 1;
       else universeTelemetry.mtfUnavailable += 1;
     });
+    const entryGate = partitionSharedEntryGate(mtfCandidates);
+    universeTelemetry.entryGateEligibleCount = entryGate.passed.length;
+    universeTelemetry.entryGateRejectedCount = entryGate.rejected.length;
+    universeTelemetry.entryGateRejectionCounts = entryGate.rejectionCounts;
+    universeTelemetry.entryGateRejectedSymbols = entryGate.rejected.map(item => ({
+      sym: item.candidate.sym,
+      codes: item.codes
+    }));
     paperRuntime.lastUniverseScan = {...universeTelemetry};
-    ranked = mtfCandidates.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
+    ranked = entryGate.passed.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     // Strategy Lab evaluates the same enriched live-market snapshot.  Its
     // ledgers are independent from strict/research and failures are isolated
     // so a single experimental rule cannot stop the main paper bot.
@@ -5679,12 +5690,18 @@ function paperStatus(options) {
     selectedCount: Number(lastUniverse.selectedCount || 0),
     concurrency: Number(lastUniverse.concurrency || PAPER_MTF_CONCURRENCY),
     contextCandidates: Number(lastUniverse.contextCandidates || 0),
+    filteredBeforeMtf: Number(lastUniverse.filteredBeforeMtf || 0),
     mtfCandidates: Number(lastUniverse.mtfCandidates || 0),
     mtfEvaluated: Number(lastUniverse.mtfEvaluated || 0),
     mtfFull: Number(lastUniverse.mtfFull || 0),
     mtfStale: Number(lastUniverse.mtfStale || 0),
     mtfPartial: Number(lastUniverse.mtfPartial || 0),
     mtfUnavailable: Number(lastUniverse.mtfUnavailable || 0),
+    entryGateEligibleCount: Number(lastUniverse.entryGateEligibleCount || 0),
+    entryGateRejectedCount: Number(lastUniverse.entryGateRejectedCount || 0),
+    entryGateRejectionCounts: lastUniverse.entryGateRejectionCounts || {},
+    entryGateRejectedSymbols: Array.isArray(lastUniverse.entryGateRejectedSymbols)
+      ? lastUniverse.entryGateRejectedSymbols.slice(0, PAPER_UNIVERSE_LIMIT) : [],
     source: lastUniverse.source || null,
     fetchedAt: lastUniverse.fetchedAt || null,
     durationMs: Number(lastUniverse.durationMs || 0),
