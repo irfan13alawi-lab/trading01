@@ -18,7 +18,7 @@ function loadFunction(name, nextName, bindings) {
 test('compact paper summary omits Strategy Lab scan history while detailed view retains it', () => {
   const lab = {
     enabled: true,
-    accounts: {},
+    accounts: {MTF_ATR_V2: {activeTrades: [{id: 'lab-1', status: 'OPEN', universeVersion: 'LIQUID_TOP60_V1'}]}},
     recentScans: Array.from({length: 20}, (_, index) => ({cycleKey: String(index), detail: 'x'.repeat(1000)})),
     overlapEvents: Array.from({length: 10}, (_, index) => ({id: index})),
     lastScanAt: '2026-09-21T12:00:00.000Z',
@@ -29,8 +29,8 @@ test('compact paper summary omits Strategy Lab scan history while detailed view 
     paperState: {strategyLab: lab},
     paperLabDefaultState: () => lab,
     paperLabAccountSummary: () => ({}),
-    paperLabIsActive: () => false,
-    paperTradeView: trade => trade,
+    paperLabIsActive: trade => trade.status === 'OPEN',
+    paperTradeView: trade => ({id: trade.id, universeVersion: trade.universeVersion}),
     PAPER_LAB_MODE: 'SHADOW',
     PAPER_LAB_STARTING_EQUITY: 200,
     PAPER_LAB_PER_SCAN: 3,
@@ -43,6 +43,7 @@ test('compact paper summary omits Strategy Lab scan history while detailed view 
   assert.equal(Object.hasOwn(compact, 'overlapEvents'), false);
   assert.equal(detailed.recentScans.length, 20);
   assert.equal(detailed.overlapEvents.length, 10);
+  assert.equal(compact.activeTrades[0].universeVersion, 'LIQUID_TOP60_V1');
   assert.ok(JSON.stringify(compact).length < JSON.stringify(detailed).length / 5);
   assert.match(source, /paperStatus\(\{details: false, stats: false, labHistory: false\}\)/);
 });
@@ -67,4 +68,29 @@ test('paper history honors limit and offset while reporting total retained match
   const defaultPage = history(new URLSearchParams());
   assert.deepEqual(defaultPage.closedTrades.map(trade => trade.id), ['one', 'two', 'three']);
   assert.equal(defaultPage.pagination.hasMore, false);
+});
+
+test('active trade view exposes stored universe version and labels old trades', () => {
+  const tradeView = loadFunction('paperTradeView', 'paperCandidateView', {
+    paperEnsureAnalysis: () => {},
+    paperNumber: value => Number.isFinite(Number(value)) ? Number(value) : 0,
+    PAPER_TP1_CLOSE_PCT: 50,
+    paperTradeOriginalSize: () => 1,
+    paperTradeRemainingSize: () => 1,
+    paperTradeOriginalContracts: () => 1,
+    paperTradeRemainingContracts: () => 1,
+    paperTradeRiskDollar: () => 0.5,
+    paperTradeInitialRiskDollar: () => 0.5,
+    paperTradeStrategyVersion: trade => trade.strategyVersion || 'LEGACY',
+    paperIsResearchTrade: () => false,
+    paperExecutionModel: () => 'LIMIT_OHLC',
+    isStrictPaperTrade: () => false
+  });
+  const view = tradeView({
+    id: 'new-order', sym: 'BTC', dir: 'LONG', status: 'PENDING', entryLimit: 100,
+    sl: 90, tp1: 120, universeVersion: 'LIQUID_TOP60_V1', strategyVersion: 'RESEARCH_COLLECTION'
+  });
+  const oldView = tradeView({id: 'legacy-order', sym: 'ETH', dir: 'SHORT', status: 'OPEN'});
+  assert.equal(view.universeVersion, 'LIQUID_TOP60_V1');
+  assert.equal(oldView.universeVersion, 'LEGACY');
 });

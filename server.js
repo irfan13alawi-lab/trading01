@@ -72,7 +72,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.3-liquid-top60-light-summary-2026-09-21');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.4-liquid-top60-trade-universe-tag-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -3357,7 +3357,8 @@ function paperStrategyLabSummary(includeTrades, options) {
     (account.activeTrades || []).filter(paperLabIsActive).map(trade => includeTrades ? paperTradeView(trade) : {
       id: trade.id, sym: trade.sym, dir: trade.dir, status: trade.status,
       strategyId: trade.strategyId, entryLimit: trade.entryLimit, sl: trade.sl,
-      tp1: trade.tp1, tp2: trade.tp2, currentPrice: trade.currentPrice
+      tp1: trade.tp1, tp2: trade.tp2, currentPrice: trade.currentPrice,
+      universeVersion: trade.universeVersion || 'LEGACY'
     }));
   return {
     ok: true, mode: PAPER_LAB_MODE, enabled: lab.enabled !== false,
@@ -3655,6 +3656,7 @@ function paperTradeView(trade) {
     events: Array.isArray(trade.events) ? trade.events.slice(0, 50) : [],
     strategyVersion: trade.strategyVersion || paperTradeStrategyVersion(trade),
     cohortId: trade.cohortId || null,
+    universeVersion: trade.universeVersion || 'LEGACY',
     researchCollection: paperIsResearchTrade(trade),
     signalCreatedAt: trade.signalCreatedAt || null,
     candleAtByTf: trade.candleAtByTf || null,
