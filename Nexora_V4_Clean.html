@@ -696,8 +696,9 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
         <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
       </div>
     </div>
-    <div class="frow" style="grid-template-columns:repeat(10,1fr);">
+    <div class="frow" style="grid-template-columns:repeat(11,1fr);">
       <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="RESEARCH_COLLECTION">RESEARCH_COLLECTION</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
+      <div class="fg"><label>Universe</label><select id="vps-st-universe" onchange="pollPaperStats()"><option value="">All</option><option value="LIQUID_TOP60_V1">Liquid Top 60</option><option value="LEGACY">Legacy / unknown</option></select></div>
       <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option></select></div>
       <div class="fg"><label>Symbol</label><input id="vps-st-symbol" placeholder="All" onchange="pollPaperStats()"></div>
       <div class="fg"><label>Direction</label><select id="vps-st-direction" onchange="pollPaperStats()"><option value="">All</option><option>LONG</option><option>SHORT</option></select></div>
@@ -1104,6 +1105,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="card-h"><div class="card-t"><i class="fa-solid fa-heart-pulse"></i> VPS Operations &amp; Data Quality</div><button class="btn btn-sm btn-blue" onclick="refreshOpsPage()"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
     <div id="ops-health" class="muted">Loading VPS diagnostics...</div>
     <div id="ops-sources" class="conn-grid" style="margin-top:10px;"></div>
+    <div id="ops-universe" class="muted" style="margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:8px;line-height:1.8;">Loading scan universe metrics...</div>
   </div>
   <div class="card" id="ops-daily-summary">
     <div class="card-h"><div class="card-t"><i class="fa-solid fa-calendar-check"></i> Daily paper summary</div><span class="muted" id="ops-summary-date">--</span></div>
@@ -6123,6 +6125,7 @@ function pollPaperStats() {
   addParam('vps-st-funding', 'fundingSign', true);
   addParam('vps-st-volume', 'volumeBucket', true);
   addParam('vps-st-market', 'marketTag', true);
+  addParam('vps-st-universe', 'universeVersion', false);
   addParam('vps-st-from', 'from', false);
   addParam('vps-st-to', 'to', false);
   fetch(PAPER_API + '/stats' + (params.length ? '?' + params.join('&') : ''), {cache:'no-store'})
@@ -6165,6 +6168,7 @@ function vpsHistoryQuery(monthly) {
   add('vps-st-funding', 'fundingSign', true);
   add('vps-st-volume', 'volumeBucket', true);
   add('vps-st-market', 'marketTag', true);
+  add('vps-st-universe', 'universeVersion', false);
   if(monthly) {
     var now = new Date();
     var first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -6281,6 +6285,8 @@ function renderVpsStats(data) {
     {label:'Setup tag',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + '<div class="muted" style="margin:8px 0 4px;">By market condition</div>' + vpsGroupTable(data.byMarketTag, [
     {label:'Market tag',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By scan universe</div>' + vpsGroupTable(data.byUniverseVersion, [
+    {label:'Universe',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + '<div class="muted" style="margin:8px 0 4px;">By strategy / cohort</div>' + vpsGroupTable(data.byStrategyVersion, [
     {label:'Strategy',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + vpsGroupTable(data.byCohort, [
@@ -6394,7 +6400,7 @@ function renderVpsClosedTradeAnalysis(data) {
         var resultColor=t.outcome==='WIN'?'#3fb950':t.outcome==='LOSS'?'#f85149':'#e3b341';
         var factors=(setup.mtfAlignment==null?'MTF ?':setup.mtfAlignment+'/4 MTF')+' · '+(setup.confluencePct==null?'conf ?':Number(setup.confluencePct).toFixed(0)+'% conf')+' · '+(market.regime||'regime ?')+' · '+(t.analysisStatus||'DATA_NOT_CAPTURED');
         var tagsText=[].concat(tags.exit||[],tags.setup||[],tags.market||[]).slice(0,7).join(' · ')||'no tags';
-        return '<tr><td>'+sourceEsc(vpsFmtAt(t.closedAt))+'</td><td><b>'+sourceEsc(t.symbol||'--')+'</b> '+sourceEsc(t.direction||'--')+'<br><span class="muted">'+sourceEsc(t.strategyVersion||'--')+'</span></td><td style="color:'+resultColor+';font-weight:700;">'+sourceEsc(t.outcome||'--')+'<br><span class="muted">'+sourceEsc(t.closeReason||'--')+'</span></td><td>'+vpsAnalysisSigned(t.r,2)+'R<br>$'+Number(t.pnl||0).toFixed(2)+'</td><td>'+sourceEsc(t.entryActual==null?t.entryLimit:t.entryActual)+' → '+sourceEsc(t.exitPrice==null?'--':t.exitPrice)+'</td><td>'+sourceEsc(t.sl==null?'--':t.sl)+' / '+sourceEsc(t.tp1==null?'--':t.tp1)+' / '+sourceEsc(t.tp2==null?'--':t.tp2)+'</td><td title="'+sourceEsc(factors)+'">'+sourceEsc(factors)+'<br><span class="muted">'+sourceEsc(tagsText)+'</span></td><td title="'+sourceEsc(t.summary||'')+'">'+sourceEsc(t.summary||'No rule-based summary')+'</td></tr>';
+        return '<tr><td>'+sourceEsc(vpsFmtAt(t.closedAt))+'</td><td><b>'+sourceEsc(t.symbol||'--')+'</b> '+sourceEsc(t.direction||'--')+'<br><span class="muted">'+sourceEsc(t.strategyVersion||'--')+' · '+sourceEsc(t.universeVersion||'LEGACY')+'</span></td><td style="color:'+resultColor+';font-weight:700;">'+sourceEsc(t.outcome||'--')+'<br><span class="muted">'+sourceEsc(t.closeReason||'--')+'</span></td><td>'+vpsAnalysisSigned(t.r,2)+'R<br>$'+Number(t.pnl||0).toFixed(2)+'</td><td>'+sourceEsc(t.entryActual==null?t.entryLimit:t.entryActual)+' → '+sourceEsc(t.exitPrice==null?'--':t.exitPrice)+'</td><td>'+sourceEsc(t.sl==null?'--':t.sl)+' / '+sourceEsc(t.tp1==null?'--':t.tp1)+' / '+sourceEsc(t.tp2==null?'--':t.tp2)+'</td><td title="'+sourceEsc(factors)+'">'+sourceEsc(factors)+'<br><span class="muted">'+sourceEsc(tagsText)+'</span></td><td title="'+sourceEsc(t.summary||'')+'">'+sourceEsc(t.summary||'No rule-based summary')+'</td></tr>';
       }).join('')+'</tbody></table>';
   }
 }
@@ -6435,6 +6441,7 @@ function renderPaperDiagnostics(data) {
   var bot = data.bot || {};
   var state = data.state || {};
   var lastError = data.lastError || bot.lastError || runtime.lastScanError || runtime.lastMonitorError || '';
+  renderPaperUniverseTelemetry(data.lastScanSummary && data.lastScanSummary.universe || runtime.lastUniverseScan);
   var status = source.displayStatus || source.status || 'UNKNOWN';
   var statusColor = status === 'LIVE' || status === 'FALLBACK_LIVE' ? '#3fb950' : status === 'DELAYED' ? '#f0883e' : '#f85149';
   el.innerHTML = '<b>VPS operations</b> · scan ' + sourceEsc(data.strategyVersion || '--')
@@ -6448,6 +6455,33 @@ function renderPaperDiagnostics(data) {
     + ' · monitors ' + sourceEsc(String(runtime.monitorsSucceeded || 0)) + '/' + sourceEsc(String(runtime.monitorAttempts || 0))
     + ' · backup ' + sourceEsc(state.backupFile || '--')
     + (lastError ? ' · <span style="color:#f85149;">error: ' + sourceEsc(lastError) + '</span>' : ' · <span style="color:#3fb950;">no error</span>');
+}
+function renderPaperUniverseTelemetry(universe) {
+  var el = document.getElementById('ops-universe');
+  if(!el) return;
+  if(!universe) { el.textContent = 'Universe scan: belum ada telemetry tersimpan untuk scan terakhir.'; return; }
+  var rejects = universe.rejectionCounts || {};
+  var topRejects = Object.keys(rejects).sort(function(a,b){return Number(rejects[b]||0)-Number(rejects[a]||0);})
+    .slice(0,4).map(function(key){return sourceEsc(key)+' '+Number(rejects[key]||0);}).join(' · ') || 'none';
+  var status = String(universe.status || 'OK');
+  var color = status === 'FAILED' ? '#f85149' : universe.selectedCount < universe.target ? '#e3b341' : '#3fb950';
+  var actual = Number(universe.selectedCount || 0) + '/' + Number(universe.target || 60);
+  var insufficient = Number(universe.eligibleCount || 0) < Number(universe.target || 60)
+    ? ' · Tidak ada ticker stale/fiktif yang ditambahkan untuk mengejar target.' : '';
+  el.innerHTML = '<b>Scan universe</b> · <span style="color:'+color+';">'+sourceEsc(status)+'</span>'
+    +' · '+sourceEsc(universe.version || 'unknown')
+    +' · raw '+Number(universe.rawTickerCount||0)
+    +' → eligible '+Number(universe.eligibleCount||0)
+    +' → terpilih '+sourceEsc(actual)
+    +' · MTF '+Number(universe.mtfEvaluated||0)+' diperiksa ('+Number(universe.mtfFull||0)+' full, '
+      +Number(universe.mtfPartial||0)+' partial, '+Number(universe.mtfStale||0)+' stale, '
+      +Number(universe.mtfUnavailable||0)+' unavailable)'
+    +' · sumber '+sourceEsc(universe.source||'--')
+    +' · durasi '+(Number(universe.durationMs||0)/1000).toFixed(1)+'s'
+    +' · 429 '+Number(universe.rateLimitResponses||0)
+    +(universe.overrun?' · <span style="color:#f85149;">melewati interval 15 menit</span>':'')
+    +'<br><span class="muted">Penolakan ticker terbanyak: '+topRejects+sourceEsc(insufficient)+'</span>'
+    +(universe.error?'<br><span style="color:#f85149;">Error scan: '+sourceEsc(universe.error)+'</span>':'');
 }
 function pollPaperDiagnostics() {
   if(!PAPER_API || !G.paperServer) return;
@@ -6515,6 +6549,8 @@ function refreshOpsPage() {
     if(summaryOpenPnl) { var openPnl = Number(status.unrealizedPnl || 0); summaryOpenPnl.textContent = (openPnl >= 0 ? '+' : '') + '$' + openPnl.toFixed(2); summaryOpenPnl.style.color = openPnl > 0 ? '#3fb950' : openPnl < 0 ? '#f85149' : '#8b949e'; }
     if(summaryWinrate) { var cohort = status.trialStats || (G.vpsStats && G.vpsStats.metrics) || {}, winRate = Number(cohort.winRate || 0); summaryWinrate.textContent = winRate.toFixed(1) + '%'; summaryWinrate.style.color = winRate >= 50 ? '#3fb950' : winRate > 0 ? '#e3b341' : '#f85149'; summaryWinrate.title = 'Wins ' + Number(cohort.wins || 0) + ' · losses ' + Number(cohort.losses || 0) + ' · closed ' + Number(cohort.closed || 0); }
     var runtime = diag.runtime || {};
+    renderPaperUniverseTelemetry(status.lastScanSummary && status.lastScanSummary.universe ||
+      diag.lastScanSummary && diag.lastScanSummary.universe || runtime.lastUniverseScan);
     var errorCount = Number(runtime.scansFailed || 0) + Number(runtime.monitorsFailed || 0);
     if(opsErrors) { opsErrors.textContent = String(errorCount); opsErrors.style.color = errorCount ? '#f85149' : '#3fb950'; }
     if(health) health.innerHTML = '<span class="status-chip ' + col + '">' + sourceEsc(label) + '</span> · last monitor ' + sourceEsc(vpsFmtAt(status.lastMonitorAt)) + ' · block ' + sourceEsc(status.blockReason || 'none') + ' · schema ' + sourceEsc(String((status.state || {}).schemaVersion || '--'));

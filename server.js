@@ -1,11 +1,21 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const {
+  DEFAULT_UNIVERSE_LIMIT,
+  DEFAULT_MIN_QUOTE_VOLUME_USDT,
+  DEFAULT_MAX_TICKER_AGE_MS,
+  UNIVERSE_VERSION,
+  normalizeBaseSymbol,
+  isEligibleBaseSymbol,
+  selectLiquidUniverse
+} = require('./scan-universe.cjs');
 
 const PORT = Number(process.env.PORT || 18085);
 const REQUEST_TIMEOUT_MS = 12000;
 const PAPER_INTERVAL_MS = 15 * 60 * 1000;
 const PAPER_SCAN_CHECK_MS = 15000;
+const PAPER_SCAN_FAILURE_RETRY_MS = 60 * 1000;
 const PAPER_MONITOR_MS = 30000;
 const PAPER_MONITOR_CANDLE_LIMIT = 10;
 const PAPER_PENDING_TTL_MS = 120 * 60 * 1000;
@@ -34,9 +44,18 @@ const PAPER_SIGNAL_MODE = String(process.env.PAPER_SIGNAL_MODE || 'WEIGHTED').to
 const PAPER_MTF_CONCURRENCY = Math.max(2, Math.min(12,
   Number.isFinite(Number(process.env.PAPER_MTF_CONCURRENCY))
     ? Number(process.env.PAPER_MTF_CONCURRENCY) : 6));
-const PAPER_MTF_MAX_CANDIDATES = Math.max(8, Math.min(40,
-  Number.isFinite(Number(process.env.PAPER_MTF_MAX_CANDIDATES))
-    ? Number(process.env.PAPER_MTF_MAX_CANDIDATES) : 40));
+// Keep the scanner universe and MTF cap in lockstep. The former env clamp
+// stopped at 40, so an old PAPER_MTF_MAX_CANDIDATES=40 could silently undo
+// the expanded scan. This trial build intentionally evaluates up to 60.
+const PAPER_UNIVERSE_LIMIT = DEFAULT_UNIVERSE_LIMIT;
+const PAPER_MTF_MAX_CANDIDATES = PAPER_UNIVERSE_LIMIT;
+const PAPER_MIN_24H_QUOTE_VOLUME_USDT = Math.max(0,
+  Math.min(1e12, Number.isFinite(Number(process.env.PAPER_MIN_24H_QUOTE_VOLUME_USDT))
+    ? Number(process.env.PAPER_MIN_24H_QUOTE_VOLUME_USDT) : DEFAULT_MIN_QUOTE_VOLUME_USDT));
+const PAPER_TICKER_MAX_AGE_MS = Math.max(30_000,
+  Math.min(15 * 60 * 1000, Number.isFinite(Number(process.env.PAPER_TICKER_MAX_AGE_MS))
+    ? Number(process.env.PAPER_TICKER_MAX_AGE_MS) : DEFAULT_MAX_TICKER_AGE_MS));
+const PAPER_UPSTREAM_MAX_RETRY_WAIT_MS = 8000;
 const PAPER_MAX_ACTIVE = Math.max(3, Math.min(100,
   Number.isFinite(Number(process.env.PAPER_MAX_ACTIVE))
     ? Number(process.env.PAPER_MAX_ACTIVE) : 80));
@@ -51,11 +70,11 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.2-strategy-lab-2026-09-20');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3-liquid-top60-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
-const PAPER_SCHEMA_VERSION = 11;
+const PAPER_SCHEMA_VERSION = 12;
 // P4 AI is intentionally not enabled by a loose environment flag.  The
 // current build exposes the evidence gate and rule-based summaries only;
 // an AI provider must be integrated and verified before this becomes true.
@@ -253,7 +272,14 @@ const paperRuntime = {
   lastMonitorAt: null,
   lastMonitorErrorAt: null,
   lastMonitorError: null,
-  rejectionCounts: {}
+  rejectionCounts: {},
+  rateLimitResponses: 0,
+  lastRateLimitAt: null,
+  lastRetryAfterMs: null,
+  lastScanDurationMs: null,
+  lastScanOverruns: 0,
+  nextScanRetryAt: null,
+  lastUniverseScan: null
 };
 
 const cache = new Map();
@@ -755,14 +781,36 @@ async function requestUpstream(url) {
       });
       const body = await response.text();
       const retryable = response.status === 429 || response.status >= 500;
-      if (!retryable || attempt === 2) {
+      let retryDelay = null;
+      if (response.status === 429) {
+        paperRuntime.rateLimitResponses += 1;
+        paperRuntime.lastRateLimitAt = new Date().toISOString();
+        const retryAfter = response.headers.get('retry-after');
+        const seconds = Number(retryAfter);
+        const retryAt = retryAfter && !Number.isFinite(seconds) ? Date.parse(retryAfter) : NaN;
+        const requestedWait = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000
+          : Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : null;
+        if (requestedWait != null) {
+          paperRuntime.lastRetryAfterMs = Math.round(requestedWait);
+          // If the upstream asks us to wait longer than the scan can safely
+          // tolerate, return the 429 to the caller instead of retrying early.
+          if (requestedWait <= PAPER_UPSTREAM_MAX_RETRY_WAIT_MS) {
+            retryDelay = Math.max(250, requestedWait);
+          }
+        } else {
+          retryDelay = Math.min(2000, 500 * Math.pow(2, attempt));
+        }
+      } else if (response.status >= 500) {
+        retryDelay = Math.min(2000, 350 * Math.pow(2, attempt));
+      }
+      if (!retryable || attempt === 2 || retryDelay == null) {
         return {
           status: response.status,
           body,
           contentType: response.headers.get('content-type') || 'application/json'
         };
       }
-      await sleep(350 * (attempt + 1));
+      await sleep(retryDelay);
     } catch (error) {
       lastError = error;
       if (attempt < 2) await sleep(350 * (attempt + 1));
@@ -1304,13 +1352,6 @@ function maybeSendPaperOperationalAlerts() {
 // The state is persisted so the one-week observation continues after the
 // browser is closed and survives a normal Node/systemd restart.
 // ---------------------------------------------------------------------------
-const PAPER_SYMBOLS = [
-  'BTC','ETH','SOL','BNB','XRP','ADA','DOT','AVAX','LINK','NEAR',
-  'ATOM','DOGE','UNI','AAVE','APT','ARB','OP','INJ','TIA','SUI',
-  'SEI','PEPE','WIF','FET','RNDR','WLD','PENDLE','ENA','STX','CRV',
-  'LDO','TAO','GRT','FLOKI','BONK','SHIB','TRX','MATIC','LTC','SNX'
-];
-
 function paperNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -1532,7 +1573,7 @@ function paperNormaliseWatchlistAlert(input) {
   const raw = input && typeof input === 'object' ? input : {};
   const sym = String(raw.sym || raw.symbol || '').toUpperCase()
     .replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '');
-  if (!sym || !PAPER_SYMBOLS.includes(sym)) return null;
+  if (!sym || !isEligibleBaseSymbol(sym)) return null;
   const dir = ['LONG', 'SHORT'].includes(String(raw.dir || raw.direction || '').toUpperCase())
     ? String(raw.dir || raw.direction).toUpperCase() : null;
   const range = String(raw.entryRange || raw.entry || '').replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
@@ -1896,7 +1937,7 @@ function loadPaperState() {
       watchlistQueue: Array.isArray(parsed.watchlistQueue) ? parsed.watchlistQueue.map(item => {
         const sym = String(item && typeof item === 'object' ? item.sym : item || '')
           .toUpperCase().replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '');
-        return sym && PAPER_SYMBOLS.includes(sym) ? {
+        return sym && isEligibleBaseSymbol(sym) ? {
           sym, requestedAt: item && item.requestedAt || null
         } : null;
       }).filter(Boolean).slice(0, 5) : [],
@@ -2507,10 +2548,7 @@ function paperIndicatorSnapshot(rows) {
 }
 
 function paperTickerSymbol(row) {
-  return String(row.symbol || '')
-    .replace(/(?:_UMCBL|_DMCBL|_CMCBL)$/i, '')
-    .replace(/[_-]?USDT$/i, '')
-    .toUpperCase();
+  return normalizeBaseSymbol(row && (row.symbol || row.instId || row.sym));
 }
 
 function buildPaperPairs(payload) {
@@ -2519,7 +2557,7 @@ function buildPaperPairs(payload) {
   const pairs = {};
   rows.forEach(row => {
     const sym = paperTickerSymbol(row);
-    if (!sym || PAPER_SYMBOLS.indexOf(sym) < 0) return;
+    if (!sym || !isEligibleBaseSymbol(sym)) return;
     const price = paperNumber(row.lastPr || row.last || row.close || row.markPrice);
     if (!price) return;
     const chg = row.change24h != null
@@ -2545,12 +2583,14 @@ function buildPaperPairs(payload) {
     const sc = paperScore(chg, fund, oi, oiReady);
     const pair = {
       sym, price, chg,
-      volume: paperNumber(row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
+      volume: paperNumber(row._nexoraQuoteVolume || row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
       fund, oi, oiUSD: oiAvailable && oiUsd > 0 ? oiUsd : null, oiReady,
       fundingAvailable: paperFieldPresent(row.fundingRate) || paperFieldPresent(row.fundingRate24h),
       oiAvailable,
       volumeAvailable: paperFieldPresent(row.quoteVolume) || paperFieldPresent(row.usdtVolume) ||
-        paperFieldPresent(row.quoteVolume24h),
+        paperFieldPresent(row.quoteVolume24h) || paperFieldPresent(row._nexoraQuoteVolume),
+      universeVersion: row._nexoraUniverseVersion || UNIVERSE_VERSION,
+      tickerAt: row._nexoraTickerAt || null,
       sc: 0,
       tier: 'C', sig: paperSignal(chg, oi, fund), dataQuality: oiReady ? 'FULL' : 'PARTIAL',
       dataAt, source: payload && payload._nexoraSource || 'Bitget Futures'
@@ -3061,6 +3101,7 @@ function paperLabCreateTrade(pair, account, result, cycleKey) {
     realizedPnlTp1: 0, realizedPnl: 0, realizedPnlFinal: 0, unrealPnl: 0, mfePnl: 0, maePnl: 0,
     createdAt: Date.now(), openedAt: null, closedAt: null, cycleKey,
     strategyId, strategyVersion: account.version, cohortId: 'lab-' + strategyId,
+    universeVersion: pair.universeVersion || UNIVERSE_VERSION,
     mode: PAPER_LAB_MODE, signalMode: 'NATIVE', timeframe: '15M', tf: '15M',
     dataQuality: pair.dataQuality || 'PARTIAL', dataAt: pair.dataAt, source: pair.source,
     chg: pair.chg, fund: pair.fund, oi: pair.oi, volume: pair.volume,
@@ -3095,6 +3136,7 @@ function paperLabCreateTrade(pair, account, result, cycleKey) {
 function paperLabScan(ranked, cycleKey, reason) {
   const lab = paperState.strategyLab;
   if (!lab || lab.enabled === false) return false;
+  if (lab.lastCycleKey === cycleKey) return false;
   const placedByStrategy = {};
   const rejectedByStrategy = {};
   const usedSymbols = {};
@@ -3151,7 +3193,9 @@ function paperLabScan(ranked, cycleKey, reason) {
   lab.lastError = null;
   lab.recentScans = [{cycleKey, at: lab.lastScanAt, reason: reason || '15M close',
     placed: placedByStrategy, rejected: rejectedByStrategy,
-    candidates: ranked.length, overlaps}].concat(lab.recentScans || []).slice(0, 200);
+    candidates: ranked.length, overlaps,
+    universeVersion: ranked[0] && ranked[0].universeVersion || UNIVERSE_VERSION}]
+    .concat(lab.recentScans || []).slice(0, 200);
   return changed;
 }
 
@@ -4332,9 +4376,89 @@ async function fetchPaperTickersFromBitget() {
     markSourceError('/bitget', error, '/api/v2/mix/market/tickers');
     throw error;
   }
+  const instruments = await fetchPaperInstruments();
+  const activeSymbols = [...instruments.entries()]
+    .filter(([, info]) => info && info.active === true)
+    .map(([symbol]) => symbol);
+  if (!activeSymbols.length) throw new Error('Bitget active USDT perpetual metadata unavailable');
   payload._nexoraFetchedAt = new Date().toISOString();
   payload._nexoraSource = 'Bitget Futures';
+  payload._nexoraActiveSymbols = activeSymbols;
   return payload;
+}
+
+const paperFallbackContractCache = {
+  binance: {loadedAt: 0, symbols: new Set()},
+  okx: {loadedAt: 0, instruments: new Map()}
+};
+
+async function fetchPaperBinanceActiveSymbols() {
+  const cacheItem = paperFallbackContractCache.binance;
+  if (cacheItem.symbols.size && Date.now() - cacheItem.loadedAt < 30 * 60 * 1000) {
+    return new Set(cacheItem.symbols);
+  }
+  const pathName = '/fapi/v1/exchangeInfo';
+  const startedAt = Date.now();
+  const result = await requestUpstream(APIS['/binance'] + pathName);
+  markSourceHealth('/binance', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  if (result.status < 200 || result.status >= 300) throw new Error('Binance exchangeInfo HTTP ' + result.status);
+  const payload = JSON.parse(result.body);
+  if (!payload || !Array.isArray(payload.symbols)) throw new Error('Binance exchangeInfo response invalid');
+  const symbols = new Set(payload.symbols.filter(item => item &&
+    String(item.quoteAsset || '').toUpperCase() === 'USDT' &&
+    String(item.contractType || '').toUpperCase() === 'PERPETUAL' &&
+    String(item.status || '').toUpperCase() === 'TRADING'
+  ).map(item => normalizeBaseSymbol(item.symbol)).filter(isEligibleBaseSymbol));
+  if (!symbols.size) throw new Error('Binance has no active USDT perpetual metadata');
+  cacheItem.symbols = symbols;
+  cacheItem.loadedAt = Date.now();
+  return new Set(symbols);
+}
+
+async function fetchPaperOkxActiveInstruments() {
+  const cacheItem = paperFallbackContractCache.okx;
+  if (cacheItem.instruments.size && Date.now() - cacheItem.loadedAt < 30 * 60 * 1000) {
+    return new Map(cacheItem.instruments);
+  }
+  const pathName = '/api/v5/public/instruments?instType=SWAP';
+  const startedAt = Date.now();
+  const result = await requestUpstream(APIS['/okx'] + pathName);
+  markSourceHealth('/okx', {...result, latencyMs: Date.now() - startedAt, path: pathName});
+  if (result.status < 200 || result.status >= 300) throw new Error('OKX instruments HTTP ' + result.status);
+  const payload = JSON.parse(result.body);
+  if (!payload || payload.code !== '0' || !Array.isArray(payload.data)) {
+    throw new Error((payload && payload.msg) || 'OKX instruments response invalid');
+  }
+  const instruments = new Map();
+  payload.data.forEach(item => {
+    const id = String(item && item.instId || '').toUpperCase();
+    const base = normalizeBaseSymbol(id);
+    if (!item || !isEligibleBaseSymbol(base) || !/^[A-Z0-9]{2,15}-USDT-SWAP$/.test(id) ||
+        String(item.state || '').toLowerCase() !== 'live' ||
+        String(item.settleCcy || '').toUpperCase() !== 'USDT') return;
+    instruments.set(id, {
+      base,
+      baseCcy: String(item.baseCcy || base).toUpperCase(),
+      settleCcy: String(item.settleCcy || '').toUpperCase(),
+      ctVal: paperNumber(item.ctVal),
+      ctValCcy: String(item.ctValCcy || '').toUpperCase()
+    });
+  });
+  if (!instruments.size) throw new Error('OKX has no active USDT-settled linear perpetual metadata');
+  cacheItem.instruments = instruments;
+  cacheItem.loadedAt = Date.now();
+  return new Map(instruments);
+}
+
+function okxQuoteVolumeUsdt(row, instrument, price) {
+  const contractVolume = paperNumber(row && row.vol24h);
+  const contractValue = paperNumber(instrument && instrument.ctVal);
+  const valueCurrency = String(instrument && instrument.ctValCcy || '').toUpperCase();
+  if (!(contractVolume > 0) || !(contractValue > 0)) return null;
+  const tradedValue = contractVolume * contractValue;
+  if (valueCurrency === 'USDT') return tradedValue;
+  if (valueCurrency === String(instrument.baseCcy || '').toUpperCase()) return tradedValue * price;
+  return null;
 }
 
 async function fetchPaperTickersFromBinance() {
@@ -4354,12 +4478,13 @@ async function fetchPaperTickersFromBinance() {
   try { rows = JSON.parse(result.body); }
   catch (_) { throw new Error('Binance tickers returned invalid JSON'); }
   if (!Array.isArray(rows)) throw new Error((rows && rows.msg) || 'Binance tickers response invalid');
-  const symbols = new Set(PAPER_SYMBOLS.map(sym => sym + 'USDT'));
-  const data = rows.filter(row => symbols.has(String(row.symbol || '').toUpperCase()))
+  const activeSymbols = await fetchPaperBinanceActiveSymbols();
+  const data = rows.filter(row => activeSymbols.has(normalizeBaseSymbol(row.symbol)))
     .map(row => ({
       symbol: String(row.symbol).toUpperCase(), lastPr: row.lastPrice,
       priceChangePercent: row.priceChangePercent, quoteVolume: row.quoteVolume,
-      high24h: row.highPrice, low24h: row.lowPrice
+      high24h: row.highPrice, low24h: row.lowPrice, ts: row.closeTime,
+      quoteCoin: 'USDT', contractType: 'PERPETUAL'
     }));
   // Binance exposes the current funding snapshot in one public response. It
   // is useful context during fallback, while OI remains unavailable and
@@ -4373,11 +4498,12 @@ async function fetchPaperTickersFromBinance() {
     const bySymbol = new Map((Array.isArray(fundingRows) ? fundingRows : []).map(row => [String(row.symbol || '').toUpperCase(), row.lastFundingRate]));
     data.forEach(row => { if (bySymbol.has(row.symbol)) row.fundingRate = bySymbol.get(row.symbol); });
   } catch (_) {}
-  if (!data.length) throw new Error('Binance tickers returned no Nexora symbols');
+  if (!data.length) throw new Error('Binance tickers returned no active USDT perpetual symbols');
   return {
     code: '00000', msg: 'success', data,
     _nexoraFetchedAt: new Date().toISOString(),
-    _nexoraSource: 'Binance Futures fallback'
+    _nexoraSource: 'Binance Futures fallback',
+    _nexoraActiveSymbols: [...activeSymbols]
   };
 }
 
@@ -4400,23 +4526,26 @@ async function fetchPaperTickersFromOkx() {
   if (!payload || payload.code !== '0' || !Array.isArray(payload.data)) {
     throw new Error((payload && payload.msg) || 'OKX tickers response invalid');
   }
-  const symbols = new Set(PAPER_SYMBOLS.map(sym => sym + '-USDT-SWAP'));
-  const data = payload.data.filter(row => symbols.has(String(row.instId || '').toUpperCase()))
+  const instruments = await fetchPaperOkxActiveInstruments();
+  const data = payload.data.filter(row => instruments.has(String(row.instId || '').toUpperCase()))
     .map(row => {
       const last = Number(row.last), open = Number(row.open24h);
+      const instrument = instruments.get(String(row.instId || '').toUpperCase());
       return {
-        symbol: String(row.instId).toUpperCase().replace('-USDT-SWAP', 'USDT'),
+        symbol: String(row.instId).toUpperCase(),
         lastPr: row.last,
         priceChangePercent: open > 0 ? ((last - open) / open * 100) : 0,
-        quoteVolume: row.volCcy24h || row.vol24h,
-        high24h: row.high24h, low24h: row.low24h
+        quoteVolume: okxQuoteVolumeUsdt(row, instrument, last),
+        high24h: row.high24h, low24h: row.low24h, ts: row.ts,
+        quoteCoin: 'USDT', contractType: 'PERPETUAL'
       };
     });
-  if (!data.length) throw new Error('OKX tickers returned no Nexora symbols');
+  if (!data.length) throw new Error('OKX tickers returned no active USDT perpetual symbols');
   return {
     code: '00000', msg: 'success', data,
     _nexoraFetchedAt: new Date().toISOString(),
-    _nexoraSource: 'OKX Swap fallback'
+    _nexoraSource: 'OKX Swap fallback',
+    _nexoraActiveSymbols: [...new Set([...instruments.values()].map(item => item.base))]
   };
 }
 
@@ -4437,7 +4566,7 @@ async function fetchPaperTickers() {
 const paperInstrumentCache = {loadedAt: 0, items: new Map()};
 
 async function fetchPaperInstruments() {
-  if (paperInstrumentCache.items.size && Date.now() - paperInstrumentCache.loadedAt < 6 * 60 * 60 * 1000) {
+  if (paperInstrumentCache.items.size && Date.now() - paperInstrumentCache.loadedAt < 15 * 60 * 1000) {
     return paperInstrumentCache.items;
   }
   const target = APIS['/bitget'] +
@@ -4470,6 +4599,12 @@ async function fetchPaperInstruments() {
     const tickSize = Number.isInteger(pricePlace) && pricePlace >= 0 && pricePlace <= 12
       ? priceEndStep * Math.pow(10, -pricePlace) : null;
     next.set(sym, {
+      quoteCoin: String(item.quoteCoin || '').toUpperCase(),
+      symbolType: String(item.symbolType || '').toLowerCase(),
+      symbolStatus: String(item.symbolStatus || '').toLowerCase(),
+      active: String(item.quoteCoin || '').toUpperCase() === 'USDT' &&
+        String(item.symbolType || '').toLowerCase() === 'perpetual' &&
+        String(item.symbolStatus || '').toLowerCase() === 'normal',
       tickSize: tickSize > 0 ? tickSize : null,
       pricePlace,
       sizePlace: paperFieldPresent(item.sizePlace) ? Number(item.sizePlace) : null,
@@ -4504,8 +4639,12 @@ async function runPaperScan(reason, requestedCycleKey) {
   const researchHardStop = researchDrawdownPct >= PAPER_RESEARCH_HARD_DD_PCT;
   if (!paperState.enabled || paperState.paused || paperState.killSwitch || !cfg.strategyEnabled ||
       !paperWithinTradingHours(cfg) || paperBusy) return;
+  if (paperRuntime.nextScanRetryAt && Date.now() < Date.parse(paperRuntime.nextScanRetryAt)) return;
   const cycleKey = requestedCycleKey || paperCycleKey(Date.now());
   if (paperState.lastCycleKey === cycleKey) return;
+  const scanStartedMs = Date.now();
+  const rateLimitCountAtStart = paperRuntime.rateLimitResponses;
+  let universeTelemetry = null;
   paperBusy = true;
   paperRuntime.scanAttempts += 1;
   paperRuntime.lastScanStartedAt = new Date().toISOString();
@@ -4513,17 +4652,71 @@ async function runPaperScan(reason, requestedCycleKey) {
     const priorityRequested = Array.isArray(paperState.watchlistQueue) ? paperState.watchlistQueue.slice() : [];
     const prioritySet = new Set(priorityRequested.map(item => item.sym));
     const payload = await fetchPaperTickers();
+    const universe = selectLiquidUniverse(payload && payload.data, {
+      now: Date.now(),
+      limit: PAPER_UNIVERSE_LIMIT,
+      minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
+      maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
+      activeSymbols: payload && payload._nexoraActiveSymbols
+    });
+    universeTelemetry = {
+      version: universe.version,
+      target: PAPER_UNIVERSE_LIMIT,
+      minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
+      maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
+      rawTickerCount: universe.rawTickerCount,
+      eligibleCount: universe.eligibleCount,
+      selectedCount: universe.selectedCount,
+      selectedSymbols: universe.selectedSymbols,
+      source: payload && payload._nexoraSource || 'UNKNOWN',
+      fetchedAt: payload && payload._nexoraFetchedAt || null,
+      activeMetadataCount: Array.isArray(payload && payload._nexoraActiveSymbols)
+        ? payload._nexoraActiveSymbols.length : 0,
+      rejectionCounts: universe.rejectionCounts,
+      contextCandidates: 0,
+      mtfCandidates: 0,
+      mtfEvaluated: 0,
+      mtfFull: 0,
+      mtfStale: 0,
+      mtfPartial: 0,
+      mtfUnavailable: 0,
+      filteredBeforeMtf: 0,
+      durationMs: 0,
+      rateLimitResponses: 0,
+      overrun: false
+    };
+    paperRuntime.lastUniverseScan = {...universeTelemetry};
+    if (!universe.selectedCount) {
+      throw new Error('No valid liquid USDT perpetual tickers: ' +
+        JSON.stringify(universe.rejectionCounts));
+    }
     const instruments = await fetchPaperInstruments().catch(error => {
       console.error('[paper] contract precision unavailable:', error.message);
       return new Map();
     });
-    let ranked = applyPaperInstrumentMetadata(buildPaperPairs(payload), instruments);
+    const selectedPayload = {
+      ...payload,
+      data: universe.selectedRows,
+      _nexoraUniverseVersion: universe.version
+    };
+    let ranked = applyPaperInstrumentMetadata(buildPaperPairs(selectedPayload), instruments);
+    universeTelemetry.contextCandidates = ranked.length;
+    universeTelemetry.filteredBeforeMtf = Math.max(0, universe.selectedCount - ranked.length);
     ranked.forEach(pair => { pair.watchlistPriority = prioritySet.has(pair.sym); });
     ranked.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     // MTF is part of eligibility, not a post-selection decoration. Enrich the
     // strongest market-context candidates before choosing the three orders.
     const mtfCandidates = ranked.slice(0, PAPER_MTF_MAX_CANDIDATES);
+    universeTelemetry.mtfCandidates = mtfCandidates.length;
+    universeTelemetry.mtfEvaluated = mtfCandidates.length;
     await enrichPaperMtfBatch(mtfCandidates);
+    mtfCandidates.forEach(pair => {
+      if (pair.mtfStatus === 'FULL') universeTelemetry.mtfFull += 1;
+      else if (pair.mtfStatus === 'STALE') universeTelemetry.mtfStale += 1;
+      else if (pair.mtfStatus === 'PARTIAL') universeTelemetry.mtfPartial += 1;
+      else universeTelemetry.mtfUnavailable += 1;
+    });
+    paperRuntime.lastUniverseScan = {...universeTelemetry};
     ranked = mtfCandidates.sort((a, b) => Number(b.watchlistPriority) - Number(a.watchlistPriority) || b.rank - a.rank);
     // Strategy Lab evaluates the same enriched live-market snapshot.  Its
     // ledgers are independent from strict/research and failures are isolated
@@ -4700,6 +4893,8 @@ async function runPaperScan(reason, requestedCycleKey) {
         realizedPnlTp1: 0, realizedPnl: 0, realizedPnlFinal: 0,
         fillMethod: null, lastProcessedCandleAt: null,
         createdAt: Date.now(), openedAt: null, cycleKey,
+        universeVersion: pair.universeVersion || UNIVERSE_VERSION,
+        tickerAt: pair.tickerAt || null,
         score: pair.sc, tier: pair.tier, chg: pair.chg, fund: pair.fund, oi: pair.oi,
         fundingAvailable: !!pair.fundingAvailable, oiAvailable: !!pair.oiAvailable,
         volumeAvailable: !!pair.volumeAvailable, volume: pair.volume, volumeRatio: pair.volumeRatio, mtf: pair.mtf,
@@ -4741,6 +4936,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperState.lastCycleKey = cycleKey;
     paperState.lastScanAt = new Date().toISOString();
     paperState.lastError = null;
+    paperRuntime.nextScanRetryAt = null;
     paperRuntime.scansSucceeded += 1;
     paperRuntime.lastScanCompletedAt = paperState.lastScanAt;
     paperRuntime.lastScanError = null;
@@ -4763,6 +4959,16 @@ async function runPaperScan(reason, requestedCycleKey) {
       : (!placed.length ? (hasMtfEligible ? 'NO_VALID_UNALLOCATED_SETUP' : 'NO_VALID_MTF_SETUP') :
         placed.length < profilePerScan ? 'PARTIAL_CAPACITY' : null);
     paperState.lastBlockReason = blockReason;
+    universeTelemetry.durationMs = Math.max(0, Date.now() - scanStartedMs);
+    universeTelemetry.rateLimitResponses = Math.max(0,
+      paperRuntime.rateLimitResponses - rateLimitCountAtStart);
+    universeTelemetry.overrun = universeTelemetry.durationMs >= PAPER_INTERVAL_MS;
+    paperRuntime.lastScanDurationMs = universeTelemetry.durationMs;
+    if (universeTelemetry.overrun) {
+      paperRuntime.lastScanOverruns += 1;
+      console.error('[paper] scan exceeded 15M interval', universeTelemetry.durationMs + 'ms');
+    }
+    paperRuntime.lastUniverseScan = {...universeTelemetry};
     if (monitoringSignals.length) {
       paperState.monitoringSignals = monitoringSignals
         .concat(Array.isArray(paperState.monitoringSignals) ? paperState.monitoringSignals : [])
@@ -4770,6 +4976,8 @@ async function runPaperScan(reason, requestedCycleKey) {
     }
     paperState.recentScans.unshift({
       cycleKey, at: paperState.lastScanAt, reason: reason || '15M close',
+      universe: universeTelemetry,
+      durationMs: universeTelemetry.durationMs,
       watchlistPriority: ranked.filter(pair => pair.watchlistPriority).map(pair => pair.sym),
       candidates: ranked.length,
       selected: researchMode ? placed : monitoringGuard ? monitoringSignals : ranked.slice(0, 10).map(paperCandidateView),
@@ -4810,6 +5018,15 @@ async function runPaperScan(reason, requestedCycleKey) {
     paperRuntime.scansFailed += 1;
     paperRuntime.lastScanErrorAt = new Date().toISOString();
     paperRuntime.lastScanError = error.message;
+    paperRuntime.nextScanRetryAt = new Date(Date.now() + PAPER_SCAN_FAILURE_RETRY_MS).toISOString();
+    if (universeTelemetry) {
+      universeTelemetry.rateLimitResponses = Math.max(0,
+        paperRuntime.rateLimitResponses - rateLimitCountAtStart);
+      universeTelemetry.durationMs = Math.max(0, Date.now() - scanStartedMs);
+      universeTelemetry.overrun = universeTelemetry.durationMs >= PAPER_INTERVAL_MS;
+      universeTelemetry.error = error.message;
+      paperRuntime.lastUniverseScan = {...universeTelemetry, status: 'FAILED'};
+    }
     paperState.lastError = error.message;
     savePaperState();
     console.error('[paper] scan failed:', error.message);
@@ -4819,6 +5036,7 @@ async function runPaperScan(reason, requestedCycleKey) {
       15 * 60 * 1000
     );
   } finally {
+    paperRuntime.lastScanDurationMs = Math.max(0, Date.now() - scanStartedMs);
     paperBusy = false;
   }
 }
@@ -5100,7 +5318,7 @@ function paperReplayMetrics(trades) {
 async function paperReplay(query) {
   const rawSymbol = String(paperReplayParam(query, 'symbol') || 'BTC').toUpperCase()
     .replace(/[^A-Z0-9]/g, '');
-  const sym = PAPER_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'BTC';
+  const sym = isEligibleBaseSymbol(rawSymbol) ? rawSymbol : 'BTC';
   const requestedDays = Number(paperReplayParam(query, 'days'));
   const days = Math.max(1, Math.min(7, Number.isFinite(requestedDays) ? requestedDays : 3));
   const endAt = Date.now();
@@ -5450,6 +5668,29 @@ function paperStatus(options) {
     : dailyGuard ? 'Daily loss guard is active; new entries are paused while existing positions remain monitored.'
     : entryState === 'ENTRY_ACTIVE' ? 'New paper entries are allowed.' : 'Paper service is not accepting new entries.';
   const lastScan = Array.isArray(paperState.recentScans) ? paperState.recentScans[0] : null;
+  const lastUniverse = lastScan && lastScan.universe || paperRuntime.lastUniverseScan || null;
+  const universeSummary = lastUniverse ? {
+    status: lastUniverse.status || 'OK',
+    version: lastUniverse.version || UNIVERSE_VERSION,
+    target: Number(lastUniverse.target || PAPER_UNIVERSE_LIMIT),
+    rawTickerCount: Number(lastUniverse.rawTickerCount || 0),
+    eligibleCount: Number(lastUniverse.eligibleCount || 0),
+    selectedCount: Number(lastUniverse.selectedCount || 0),
+    contextCandidates: Number(lastUniverse.contextCandidates || 0),
+    mtfCandidates: Number(lastUniverse.mtfCandidates || 0),
+    mtfEvaluated: Number(lastUniverse.mtfEvaluated || 0),
+    mtfFull: Number(lastUniverse.mtfFull || 0),
+    mtfStale: Number(lastUniverse.mtfStale || 0),
+    mtfPartial: Number(lastUniverse.mtfPartial || 0),
+    mtfUnavailable: Number(lastUniverse.mtfUnavailable || 0),
+    source: lastUniverse.source || null,
+    fetchedAt: lastUniverse.fetchedAt || null,
+    durationMs: Number(lastUniverse.durationMs || 0),
+    rateLimitResponses: Number(lastUniverse.rateLimitResponses || 0),
+    overrun: !!lastUniverse.overrun,
+    error: lastUniverse.error || null,
+    rejectionCounts: lastUniverse.rejectionCounts || {}
+  } : null;
   return {
     ok: true, service: 'nexora-paper-bot', buildId: PAPER_BUILD_ID, enabled: paperState.enabled,
     running: paperStarted, paused: !!paperState.paused, killSwitch: !!paperState.killSwitch,
@@ -5502,7 +5743,8 @@ function paperStatus(options) {
       researchPlaced: Array.isArray(lastScan.researchPlaced) ? lastScan.researchPlaced.length : 0,
       rejected: Array.isArray(lastScan.rejected) ? lastScan.rejected.length : 0,
       monitoringOnly: Array.isArray(lastScan.monitoringOnly) ? lastScan.monitoringOnly.length : 0,
-      blockReason: lastScan.capacity && lastScan.capacity.blockReason || null
+      blockReason: lastScan.capacity && lastScan.capacity.blockReason || null,
+      universe: universeSummary
     } : null,
     equityPeak: Number(equityPeak.toFixed(2)),
     drawdownPct: Number(drawdownPct.toFixed(2)),
@@ -5679,6 +5921,13 @@ function paperDiagnostics() {
       maxHighCorrelationPositions: PAPER_MAX_HIGH_CORR_POSITIONS,
       maxDailyLossR: cfg.maxDailyLossR, tp1ClosePct: cfg.tp1ClosePct,
       maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
+      universe: {
+        version: UNIVERSE_VERSION, target: PAPER_UNIVERSE_LIMIT,
+        minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
+        maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
+        mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
+        scanIntervalMs: PAPER_INTERVAL_MS
+      },
       research: {
         enabled: paperResearchEnabled(), perScan: PAPER_RESEARCH_PER_SCAN,
         riskPct: PAPER_RESEARCH_RISK_PCT, maxActive: PAPER_RESEARCH_MAX_ACTIVE,
@@ -5689,8 +5938,10 @@ function paperDiagnostics() {
     },
     runtime: {
       ...paperRuntime,
+      lastUniverseScan: paperRuntime.lastUniverseScan ? {...paperRuntime.lastUniverseScan} : null,
       rejectionCounts: {...paperRuntime.rejectionCounts}
     },
+    lastScanSummary: status.lastScanSummary,
     sources: sourceHealthView(),
     bot: {
       enabled: paperState.enabled, running: paperStarted, paused: !!paperState.paused,
@@ -5919,6 +6170,7 @@ function paperHistoryFilters(query) {
     volumeBucket: String(get('volumeBucket') || get('volume') || '').trim().toUpperCase(),
     marketTag: String(get('marketTag') || get('regime') || '').trim().toUpperCase(),
     strategyVersion: String(get('strategyVersion') || get('strategy') || '').trim(),
+    universeVersion: String(get('universeVersion') || get('universe') || '').trim(),
     cohortId: String(get('cohortId') || get('cohort') || '').trim(),
     from: String(get('from') || '').trim(),
     to: String(get('to') || '').trim()
@@ -5946,6 +6198,7 @@ function paperHistoryMatches(trade, filters) {
         !trade.analysisTags.market.includes(filters.marketTag)) return false;
   }
   if (filters.strategyVersion && String(trade.strategyVersion || paperTradeStrategyVersion(trade)) !== filters.strategyVersion) return false;
+  if (filters.universeVersion && String(trade.universeVersion || 'LEGACY') !== filters.universeVersion) return false;
   if (filters.cohortId && String(trade.cohortId || '') !== filters.cohortId) return false;
   const rawDate = trade.closedAt || trade.createdAt || '';
   const date = typeof rawDate === 'number' || /^\d+$/.test(String(rawDate))
@@ -6087,6 +6340,7 @@ function paperClosedTradeAnalysis(query) {
     id: trade.id, closedAt: trade.closedAt || null, symbol: trade.sym || null,
     direction: trade.dir || null, outcome: trade.outcome || null,
     strategyVersion: trade.strategyVersion || paperTradeStrategyVersion(trade),
+    universeVersion: trade.universeVersion || 'LEGACY',
     cohortId: trade.cohortId || null, timeframe: trade.timeframe || trade.tf || '15M',
     entryLimit: trade.entryLimit == null ? null : trade.entryLimit,
     entryActual: trade.entryActual == null ? null : trade.entryActual,
@@ -6144,6 +6398,7 @@ function paperClosedTradeAnalysis(query) {
       timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all',
       fundingSign: filters.fundingSign || 'all', volumeBucket: filters.volumeBucket || 'all',
       marketTag: filters.marketTag || 'all', strategyVersion: filters.strategyVersion || 'all',
+      universeVersion: filters.universeVersion || 'all',
       cohortId: filters.cohortId || 'all'},
     population: {orders: all.length, closed: closed.length, cancelled: all.length - closed.length,
       wins: wins.length, losses: losses.length, breakeven: Math.max(0, closed.length - wins.length - losses.length)},
@@ -6357,6 +6612,7 @@ function paperStats(query) {
     byTimeframe: paperGroupStats(closed, trade => trade.timeframe || trade.tf),
     byMode: paperGroupStats(closed, trade => trade.signalMode || trade.mode),
     byStrategyVersion: paperGroupStats(closed, trade => trade.strategyVersion || paperTradeStrategyVersion(trade)),
+    byUniverseVersion: paperGroupStats(closed, trade => trade.universeVersion || 'LEGACY'),
     byCohort: paperGroupStats(closed, trade => trade.cohortId),
     byCandlePattern: paperGroupStats(closed, trade => trade.candlePattern),
     byConfluence: paperGroupStats(closed, trade => {
@@ -6406,6 +6662,7 @@ function paperHistory(query) {
       outcome: filters.outcome || 'all', fundingSign: filters.fundingSign || 'all',
       volumeBucket: filters.volumeBucket || 'all', marketTag: filters.marketTag || 'all',
       strategyVersion: filters.strategyVersion || 'all',
+      universeVersion: filters.universeVersion || 'all',
       cohortId: filters.cohortId || 'all', direction: filters.direction || 'all', from: filters.from, to: filters.to},
     total: closedTrades.length
   };
@@ -6461,7 +6718,7 @@ function paperExportCsv(query) {
   const rows = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES)
     .filter(trade => paperHistoryMatches(trade, filters));
   const headers = ['closedAt', 'id', 'symbol', 'direction', 'status', 'outcome',
-    'strategyVersion', 'cohortId', 'timeframe', 'mode', 'entryLimit', 'entryActual',
+    'strategyVersion', 'universeVersion', 'cohortId', 'timeframe', 'mode', 'entryLimit', 'entryActual',
     'exitPrice', 'sl', 'tp1', 'tp2', 'score', 'confluencePct', 'r', 'pnl',
     'closeReason', 'createdAt', 'openedAt', 'dataQuality', 'source',
     'analysisStatus', 'analysisSummary', 'exitTags', 'setupTags', 'marketTags'];
@@ -6469,7 +6726,7 @@ function paperExportCsv(query) {
   rows.forEach(trade => {
     lines.push([
       trade.closedAt, trade.id, trade.sym, trade.dir, trade.status, trade.outcome,
-      trade.strategyVersion || paperTradeStrategyVersion(trade), trade.cohortId,
+      trade.strategyVersion || paperTradeStrategyVersion(trade), trade.universeVersion || 'LEGACY', trade.cohortId,
       trade.timeframe || trade.tf, trade.signalMode || trade.mode,
       trade.entryLimit, trade.entryActual, trade.exitPrice, trade.sl, trade.tp1,
       trade.tp2, trade.score, trade.confluencePct, trade.r, trade.pnl,
@@ -6796,7 +7053,7 @@ const server = http.createServer(async (req, res) => {
     }
     const symbol = String(requestUrl.searchParams.get('symbol') || '').toUpperCase();
     const hours = Number(requestUrl.searchParams.get('hours') || 24);
-    if (!/^[A-Z0-9]{2,15}$/.test(symbol) || !PAPER_SYMBOLS.includes(symbol)) {
+    if (!/^[A-Z0-9]{2,15}$/.test(symbol) || !isEligibleBaseSymbol(symbol)) {
       send(res, 400, JSON.stringify({ok: false, error: 'Unsupported futures symbol'}));
       return;
     }
