@@ -142,6 +142,25 @@ test('upstream 429, 5xx, abort timeout and Retry-After stay bounded without taki
       assert.equal(health.ok, true);
       assert.equal(health.paperBot, false);
 
+      const summaryResponse = await request('http://127.0.0.1:' + port + '/paper/summary');
+      assert.equal(summaryResponse.status, 200);
+      const summaryText = await summaryResponse.text();
+      const summary = JSON.parse(summaryText);
+      assert.ok(Buffer.byteLength(summaryText, 'utf8') < 15000,
+        'compact paper summary should not include long Strategy Lab scan history');
+      assert.equal(Object.hasOwn(summary.strategyLab, 'recentScans'), false);
+
+      const compactLabResponse = await request('http://127.0.0.1:' + port + '/paper/strategy-lab?details=false');
+      assert.equal(compactLabResponse.status, 200);
+      const compactLab = await compactLabResponse.json();
+      assert.equal(Object.hasOwn(compactLab, 'recentScans'), false);
+
+      const historyResponse = await request('http://127.0.0.1:' + port + '/paper/history?limit=1&offset=0');
+      assert.equal(historyResponse.status, 200);
+      const history = await historyResponse.json();
+      assert.equal(history.pagination.limit, 1);
+      assert.equal(history.pagination.returned, 0);
+
       const mixed = await request('http://127.0.0.1:' + port + '/bitget/test?case=mixed');
       assert.equal(mixed.status, 200);
       assert.deepEqual(await mixed.json(), {scenario: 'mixed', count: 3});

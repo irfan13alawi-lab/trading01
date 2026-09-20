@@ -72,7 +72,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.2-liquid-top60-mtf-2026-09-21');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.3-liquid-top60-light-summary-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -3349,7 +3349,8 @@ function paperLabAccountSummary(account) {
   };
 }
 
-function paperStrategyLabSummary(includeTrades) {
+function paperStrategyLabSummary(includeTrades, options) {
+  const includeHistory = !options || options.history !== false;
   const lab = paperState.strategyLab || paperLabDefaultState();
   const accounts = Object.values(lab.accounts || {}).map(paperLabAccountSummary);
   const activeTrades = Object.values(lab.accounts || {}).flatMap(account =>
@@ -3365,8 +3366,12 @@ function paperStrategyLabSummary(includeTrades) {
     totalPnl: Number(accounts.reduce((sum, item) => sum + item.pnl, 0).toFixed(2)),
     totalOrders: accounts.reduce((sum, item) => sum + item.closed + item.active, 0),
     totalClosed: accounts.reduce((sum, item) => sum + item.closed, 0),
-    accounts, activeTrades, recentScans: lab.recentScans.slice(0, 20),
-    overlapEvents: lab.overlapEvents.slice(0, 50), lastScanAt: lab.lastScanAt, lastCycleKey: lab.lastCycleKey,
+    accounts, activeTrades,
+    ...(includeHistory ? {
+      recentScans: lab.recentScans.slice(0, 20),
+      overlapEvents: lab.overlapEvents.slice(0, 50)
+    } : {}),
+    lastScanAt: lab.lastScanAt, lastCycleKey: lab.lastCycleKey,
     lastError: lab.lastError,
     definition: {
       data: 'live futures ticker + 1m/15m/30m/1h/4h candles',
@@ -5551,6 +5556,7 @@ async function paperReplay(query) {
 function paperStatus(options) {
   const includeDetails = !options || options.details !== false;
   const includeStats = !options || options.stats !== false;
+  const includeLabHistory = !options || options.labHistory !== false;
   const cfg = paperSettings();
   const activeRaw = paperState.activeTrades.filter(paperIsActive);
   const active = includeDetails ? activeRaw.map(paperTradeView) : null;
@@ -5751,7 +5757,7 @@ function paperStatus(options) {
       stats: researchStats ? researchStats.metrics : null,
       statsSample: researchStats ? researchStats.sample : null
     },
-    strategyLab: paperStrategyLabSummary(includeDetails),
+    strategyLab: paperStrategyLabSummary(includeDetails, {history: includeLabHistory}),
     monitoringSignalCount: Array.isArray(paperState.monitoringSignals) ? paperState.monitoringSignals.length : 0,
     lastScanSummary: lastScan ? {
       cycleKey: lastScan.cycleKey || null, at: lastScan.at || null,
@@ -5918,7 +5924,7 @@ function paperStatus(options) {
 
 function paperDiagnostics() {
   const cfg = paperSettings();
-  const status = paperStatus({details: false, stats: false});
+  const status = paperStatus({details: false, stats: false, labHistory: false});
   return {
     ok: true,
     service: 'nexora-paper-bot', buildId: PAPER_BUILD_ID,
@@ -6670,8 +6676,16 @@ function paperStats(query) {
 
 function paperHistory(query) {
   const filters = paperHistoryFilters(query);
+  const get = key => query && typeof query.get === 'function' ? query.get(key) : query && query[key];
   const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES);
-  const closedTrades = all.filter(trade => paperHistoryMatches(trade, filters));
+  const filtered = all.filter(trade => paperHistoryMatches(trade, filters));
+  const rawLimit = get('limit');
+  const parsedLimit = rawLimit == null || rawLimit === '' ? PAPER_MAX_CLOSED_TRADES : Math.floor(Number(rawLimit));
+  const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(PAPER_MAX_CLOSED_TRADES, parsedLimit)) : PAPER_MAX_CLOSED_TRADES;
+  const rawOffset = get('offset');
+  const parsedOffset = rawOffset == null || rawOffset === '' ? 0 : Math.floor(Number(rawOffset));
+  const offset = Number.isFinite(parsedOffset) ? Math.max(0, parsedOffset) : 0;
+  const closedTrades = filtered.slice(offset, offset + limit);
   return {
     ok: true,
     activeTrades: paperState.activeTrades.filter(paperIsActive).map(paperTradeView),
@@ -6684,7 +6698,8 @@ function paperHistory(query) {
       strategyVersion: filters.strategyVersion || 'all',
       universeVersion: filters.universeVersion || 'all',
       cohortId: filters.cohortId || 'all', direction: filters.direction || 'all', from: filters.from, to: filters.to},
-    total: closedTrades.length
+    total: filtered.length,
+    pagination: {limit, offset, returned: closedTrades.length, hasMore: offset + closedTrades.length < filtered.length}
   };
 }
 
@@ -6819,7 +6834,7 @@ const server = http.createServer(async (req, res) => {
       send(res, 405, JSON.stringify({error: 'Method not allowed'}));
       return;
     }
-    send(res, 200, JSON.stringify(paperStatus({details: false, stats: false})));
+    send(res, 200, JSON.stringify(paperStatus({details: false, stats: false, labHistory: false})));
     return;
   }
   if (requestUrl.pathname === '/paper/details') {
@@ -6835,7 +6850,7 @@ const server = http.createServer(async (req, res) => {
       send(res, 405, JSON.stringify({error: 'Method not allowed'}));
       return;
     }
-    send(res, 200, JSON.stringify(paperStatus({details: false, stats: false})));
+    send(res, 200, JSON.stringify(paperStatus({details: false, stats: false, labHistory: false})));
     return;
   }
   if (requestUrl.pathname === '/api/status') {
@@ -7125,8 +7140,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const includeTrades = requestUrl.searchParams.get('details') !== 'false';
+    const includeHistory = includeTrades || requestUrl.searchParams.get('history') === 'true';
     try {
-      send(res, 200, JSON.stringify(paperStrategyLabSummary(includeTrades)));
+      send(res, 200, JSON.stringify(paperStrategyLabSummary(includeTrades, {history: includeHistory})));
     } catch (error) {
       send(res, 500, JSON.stringify({ok: false, error: error.message || 'Strategy Lab unavailable'}));
     }
