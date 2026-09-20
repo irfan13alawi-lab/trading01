@@ -41,9 +41,9 @@ const PAPER_MIN_SIGNAL_SCORE = Math.max(50, Math.min(95,
     ? Number(process.env.PAPER_MIN_SIGNAL_SCORE) : 70));
 const PAPER_SIGNAL_MODE = String(process.env.PAPER_SIGNAL_MODE || 'WEIGHTED').toUpperCase() === 'CLASSIC'
   ? 'CLASSIC' : 'WEIGHTED';
-const PAPER_MTF_CONCURRENCY = Math.max(2, Math.min(12,
+const PAPER_MTF_CONCURRENCY = Math.max(1, Math.min(4,
   Number.isFinite(Number(process.env.PAPER_MTF_CONCURRENCY))
-    ? Number(process.env.PAPER_MTF_CONCURRENCY) : 6));
+    ? Number(process.env.PAPER_MTF_CONCURRENCY) : 2));
 // Keep the scanner universe and MTF cap in lockstep. The former env clamp
 // stopped at 40, so an old PAPER_MTF_MAX_CANDIDATES=40 could silently undo
 // the expanded scan. This trial build intentionally evaluates up to 60.
@@ -70,7 +70,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3-liquid-top60-2026-09-21');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.1-liquid-top60-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -4668,6 +4668,7 @@ async function runPaperScan(reason, requestedCycleKey) {
       eligibleCount: universe.eligibleCount,
       selectedCount: universe.selectedCount,
       selectedSymbols: universe.selectedSymbols,
+      concurrency: PAPER_MTF_CONCURRENCY,
       source: payload && payload._nexoraSource || 'UNKNOWN',
       fetchedAt: payload && payload._nexoraFetchedAt || null,
       activeMetadataCount: Array.isArray(payload && payload._nexoraActiveSymbols)
@@ -5676,6 +5677,7 @@ function paperStatus(options) {
     rawTickerCount: Number(lastUniverse.rawTickerCount || 0),
     eligibleCount: Number(lastUniverse.eligibleCount || 0),
     selectedCount: Number(lastUniverse.selectedCount || 0),
+    concurrency: Number(lastUniverse.concurrency || PAPER_MTF_CONCURRENCY),
     contextCandidates: Number(lastUniverse.contextCandidates || 0),
     mtfCandidates: Number(lastUniverse.mtfCandidates || 0),
     mtfEvaluated: Number(lastUniverse.mtfEvaluated || 0),
@@ -5926,6 +5928,7 @@ function paperDiagnostics() {
         minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
         maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
         mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
+        mtfConcurrency: PAPER_MTF_CONCURRENCY,
         scanIntervalMs: PAPER_INTERVAL_MS
       },
       research: {

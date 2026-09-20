@@ -6476,9 +6476,10 @@ function renderPaperUniverseTelemetry(universe) {
     +' · MTF '+Number(universe.mtfEvaluated||0)+' diperiksa ('+Number(universe.mtfFull||0)+' full, '
       +Number(universe.mtfPartial||0)+' partial, '+Number(universe.mtfStale||0)+' stale, '
       +Number(universe.mtfUnavailable||0)+' unavailable)'
+    +' · parallel '+Number(universe.concurrency||2)
     +' · sumber '+sourceEsc(universe.source||'--')
     +' · durasi '+(Number(universe.durationMs||0)/1000).toFixed(1)+'s'
-    +' · 429 '+Number(universe.rateLimitResponses||0)
+    +' · 429 (jendela scan) '+Number(universe.rateLimitResponses||0)
     +(universe.overrun?' · <span style="color:#f85149;">melewati interval 15 menit</span>':'')
     +'<br><span class="muted">Penolakan ticker terbanyak: '+topRejects+sourceEsc(insufficient)+'</span>'
     +(universe.error?'<br><span style="color:#f85149;">Error scan: '+sourceEsc(universe.error)+'</span>':'');
