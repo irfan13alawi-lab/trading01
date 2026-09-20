@@ -277,6 +277,11 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .vps-analysis-table table{margin:0;min-width:560px;}.vps-analysis-table th{position:sticky;top:0;background:#111722;z-index:1;}
 .vps-analysis-detail{max-height:430px;overflow:auto;}.vps-analysis-detail table{min-width:980px;}
 .vps-analysis-detail tr:hover{background:rgba(88,166,255,.06);}
+.vps-lab-note{font-size:10px;color:var(--text3);line-height:1.6;margin:0 0 10px;padding:8px 10px;border:1px solid rgba(63,185,80,.2);border-radius:6px;background:rgba(63,185,80,.04);}
+.vps-lab-table{max-height:360px;overflow:auto;border:1px solid rgba(255,255,255,.04);border-radius:5px;}
+.vps-lab-table table{margin:0;min-width:980px;}.vps-lab-table th{position:sticky;top:0;background:#111722;z-index:1;}
+.vps-lab-status{font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;letter-spacing:.04em;}
+.vps-lab-status.ACTIVE{color:#3fb950;background:rgba(63,185,80,.13);}.vps-lab-status.RISK_WARNING{color:#e3b341;background:rgba(227,179,65,.13);}.vps-lab-status.EMERGENCY_STOP{color:#f85149;background:rgba(248,81,73,.13);}
 @media(max-width:720px){.equity-summary{grid-template-columns:repeat(2,1fr);gap:8px;}.equity-stat-card{padding:10px 8px;}.equity-stat-value{font-size:18px;}.drawdown-banner,.dd-banner{margin-left:10px;margin-right:10px;}}
 .vps-log-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:6px;margin:7px 0;}
 .vps-log-card{min-width:0;padding:8px 9px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:2px;}
@@ -725,6 +730,16 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div><div class="muted" style="margin-bottom:4px;">Cohort, exit &amp; daily result</div><div id="vps-analysis-cohorts" class="vps-analysis-table"></div></div>
     </div>
     <div style="margin-top:10px;"><div class="muted" style="margin-bottom:4px;">Closed trade audit trail</div><div id="vps-analysis-details" class="vps-analysis-table vps-analysis-detail"></div></div>
+  </div>
+
+  <div class="card" id="vps-strategy-lab-panel">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-flask"></i> Strategy Lab — Shadow Paper <span class="muted" id="vps-lab-asof">Waiting...</span></div>
+      <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh Lab</button>
+    </div>
+    <div class="vps-lab-note" id="vps-lab-note">Lima strategi memakai data futures live dan limit execution simulasi. Masing-masing dimulai dari $200 dengan equity, drawdown, posisi, dan statistik terpisah. Tidak ada order broker/live exchange.</div>
+    <div class="vps-log-strip" id="vps-lab-kpis"></div>
+    <div id="vps-lab-table" class="vps-lab-table"></div>
   </div>
 
   <div class="card" style="padding:10px 12px;">
@@ -6127,6 +6142,10 @@ function pollPaperStats() {
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(data){ if(data && data.ok) renderVpsClosedTradeAnalysis(data); })
     .catch(function(){ /* detailed analysis is auxiliary; keep the last known view */ });
+  fetch(PAPER_API + '/strategy-lab?details=false', {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data){ if(data && data.ok) renderStrategyLab(data); })
+    .catch(function(){ /* Strategy Lab is auxiliary; keep the last known view */ });
 }
 
 function vpsHistoryQuery(monthly) {
@@ -6378,6 +6397,34 @@ function renderVpsClosedTradeAnalysis(data) {
         return '<tr><td>'+sourceEsc(vpsFmtAt(t.closedAt))+'</td><td><b>'+sourceEsc(t.symbol||'--')+'</b> '+sourceEsc(t.direction||'--')+'<br><span class="muted">'+sourceEsc(t.strategyVersion||'--')+'</span></td><td style="color:'+resultColor+';font-weight:700;">'+sourceEsc(t.outcome||'--')+'<br><span class="muted">'+sourceEsc(t.closeReason||'--')+'</span></td><td>'+vpsAnalysisSigned(t.r,2)+'R<br>$'+Number(t.pnl||0).toFixed(2)+'</td><td>'+sourceEsc(t.entryActual==null?t.entryLimit:t.entryActual)+' → '+sourceEsc(t.exitPrice==null?'--':t.exitPrice)+'</td><td>'+sourceEsc(t.sl==null?'--':t.sl)+' / '+sourceEsc(t.tp1==null?'--':t.tp1)+' / '+sourceEsc(t.tp2==null?'--':t.tp2)+'</td><td title="'+sourceEsc(factors)+'">'+sourceEsc(factors)+'<br><span class="muted">'+sourceEsc(tagsText)+'</span></td><td title="'+sourceEsc(t.summary||'')+'">'+sourceEsc(t.summary||'No rule-based summary')+'</td></tr>';
       }).join('')+'</tbody></table>';
   }
+}
+
+function renderStrategyLab(data) {
+  var asOf=document.getElementById('vps-lab-asof');
+  var note=document.getElementById('vps-lab-note');
+  var kpis=document.getElementById('vps-lab-kpis');
+  var table=document.getElementById('vps-lab-table');
+  if(!data || !data.ok) return;
+  var accounts=Array.isArray(data.accounts)?data.accounts:[];
+  if(asOf) asOf.textContent='As of '+vpsFmtAt(data.asOf)+' · '+Number(data.strategyCount||accounts.length)+' strategies';
+  if(note) note.textContent='Mode '+String(data.mode||'SHADOW')+' · live ticker/candle data · shadow limit execution · starting equity $'+Number(data.startingEquity||200).toFixed(2)+' per strategy · no live broker order'+(data.lastError?' · error: '+data.lastError:'');
+  if(kpis) {
+    var totalPnl=Number(data.totalPnl||0);
+    kpis.innerHTML=[
+      ['Strategies',Number(data.strategyCount||0),'#58a6ff','independent ledgers'],
+      ['Total equity','$'+Number(data.totalEquity||0).toFixed(2),totalPnl<0?'#f85149':'#3fb950','from $'+(Number(data.startingEquity||200)*Number(data.strategyCount||0)).toFixed(2)],
+      ['Total PnL',(totalPnl>=0?'+':'')+'$'+totalPnl.toFixed(2),totalPnl<0?'#f85149':'#3fb950','shadow only'],
+      ['Orders',Number(data.totalOrders||0),'#c9d1d9','closed + active'],
+      ['Closed',Number(data.totalClosed||0),'#c9d1d9','sample grows each scan']
+    ].map(function(item){return '<div class="vps-log-card"><div class="vps-log-label">'+sourceEsc(item[0])+'</div><div class="vps-log-value" style="color:'+item[2]+';">'+sourceEsc(String(item[1]))+'</div><div class="vps-log-detail">'+sourceEsc(item[3])+'</div></div>';}).join('');
+  }
+  if(!table) return;
+  if(!accounts.length) { table.innerHTML='<div class="muted" style="padding:8px;">Belum ada akun Strategy Lab.</div>'; return; }
+  table.innerHTML='<table><thead><tr><th>Strategy</th><th>Status</th><th>Equity</th><th>PnL</th><th>W/L</th><th>Win%</th><th>Net R</th><th>PF</th><th>DD</th><th>Active</th><th>Last scan</th></tr></thead><tbody>'+accounts.map(function(a){
+    var pnl=Number(a.pnl||0), status=String(a.status||'ACTIVE');
+    var color=pnl<0?'#f85149':'#3fb950';
+    return '<tr><td><b>'+sourceEsc(a.label||a.strategyId)+'</b><br><span class="muted">'+sourceEsc(a.strategyId||'--')+'</span></td><td><span class="vps-lab-status '+sourceEsc(status)+'">'+sourceEsc(status)+'</span></td><td>$'+Number(a.equity||0).toFixed(2)+'<br><span class="muted">start $'+Number(a.startingEquity||200).toFixed(0)+'</span></td><td style="color:'+color+';">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+'<br><span class="muted">'+(Number(a.returnPct||0)>=0?'+':'')+Number(a.returnPct||0).toFixed(2)+'%</span></td><td>'+Number(a.wins||0)+' / '+Number(a.losses||0)+'</td><td>'+Number(a.winRate||0).toFixed(1)+'%</td><td style="color:'+color+';">'+(Number(a.netR||0)>=0?'+':'')+Number(a.netR||0).toFixed(2)+'R</td><td>'+(a.profitFactor==null?'--':Number(a.profitFactor).toFixed(2))+'</td><td>'+Number(a.drawdownPct||0).toFixed(2)+'%</td><td>'+Number(a.active||0)+' <span class="muted">('+Number(a.pending||0)+' pending)</span></td><td>'+sourceEsc(vpsFmtAt(a.lastScanAt))+'</td></tr>';
+  }).join('')+'</tbody></table>';
 }
 
 function renderPaperDiagnostics(data) {
