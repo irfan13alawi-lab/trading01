@@ -51,7 +51,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.0-research-audit-2026-09-20');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.1-close-analysis-2026-09-20');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -5087,6 +5087,212 @@ function paperGroupStats(trades, keyFn) {
   })).sort((a, b) => b.netR - a.netR);
 }
 
+function paperAnalysisValue(trade, field, fallback) {
+  const snapshot = trade && trade.analysisSnapshot && typeof trade.analysisSnapshot === 'object'
+    ? trade.analysisSnapshot : {};
+  const market = snapshot.market && typeof snapshot.market === 'object' ? snapshot.market : {};
+  const indicators = snapshot.indicators && typeof snapshot.indicators === 'object' ? snapshot.indicators : {};
+  const setup = snapshot.setup && typeof snapshot.setup === 'object' ? snapshot.setup : {};
+  const direct = trade && trade[field];
+  if (direct != null && direct !== '') return direct;
+  if (field === 'rsi') return indicators.rsi != null ? indicators.rsi : fallback;
+  if (field === 'atrPct') return trade && trade.atrPct != null ? trade.atrPct : (indicators.atrPct != null ? indicators.atrPct : fallback);
+  if (field === 'mtfAlignment') return setup.mtfAlignment != null ? setup.mtfAlignment : fallback;
+  if (field === 'confluencePct') return setup.confluencePct != null ? setup.confluencePct : fallback;
+  if (field === 'volumeRatio') return market.volumeRatio != null ? market.volumeRatio : fallback;
+  if (field === 'fund') return market.funding != null ? market.funding : fallback;
+  if (field === 'oi') return market.oiDeltaPct != null ? market.oiDeltaPct : fallback;
+  if (field === 'regime') return market.regime || fallback;
+  return fallback;
+}
+
+function paperAnalysisBucket(value, buckets) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 'UNKNOWN';
+  for (const bucket of buckets) {
+    if (bucket.test(number)) return bucket.label;
+  }
+  return 'UNKNOWN';
+}
+
+function paperFactorStats(trades, keyFn, minimumSample) {
+  const groups = {};
+  const minSample = Number.isFinite(Number(minimumSample)) ? Number(minimumSample) : 5;
+  trades.forEach(trade => {
+    const raw = keyFn(trade);
+    const keys = Array.isArray(raw) ? raw : [raw];
+    [...new Set(keys.map(value => String(value == null || value === '' ? 'UNKNOWN' : value)))].forEach(key => {
+      if (!groups[key]) {
+        groups[key] = {
+          key, trades: 0, wins: 0, losses: 0, breakeven: 0,
+          netR: 0, pnl: 0, mfePnl: 0, maePnl: 0, durationMs: 0,
+          fullSnapshots: 0, partialSnapshots: 0
+        };
+      }
+      const group = groups[key];
+      group.trades += 1;
+      if (trade.outcome === 'WIN' || paperNumber(trade.r) > 0) group.wins += 1;
+      else if (trade.outcome === 'LOSS' || paperNumber(trade.r) < 0) group.losses += 1;
+      else group.breakeven += 1;
+      group.netR += paperNumber(trade.r);
+      group.pnl += paperNumber(trade.pnl);
+      group.mfePnl += paperNumber(trade.mfePnl);
+      group.maePnl += paperNumber(trade.maePnl);
+      const start = Date.parse(trade.openedAt || '');
+      const end = Date.parse(trade.closedAt || '');
+      if (start && end) group.durationMs += Math.max(0, end - start);
+      if (paperAnalysisCaptured(trade)) group.fullSnapshots += 1;
+      else if (paperAnalysisHasPartialContext(trade)) group.partialSnapshots += 1;
+    });
+  });
+  return Object.values(groups).map(group => ({
+    ...group,
+    netR: Number(group.netR.toFixed(3)),
+    pnl: Number(group.pnl.toFixed(2)),
+    averageR: group.trades ? Number((group.netR / group.trades).toFixed(3)) : 0,
+    averagePnl: group.trades ? Number((group.pnl / group.trades).toFixed(2)) : 0,
+    averageMfePnl: group.trades ? Number((group.mfePnl / group.trades).toFixed(2)) : 0,
+    averageMaePnl: group.trades ? Number((group.maePnl / group.trades).toFixed(2)) : 0,
+    averageDurationMs: group.durationMs ? Math.round(group.durationMs / group.trades) : 0,
+    winRate: group.trades ? Number((group.wins / group.trades * 100).toFixed(1)) : 0,
+    sampleSufficient: group.trades >= minSample,
+    sampleForInference: group.trades >= 30
+  })).sort((a, b) => b.netR - a.netR || b.trades - a.trades);
+}
+
+function paperClosedTradeAnalysis(query) {
+  const filters = paperHistoryFilters(query);
+  const limitValue = typeof query.get === 'function' ? query.get('limit') : query.limit;
+  const limit = Math.max(25, Math.min(250, Number(limitValue || 100)));
+  const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES)
+    .filter(trade => paperHistoryMatches(trade, filters));
+  all.forEach(paperEnsureAnalysis);
+  const closed = all.filter(trade => trade.outcome !== 'CANCELLED');
+  const chronological = closed.slice().sort((a, b) => {
+    const at = Date.parse(a.closedAt || '') || Number(a.createdAt) || 0;
+    const bt = Date.parse(b.closedAt || '') || Number(b.createdAt) || 0;
+    return at - bt;
+  });
+  let currentWinStreak = 0, currentLossStreak = 0, maxWinStreak = 0, maxLossStreak = 0;
+  let runWin = 0, runLoss = 0;
+  chronological.forEach(trade => {
+    const win = trade.outcome === 'WIN' || paperNumber(trade.r) > 0;
+    const loss = trade.outcome === 'LOSS' || paperNumber(trade.r) < 0;
+    if (win) { runWin += 1; runLoss = 0; maxWinStreak = Math.max(maxWinStreak, runWin); }
+    else if (loss) { runLoss += 1; runWin = 0; maxLossStreak = Math.max(maxLossStreak, runLoss); }
+    else { runWin = 0; runLoss = 0; }
+  });
+  currentWinStreak = runWin;
+  currentLossStreak = runLoss;
+  const wins = closed.filter(trade => trade.outcome === 'WIN' || paperNumber(trade.r) > 0);
+  const losses = closed.filter(trade => trade.outcome === 'LOSS' || paperNumber(trade.r) < 0);
+  const fullSnapshots = closed.filter(paperAnalysisCaptured).length;
+  const partialSnapshots = closed.filter(trade => !paperAnalysisCaptured(trade) && paperAnalysisHasPartialContext(trade)).length;
+  const notCaptured = Math.max(0, closed.length - fullSnapshots - partialSnapshots);
+  const avg = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const grossProfit = wins.reduce((sum, trade) => sum + Math.max(0, paperNumber(trade.r)), 0);
+  const grossLoss = losses.reduce((sum, trade) => sum + Math.min(0, paperNumber(trade.r)), 0);
+  const averageWinR = avg(wins.map(trade => paperNumber(trade.r)));
+  const averageLossR = avg(losses.map(trade => paperNumber(trade.r)));
+  const detailRows = chronological.slice(-limit).reverse().map(trade => ({
+    id: trade.id, closedAt: trade.closedAt || null, symbol: trade.sym || null,
+    direction: trade.dir || null, outcome: trade.outcome || null,
+    strategyVersion: trade.strategyVersion || paperTradeStrategyVersion(trade),
+    cohortId: trade.cohortId || null, timeframe: trade.timeframe || trade.tf || '15M',
+    entryLimit: trade.entryLimit == null ? null : trade.entryLimit,
+    entryActual: trade.entryActual == null ? null : trade.entryActual,
+    exitPrice: trade.exitPrice == null ? null : trade.exitPrice,
+    sl: trade.sl == null ? null : trade.sl, tp1: trade.tp1 == null ? null : trade.tp1,
+    tp2: trade.tp2 == null ? null : trade.tp2, rr: trade.setupValidation && trade.setupValidation.rr != null
+      ? trade.setupValidation.rr : paperAnalysisValue(trade, 'rr', null),
+    r: paperNumber(trade.r), pnl: paperNumber(trade.pnl), closeReason: trade.closeReason || null,
+    tp1Hit: !!trade.tp1Hit, mfePnl: paperNumber(trade.mfePnl), maePnl: paperNumber(trade.maePnl),
+    timeToFillMs: trade.openedAt ? Math.max(0, (Date.parse(trade.openedAt) || 0) - (Number(trade.createdAt) || 0)) : 0,
+    durationMs: trade.openedAt && trade.closedAt ? Math.max(0, (Date.parse(trade.closedAt) || 0) - (Date.parse(trade.openedAt) || 0)) : 0,
+    analysisStatus: trade.analysisStatus || 'DATA_NOT_CAPTURED',
+    snapshot: trade.analysisSnapshot || null, analysisExit: trade.analysisExit || null,
+    tags: trade.analysisTags || {exit: [], setup: [], market: []},
+    summary: trade.analysisSummary || null
+  }));
+  const factor = (keyFn, minimumSample) => paperFactorStats(closed, keyFn, minimumSample || 5);
+  const mtfBucket = trade => {
+    const value = paperAnalysisValue(trade, 'mtfAlignment', null);
+    return value == null ? 'UNKNOWN' : Number(value) + '/4';
+  };
+  const confluenceBucket = trade => paperAnalysisBucket(paperAnalysisValue(trade, 'confluencePct', null), [
+    {label: '<60%', test: value => value < 60}, {label: '60-69%', test: value => value < 70},
+    {label: '70-79%', test: value => value < 80}, {label: '80-89%', test: value => value < 90},
+    {label: '90-100%', test: value => value <= 100}
+  ]);
+  const rsiBucket = trade => paperAnalysisBucket(paperAnalysisValue(trade, 'rsi', null), [
+    {label: '<30 oversold', test: value => value < 30}, {label: '30-44', test: value => value < 45},
+    {label: '45-55 neutral', test: value => value <= 55}, {label: '56-69', test: value => value < 70},
+    {label: '>=70 overbought', test: value => value >= 70}
+  ]);
+  const atrBucket = trade => paperAnalysisBucket(paperAnalysisValue(trade, 'atrPct', null), [
+    {label: '<1% low', test: value => value < 1}, {label: '1-1.99%', test: value => value < 2},
+    {label: '2-3.99%', test: value => value < 4}, {label: '>=4% high', test: value => value >= 4}
+  ]);
+  const volumeBucket = trade => paperAnalysisBucket(paperAnalysisValue(trade, 'volumeRatio', null), [
+    {label: '<1x', test: value => value < 1}, {label: '1-1.49x', test: value => value < 1.5},
+    {label: '1.5-1.99x', test: value => value < 2}, {label: '>=2x', test: value => value >= 2}
+  ]);
+  const fundingBucket = trade => {
+    const value = Number(paperAnalysisValue(trade, 'fund', null));
+    return !Number.isFinite(value) || value === 0 ? 'ZERO_OR_UNKNOWN' : value < 0 ? 'NEGATIVE' : 'POSITIVE';
+  };
+  const oiBucket = trade => {
+    const value = Number(paperAnalysisValue(trade, 'oi', null));
+    return !Number.isFinite(value) || value === 0 ? 'FLAT_OR_UNKNOWN' : value < 0 ? 'FALLING' : 'RISING';
+  };
+  const byDay = factor(trade => {
+    const at = Date.parse(trade.closedAt || '') || Number(trade.createdAt) || 0;
+    return at ? new Date(at).toISOString().slice(0, 10) : 'UNKNOWN';
+  }, 1);
+  return {
+    ok: true, buildId: PAPER_BUILD_ID, asOf: new Date().toISOString(),
+    filters: {...filters, symbol: filters.symbol || 'all', direction: filters.direction || 'all',
+      timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all',
+      fundingSign: filters.fundingSign || 'all', volumeBucket: filters.volumeBucket || 'all',
+      marketTag: filters.marketTag || 'all', strategyVersion: filters.strategyVersion || 'all',
+      cohortId: filters.cohortId || 'all'},
+    population: {orders: all.length, closed: closed.length, cancelled: all.length - closed.length,
+      wins: wins.length, losses: losses.length, breakeven: Math.max(0, closed.length - wins.length - losses.length)},
+    snapshotCoverage: {full: fullSnapshots, partial: partialSnapshots, notCaptured,
+      fullRate: closed.length ? Number((fullSnapshots / closed.length * 100).toFixed(1)) : 0,
+      contextRate: closed.length ? Number(((fullSnapshots + partialSnapshots) / closed.length * 100).toFixed(1)) : 0,
+      inferenceMinimum: 30, inferenceReady: fullSnapshots >= 30,
+      note: notCaptured ? 'Trade lama tanpa snapshot lengkap tidak dipakai untuk inferensi faktor.'
+        : partialSnapshots ? 'Sebagian trade hanya memiliki konteks parsial.' : 'Semua closed trade memiliki snapshot lengkap.'},
+    performance: {winRate: closed.length ? Number((wins.length / closed.length * 100).toFixed(1)) : 0,
+      netR: Number(closed.reduce((sum, trade) => sum + paperNumber(trade.r), 0).toFixed(3)),
+      pnl: Number(closed.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0).toFixed(2)),
+      grossProfitR: Number(grossProfit.toFixed(3)), grossLossR: Number(grossLoss.toFixed(3)),
+      profitFactor: grossLoss < 0 ? Number((grossProfit / Math.abs(grossLoss)).toFixed(2)) : null,
+      averageWinR: Number(averageWinR.toFixed(3)), averageLossR: Number(averageLossR.toFixed(3)),
+      expectancyR: closed.length ? Number((closed.reduce((sum, trade) => sum + paperNumber(trade.r), 0) / closed.length).toFixed(3)) : 0,
+      averageMfePnl: Number(avg(closed.map(trade => paperNumber(trade.mfePnl))).toFixed(2)),
+      averageMaePnl: Number(avg(closed.map(trade => paperNumber(trade.maePnl))).toFixed(2)),
+      tp1Hits: closed.filter(trade => trade.tp1Hit).length,
+      tp2Hits: closed.filter(trade => String(trade.closeReason || '').toLowerCase().includes('tp2')).length,
+      directSlLosses: closed.filter(trade => paperExitClassification(trade) === 'DIRECT_SL_LOSS').length,
+      protectedAfterTp1: closed.filter(trade => paperExitClassification(trade) === 'PROTECTED_AFTER_TP1').length},
+    streaks: {currentWins: currentWinStreak, currentLosses: currentLossStreak, maxWins: maxWinStreak, maxLosses: maxLossStreak},
+    factors: {
+      mtfAlignment: factor(mtfBucket), confluence: factor(confluenceBucket), rsi: factor(rsiBucket),
+      atr: factor(atrBucket), volume: factor(volumeBucket), funding: factor(fundingBucket), oi: factor(oiBucket),
+      regime: factor(trade => paperTradeRegimeTag(trade) || 'UNKNOWN'), direction: factor(trade => trade.dir || 'UNKNOWN'),
+      symbol: factor(trade => trade.sym || 'UNKNOWN'), timeframe: factor(trade => trade.timeframe || trade.tf || 'UNKNOWN'),
+      strategy: factor(trade => trade.strategyVersion || paperTradeStrategyVersion(trade)),
+      exit: factor(trade => paperExitClassification(trade)), setupTags: paperTagGroupStats(closed, 'setup'),
+      marketTags: paperTagGroupStats(closed, 'market'), byDay
+    },
+    insightPolicy: {minimumExploratorySample: 5, minimumForStrategyChange: 30,
+      statement: 'Factor results are descriptive associations, not causal proof. Jangan ubah strategi dari satu bucket kecil.'},
+    tradeRows: detailRows
+  };
+}
+
 function paperTagGroupStats(trades, category) {
   const tagged = [];
   trades.forEach(trade => {
@@ -5732,6 +5938,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     send(res, 200, JSON.stringify(paperStats(requestUrl.searchParams)));
+    return;
+  }
+  if (requestUrl.pathname === '/paper/analysis') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      send(res, 405, JSON.stringify({error: 'Method not allowed'}));
+      return;
+    }
+    try {
+      send(res, 200, JSON.stringify(paperClosedTradeAnalysis(requestUrl.searchParams)));
+    } catch (error) {
+      console.error('[paper] closed trade analysis failed:', error.message);
+      send(res, 500, JSON.stringify({ok: false, error: error.message || 'Closed trade analysis failed'}));
+    }
     return;
   }
 

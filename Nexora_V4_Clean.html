@@ -268,6 +268,15 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 .equity-stat-value{font-size:22px;font-weight:700;font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#fff;margin:4px 0;}
 .equity-stat-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;}
 .equity-summary-note{font-size:11px;color:var(--text2);margin:-6px 0 16px;padding:0 3px;}
+.vps-analysis-note{font-size:10px;color:var(--text3);line-height:1.6;margin:0 0 10px;padding:8px 10px;border:1px solid rgba(88,166,255,.18);border-radius:6px;background:rgba(88,166,255,.05);}
+.vps-analysis-findings{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:7px;margin:8px 0 12px;}
+.vps-analysis-finding{border:1px solid var(--border);border-radius:6px;padding:8px 9px;background:rgba(255,255,255,.02);font-size:10px;line-height:1.55;}
+.vps-analysis-finding b{display:block;color:var(--text);font-size:10px;margin-bottom:3px;}
+.vps-analysis-finding.warn{border-color:rgba(227,179,65,.35);}.vps-analysis-finding.good{border-color:rgba(63,185,80,.35);}
+.vps-analysis-table{max-height:330px;overflow:auto;border:1px solid rgba(255,255,255,.04);border-radius:5px;}
+.vps-analysis-table table{margin:0;min-width:560px;}.vps-analysis-table th{position:sticky;top:0;background:#111722;z-index:1;}
+.vps-analysis-detail{max-height:430px;overflow:auto;}.vps-analysis-detail table{min-width:980px;}
+.vps-analysis-detail tr:hover{background:rgba(88,166,255,.06);}
 @media(max-width:720px){.equity-summary{grid-template-columns:repeat(2,1fr);gap:8px;}.equity-stat-card{padding:10px 8px;}.equity-stat-value{font-size:18px;}.drawdown-banner,.dd-banner{margin-left:10px;margin-right:10px;}}
 .vps-log-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:6px;margin:7px 0;}
 .vps-log-card{min-width:0;padding:8px 9px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:2px;}
@@ -701,6 +710,21 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div><div class="muted" style="margin-bottom:4px;">By symbol / direction</div><div id="vps-stats-breakdown"></div></div>
       <div><div class="muted" style="margin-bottom:4px;">By strategy/cohort &amp; signal quality</div><div id="vps-stats-quality"></div></div>
     </div>
+  </div>
+
+  <div class="card" id="vps-analysis-panel">
+    <div class="card-h">
+      <div class="card-t"><i class="fa-solid fa-microscope"></i> Closed Trade Analysis <span class="muted" id="vps-analysis-asof">Waiting...</span></div>
+      <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh analysis</button>
+    </div>
+    <div class="vps-analysis-note" id="vps-analysis-note">Menunggu data close trade. Analisis ini memisahkan hasil exit, kualitas setup, dan kondisi market. Hasil factor adalah asosiasi deskriptif, bukan bukti sebab-akibat.</div>
+    <div class="g6" id="vps-analysis-kpis" style="margin-bottom:10px;"></div>
+    <div class="vps-analysis-findings" id="vps-analysis-findings"></div>
+    <div class="g2" style="margin-bottom:0;">
+      <div><div class="muted" style="margin-bottom:4px;">Setup &amp; market factors</div><div id="vps-analysis-factors" class="vps-analysis-table"></div></div>
+      <div><div class="muted" style="margin-bottom:4px;">Cohort, exit &amp; daily result</div><div id="vps-analysis-cohorts" class="vps-analysis-table"></div></div>
+    </div>
+    <div style="margin-top:10px;"><div class="muted" style="margin-bottom:4px;">Closed trade audit trail</div><div id="vps-analysis-details" class="vps-analysis-table vps-analysis-detail"></div></div>
   </div>
 
   <div class="card" style="padding:10px 12px;">
@@ -6099,6 +6123,10 @@ function pollPaperStats() {
       }
     })
     .catch(function(){ /* statistics are auxiliary; keep the last known view */ });
+  fetch(PAPER_API + '/analysis' + (params.length ? '?' + params.join('&') + '&limit=120' : '?limit=120'), {cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data){ if(data && data.ok) renderVpsClosedTradeAnalysis(data); })
+    .catch(function(){ /* detailed analysis is auxiliary; keep the last known view */ });
 }
 
 function vpsHistoryQuery(monthly) {
@@ -6245,6 +6273,111 @@ function renderVpsStats(data) {
   ]) + vpsGroupTable(data.closeReasons, [
     {label:'Close reason',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]); }
+}
+
+function vpsAnalysisTable(rows, columns, maxRows) {
+  if(!Array.isArray(rows) || !rows.length) return '<div class="muted" style="padding:7px;">Belum ada data.</div>';
+  var list = rows.slice(0, maxRows || 12);
+  return '<table><thead><tr>' + columns.map(function(c){return '<th>' + sourceEsc(c.label) + '</th>';}).join('') + '</tr></thead><tbody>'
+    + list.map(function(row){ return '<tr>' + columns.map(function(c){
+      var value = typeof c.value === 'function' ? c.value(row) : row[c.key];
+      return '<td>' + sourceEsc(value == null || value === '' ? '--' : String(value)) + '</td>';
+    }).join('') + '</tr>'; }).join('') + '</tbody></table>';
+}
+
+function vpsAnalysisPct(value) { return Number(value || 0).toFixed(1) + '%'; }
+function vpsAnalysisSigned(value, digits) {
+  var n = Number(value || 0), d = digits == null ? 2 : digits;
+  return (n >= 0 ? '+' : '') + n.toFixed(d);
+}
+function vpsAnalysisFactorRows(sets) {
+  var out = [];
+  (sets || []).forEach(function(set){
+    (set.rows || []).slice(0, 8).forEach(function(row){
+      out.push({factor:set.label, key:row.key, trades:row.trades, winRate:row.winRate, netR:row.netR, sample:row.sampleForInference ? '30+ inference' : row.sampleSufficient ? 'exploratory' : 'small'});
+    });
+  });
+  return out;
+}
+function vpsAnalysisPick(rows, direction) {
+  var eligible = (rows || []).filter(function(row){return row.key !== 'UNKNOWN' && Number(row.trades || 0) >= 5;});
+  if(!eligible.length) return null;
+  eligible.sort(function(a,b){return direction === 'low' ? (a.winRate-b.winRate || a.netR-b.netR) : (b.winRate-a.winRate || b.netR-a.netR);});
+  return eligible[0];
+}
+function renderVpsClosedTradeAnalysis(data) {
+  var asOf = document.getElementById('vps-analysis-asof');
+  var note = document.getElementById('vps-analysis-note');
+  var kpiEl = document.getElementById('vps-analysis-kpis');
+  var findingsEl = document.getElementById('vps-analysis-findings');
+  var factorsEl = document.getElementById('vps-analysis-factors');
+  var cohortsEl = document.getElementById('vps-analysis-cohorts');
+  var detailsEl = document.getElementById('vps-analysis-details');
+  if(!data || !data.ok) return;
+  var pop=data.population||{}, p=data.performance||{}, cov=data.snapshotCoverage||{}, st=data.streaks||{}, f=data.factors||{};
+  if(asOf) asOf.textContent='As of '+vpsFmtAt(data.asOf)+' · '+Number(pop.closed||0)+' closed';
+  if(note) note.textContent='Populasi: '+Number(pop.closed||0)+' closed · '+Number(pop.wins||0)+' win / '+Number(pop.losses||0)+' loss · snapshot FULL '+Number(cov.full||0)+' ('+vpsAnalysisPct(cov.fullRate)+') · partial '+Number(cov.partial||0)+' · tidak tertangkap '+Number(cov.notCaptured||0)+'. '+(cov.inferenceReady?'Sudah memenuhi minimum 30 snapshot untuk analisis faktor, tetapi hasil tetap deskriptif.':'Belum memenuhi minimum 30 snapshot FULL untuk inferensi faktor.')+' '+((data.insightPolicy||{}).statement||'');
+  if(kpiEl) {
+    var pf=p.profitFactor==null?'--':Number(p.profitFactor).toFixed(2);
+    var kpis=[
+      ['Closed',pop.closed||0,'#c9d1d9'],['Win / Loss',(pop.wins||0)+' / '+(pop.losses||0),Number(pop.wins||0)>=Number(pop.losses||0)?'#3fb950':'#f85149'],
+      ['Win rate',vpsAnalysisPct(p.winRate),'#58a6ff'],['Net R',vpsAnalysisSigned(p.netR,3)+'R',Number(p.netR||0)>=0?'#3fb950':'#f85149'],
+      ['Expectancy',vpsAnalysisSigned(p.expectancyR,3)+'R',Number(p.expectancyR||0)>=0?'#3fb950':'#f85149'],['Profit factor',pf,Number(p.profitFactor||0)>=1?'#3fb950':'#f85149'],
+      ['Avg win / loss',vpsAnalysisSigned(p.averageWinR,3)+'R / '+vpsAnalysisSigned(p.averageLossR,3)+'R','#c9d1d9'],
+      ['Streak max / current',Number(st.maxLosses||0)+' loss / '+Number(st.currentLosses||0)+' loss','#e3b341'],
+      ['TP1 / TP2',(p.tp1Hits||0)+' / '+(p.tp2Hits||0),'#e3b341'],
+      ['Direct SL / protected',(p.directSlLosses||0)+' / '+(p.protectedAfterTp1||0),Number(p.directSlLosses||0)>Number(p.protectedAfterTp1||0)?'#f85149':'#3fb950'],
+      ['MFE / MAE','$'+Number(p.averageMfePnl||0).toFixed(2)+' / $'+Number(p.averageMaePnl||0).toFixed(2),'#c9d1d9'],
+      ['Context coverage',vpsAnalysisPct(cov.contextRate),Number(cov.notCaptured||0)?'#e3b341':'#3fb950']
+    ];
+    kpiEl.innerHTML=kpis.map(function(k){return vpsKpi(k[0],k[1],k[2]);}).join('');
+  }
+  if(findingsEl) {
+    var best=vpsAnalysisPick(f.mtfAlignment||[],'high'), weakest=vpsAnalysisPick(f.mtfAlignment||[],'low');
+    var bestMarket=vpsAnalysisPick(f.regime||[],'high'), weakMarket=vpsAnalysisPick(f.regime||[],'low');
+    var directSl=Number(p.directSlLosses||0), protectedCount=Number(p.protectedAfterTp1||0);
+    var findings=[];
+    if(best) findings.push('<div class="vps-analysis-finding good"><b>MTF terbaik yang terlihat</b>'+sourceEsc(best.key)+' · '+vpsAnalysisPct(best.winRate)+' win rate · '+Number(best.trades||0)+' trade · '+vpsAnalysisSigned(best.netR,2)+'R. '+(best.sampleForInference?'Sampel cukup untuk inferensi awal.':'Masih eksploratif; belum cukup untuk mengubah strategi.')+'</div>');
+    if(weakest && (!best || weakest.key!==best.key)) findings.push('<div class="vps-analysis-finding warn"><b>MTF perlu ditinjau</b>'+sourceEsc(weakest.key)+' · '+vpsAnalysisPct(weakest.winRate)+' win rate · '+Number(weakest.trades||0)+' trade. Ini sinyal review, bukan bukti penyebab.</div>');
+    if(bestMarket) findings.push('<div class="vps-analysis-finding good"><b>Regime terbaik teramati</b>'+sourceEsc(bestMarket.key)+' · '+vpsAnalysisPct(bestMarket.winRate)+' · '+Number(bestMarket.trades||0)+' trade · '+vpsAnalysisSigned(bestMarket.netR,2)+'R.</div>');
+    if(weakMarket) findings.push('<div class="vps-analysis-finding warn"><b>Regime terlemah teramati</b>'+sourceEsc(weakMarket.key)+' · '+vpsAnalysisPct(weakMarket.winRate)+' · '+Number(weakMarket.trades||0)+' trade. Jangan jadikan filter otomatis sebelum sampel memadai.</div>');
+    findings.push('<div class="vps-analysis-finding '+(directSl>protectedCount?'warn':'good')+'"><b>Exit quality</b>'+directSl+' direct SL vs '+protectedCount+' protected after TP1. TP1 hit '+Number(p.tp1Hits||0)+' kali dan TP2 hit '+Number(p.tp2Hits||0)+' kali.</div>');
+    if(Number(cov.notCaptured||0)) findings.push('<div class="vps-analysis-finding warn"><b>Data quality</b>'+Number(cov.notCaptured||0)+' closed trade tidak punya snapshot lengkap. Trade itu tetap masuk hasil PnL, tetapi tidak masuk inferensi faktor.</div>');
+    findingsEl.innerHTML=findings.join('');
+  }
+  var factorSets=[
+    {label:'MTF',rows:f.mtfAlignment},{label:'Confluence',rows:f.confluence},{label:'RSI',rows:f.rsi},
+    {label:'ATR',rows:f.atr},{label:'Volume',rows:f.volume},{label:'Funding',rows:f.funding},
+    {label:'OI',rows:f.oi},{label:'Regime',rows:f.regime}
+  ];
+  if(factorsEl) factorsEl.innerHTML=vpsAnalysisTable(vpsAnalysisFactorRows(factorSets),[
+    {label:'Factor',key:'factor'},{label:'Bucket',key:'key'},{label:'N',key:'trades'},
+    {label:'Win%',value:function(r){return vpsAnalysisPct(r.winRate);}},
+    {label:'Net R',value:function(r){return vpsAnalysisSigned(r.netR,2);}},
+    {label:'Sample',key:'sample'}
+  ],40);
+  var cohortSets=[
+    {label:'Strategy',rows:f.strategy},{label:'Exit',rows:f.exit},{label:'Direction',rows:f.direction},
+    {label:'Symbol',rows:f.symbol},{label:'Day UTC',rows:(f.byDay||[]).slice().sort(function(a,b){return String(b.key).localeCompare(String(a.key));})}
+  ];
+  if(cohortsEl) cohortsEl.innerHTML=vpsAnalysisTable(vpsAnalysisFactorRows(cohortSets),[
+    {label:'Group',key:'factor'},{label:'Bucket',key:'key'},{label:'N',key:'trades'},
+    {label:'Win%',value:function(r){return vpsAnalysisPct(r.winRate);}},
+    {label:'Net R',value:function(r){return vpsAnalysisSigned(r.netR,2);}},
+    {label:'Sample',key:'sample'}
+  ],40);
+  if(detailsEl) {
+    var rows=data.tradeRows||[];
+    if(!rows.length) detailsEl.innerHTML='<div class="muted" style="padding:7px;">Belum ada closed trade pada filter ini.</div>';
+    else detailsEl.innerHTML='<table><thead><tr><th>Closed</th><th>Trade</th><th>Result</th><th>R / PnL</th><th>Entry → Exit</th><th>SL / TP1 / TP2</th><th>Snapshot factors</th><th>Post-close analysis</th></tr></thead><tbody>'
+      + rows.map(function(t){
+        var snap=t.snapshot||{}, market=snap.market||{}, setup=snap.setup||{}, tags=t.tags||{};
+        var resultColor=t.outcome==='WIN'?'#3fb950':t.outcome==='LOSS'?'#f85149':'#e3b341';
+        var factors=(setup.mtfAlignment==null?'MTF ?':setup.mtfAlignment+'/4 MTF')+' · '+(setup.confluencePct==null?'conf ?':Number(setup.confluencePct).toFixed(0)+'% conf')+' · '+(market.regime||'regime ?')+' · '+(t.analysisStatus||'DATA_NOT_CAPTURED');
+        var tagsText=[].concat(tags.exit||[],tags.setup||[],tags.market||[]).slice(0,7).join(' · ')||'no tags';
+        return '<tr><td>'+sourceEsc(vpsFmtAt(t.closedAt))+'</td><td><b>'+sourceEsc(t.symbol||'--')+'</b> '+sourceEsc(t.direction||'--')+'<br><span class="muted">'+sourceEsc(t.strategyVersion||'--')+'</span></td><td style="color:'+resultColor+';font-weight:700;">'+sourceEsc(t.outcome||'--')+'<br><span class="muted">'+sourceEsc(t.closeReason||'--')+'</span></td><td>'+vpsAnalysisSigned(t.r,2)+'R<br>$'+Number(t.pnl||0).toFixed(2)+'</td><td>'+sourceEsc(t.entryActual==null?t.entryLimit:t.entryActual)+' → '+sourceEsc(t.exitPrice==null?'--':t.exitPrice)+'</td><td>'+sourceEsc(t.sl==null?'--':t.sl)+' / '+sourceEsc(t.tp1==null?'--':t.tp1)+' / '+sourceEsc(t.tp2==null?'--':t.tp2)+'</td><td title="'+sourceEsc(factors)+'">'+sourceEsc(factors)+'<br><span class="muted">'+sourceEsc(tagsText)+'</span></td><td title="'+sourceEsc(t.summary||'')+'">'+sourceEsc(t.summary||'No rule-based summary')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }
 }
 
 function renderPaperDiagnostics(data) {
