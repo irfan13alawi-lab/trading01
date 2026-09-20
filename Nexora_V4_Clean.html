@@ -318,7 +318,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
 
 <!-- Header -->
 <div id="hdr">
-  <div class="logo"><i class="fa-solid fa-bolt"></i> NEXORA <span class="v">CMD CENTER V4</span> <span id="app-build" class="v" title="Build yang sedang disajikan VPS">build v4.9-research</span></div>
+  <div class="logo"><i class="fa-solid fa-bolt"></i> NEXORA <span class="v">CMD CENTER V4</span> <span id="app-build" class="v" title="Build yang sedang disajikan VPS">build checking...</span></div>
   <div class="hstats">
     <div class="hstat"><span class="l">BTC Dom</span><span class="v" id="h-dom">--</span></div>
     <div class="hstat"><span class="l">BTC</span><span class="v" id="h-btc">--</span></div>
@@ -345,8 +345,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <span class="muted" id="upd">Idle</span>
     <div class="cd"><i class="fa-solid fa-clock"></i> 15M: <b id="cdv">--</b></div>
     <button class="btn btn-sm" id="paper-toggle" onclick="togglePaperMode()"
-      style="background:rgba(248,81,73,.1);border-color:rgba(248,81,73,.3);color:#f85149;">
-      <i class="fa-solid fa-robot"></i> <span id="paper-mode-lbl">PAPER OFF</span>
+      style="background:rgba(227,179,65,.14);border-color:rgba(227,179,65,.45);color:#e3b341;">
+      <i class="fa-solid fa-robot"></i> <span id="paper-mode-lbl">PAPER VPS CHECKING...</span>
     </button>
     <button class="btn btn-sm" onclick="doRefresh()"><i class="fa-solid fa-rotate"></i> Refresh</button>
     <button class="btn btn-sm btn-blue" onclick="runScan()"><i class="fa-solid fa-radar"></i> Scan</button>
@@ -368,11 +368,12 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
   <div class="hstat"><span class="l">Daily PnL (UTC)</span><span class="v" id="bot-daily-pnl">$0</span></div>
   <div class="hstat"><span class="l">Exposure</span><span class="v" id="bot-exposure">$0</span></div>
   <div class="hstat"><span class="l">Strict Equity</span><span class="v" id="bot-equity">$285</span></div>
-  <div class="hstat"><span class="l">Total Paper Equity</span><span class="v" id="bot-total-equity">$285</span></div>
+  <div class="hstat"><span class="l">Combined Paper Equity</span><span class="v" id="bot-total-equity">$285</span></div>
   <div class="hstat"><span class="l">Per Scan</span><span class="v" id="bot-per-scan">3</span></div>
   <div class="hstat"><span class="l">Max Conc</span><span class="v" id="bot-max-conc">80</span></div>
   <div class="hstat"><span class="l">New Slots</span><span class="v" id="bot-new-slots">--</span></div>
   <div class="hstat"><span class="l">Risk Guard</span><span class="v" id="bot-risk-guard">--</span></div>
+  <div class="hstat"><span class="l">Data Health</span><span class="v" id="bot-data-health">CHECKING</span></div>
   <div id="bot-guard" class="muted" style="flex:1 1 100%;color:#e3b341;">Checking capacity guard...</div>
   <div id="bot-last-scan" class="muted" style="flex:1 1 100%;padding:6px 0;border-top:1px solid rgba(255,255,255,.05);">Last VPS scan: checking...</div>
   <div id="bot-ops">VPS operations: checking diagnostics...</div>
@@ -681,12 +682,16 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
         <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
       </div>
     </div>
-    <div class="frow" style="grid-template-columns:repeat(7,1fr);">
-      <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
+    <div class="frow" style="grid-template-columns:repeat(10,1fr);">
+      <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="RESEARCH_COLLECTION">RESEARCH_COLLECTION</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
       <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option></select></div>
       <div class="fg"><label>Symbol</label><input id="vps-st-symbol" placeholder="All" onchange="pollPaperStats()"></div>
       <div class="fg"><label>Direction</label><select id="vps-st-direction" onchange="pollPaperStats()"><option value="">All</option><option>LONG</option><option>SHORT</option></select></div>
       <div class="fg"><label>Timeframe</label><select id="vps-st-tf" onchange="pollPaperStats()"><option value="">All</option><option>15M</option><option>1H</option><option>4H</option></select></div>
+      <div class="fg"><label>Outcome</label><select id="vps-st-outcome" onchange="pollPaperStats()"><option value="">All</option><option>WIN</option><option>LOSS</option><option>BREAKEVEN</option></select></div>
+      <div class="fg"><label>Funding</label><select id="vps-st-funding" onchange="pollPaperStats()"><option value="">All</option><option value="NEGATIVE">Negative</option><option value="POSITIVE">Positive</option><option value="ZERO_OR_UNKNOWN">Zero/unknown</option></select></div>
+      <div class="fg"><label>Volume</label><select id="vps-st-volume" onchange="pollPaperStats()"><option value="">All</option><option value="GE2X">≥2x</option><option value="1_5_1_99X">1.5–1.99x</option><option value="1_1_49X">1–1.49x</option><option value="LT1X">&lt;1x</option></select></div>
+      <div class="fg"><label>Market tag</label><select id="vps-st-market" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_TREND_ALIGNED">MTF aligned</option><option value="TRENDING_BULL">Trending bull</option><option value="TRENDING_BEAR">Trending bear</option><option value="RANGING">Ranging</option><option value="HIGH_VOLATILITY">High volatility</option><option value="FUNDING_NEGATIVE">Funding negative</option><option value="FUNDING_POSITIVE">Funding positive</option><option value="OI_RISING">OI rising</option><option value="LOW_VOLUME">Low volume</option></select></div>
       <div class="fg"><label>From</label><input id="vps-st-from" type="date" onchange="pollPaperStats()"></div>
       <div class="fg"><label>To</label><input id="vps-st-to" type="date" onchange="pollPaperStats()"></div>
     </div>
@@ -1234,6 +1239,10 @@ var COINS = [
   {id:'tron',s:'TRX'},{id:'matic-network',s:'MATIC'},{id:'litecoin',s:'LTC'},
   {id:'synthetix-network-token',s:'SNX'}
 ];
+// Some exchange feeds migrated Fetch.ai's market symbol to ASI.  Keep the
+// dashboard's canonical symbol as FET, but use the alias only when FETUSDT is
+// genuinely absent so its 24H field does not become a silent '--'.
+var MARKET_TICKER_ALIASES = {FET:['FET','ASI']};
 // A dashboard served on port 18084 talks to the adjacent proxy on 18085.
 // This keeps deployment portable if the VPS IP changes.
 var PROXY_BASE = window.location.port === '18084' ? 'http://' + window.location.hostname + ':18085' : '';
@@ -1591,6 +1600,13 @@ function doRefresh() {
     COINS.forEach(function(coin, i) {
       var sym = coin.s;
       var bg  = bitgetMap[sym];
+      var tickerSymbol = sym;
+      if (!bg && MARKET_TICKER_ALIASES[sym]) {
+        for (var ai = 0; ai < MARKET_TICKER_ALIASES[sym].length; ai++) {
+          var alias = MARKET_TICKER_ALIASES[sym][ai];
+          if (bitgetMap[alias]) { bg = bitgetMap[alias]; tickerSymbol = alias; break; }
+        }
+      }
       var mx  = mexcMap[sym];
       // Price: selected Bitget market
       var price = bg ? nn(bg.lastPr) : 0;
@@ -1629,6 +1645,7 @@ function doRefresh() {
         oiUSD: oiRaw,
         liq:   spotMarket ? 0 : liq,
         derivativesAvailable: !spotMarket,
+        tickerSymbol: tickerSymbol,
         marketExchange: 'bitget', marketType: spotMarket ? 'spot' : 'futures',
         sc:    sc,
         tier:  tier(sc),
@@ -5417,7 +5434,7 @@ function computeTop5(pairs) {
     if(p.volSpike && p.volSpike.isSpike) evidence.push('Volume ' + p.volSpike.ratio + 'x');
     if(mtfState.direction) evidence.push('MTF ' + mtfState.aligned + '/4 ' + mtfState.direction);
     var medals   = ['#e3b341','#8b949e','#cd7f32','#484f58','#484f58'];
-    var priceStr = entryEst >= 1000 ? '$'+Math.round(entryEst).toLocaleString('en') : '$'+entryEst.toFixed(entryEst>=1?3:5);
+    var priceStr = fP(entryEst);
 
     return '<div style="background:#161b25;border:1px solid #21262d;border-radius:7px;padding:10px;cursor:pointer;transition:border-color .15s;" '
       + 'onmouseover="this.style.borderColor=\'#3fb950\'" onmouseout="this.style.borderColor=\'#21262d\'" '
@@ -5519,11 +5536,13 @@ function applyServerClosedTrades(closedTrades) {
   G.vpsClosed = rawClosed.slice().sort(function(a,b){
     return String(a.closedAt || '').localeCompare(String(b.closedAt || ''));
   }).map(function(t) {
+    var analysisTags = t.analysisTags || {exit:[],setup:[],market:[]};
+    var tagText = ['Exit: ' + (analysisTags.exit || []).join(', '), 'Setup: ' + (analysisTags.setup || []).join(', '), 'Market: ' + (analysisTags.market || []).join(', ')].join(' · ');
     cum += Number(t.r || 0);
     return {
       r: Number(t.r || 0),
       cum: cum,
-      dt: t.closedAt ? new Date(t.closedAt).toLocaleDateString('id-ID') : '',
+      dt: t.closedAt ? vpsFmtAt(t.closedAt) : '',
       sym: t.sym || '?',
       dir: t.dir || 'LONG',
       entry: Number(t.entryActual || t.entryLimit || 0),
@@ -5546,6 +5565,11 @@ function applyServerClosedTrades(closedTrades) {
       durationMs: t.openedAt && t.closedAt ? Math.max(0, new Date(t.closedAt) - new Date(t.openedAt)) : 0,
        mfePnl: Number(t.mfePnl || 0),
        maePnl: Number(t.maePnl || 0),
+       analysisStatus: t.analysisStatus || 'DATA_NOT_CAPTURED',
+       analysisSnapshot: t.analysisSnapshot || null,
+       analysisExit: t.analysisExit || null,
+       analysisTags: t.analysisTags || {exit:[],setup:[],market:[]},
+       analysisSummary: t.analysisSummary || null,
        tp1Hit: !!t.tp1Hit, realizedPnlTp1: Number(t.realizedPnlTp1 || 0),
        tp1: Number(t.tp1 || 0), tp2: Number(t.tp2 || 0), sl: Number(t.sl || 0),
        slAfterTp1: Number(t.slAfterTp1 || 0),
@@ -5556,7 +5580,7 @@ function applyServerClosedTrades(closedTrades) {
       exitReason: t.closeReason || '',
       good: t.outcome === 'WIN' ? 'Paper Bot VPS reached target' : '',
       bad: t.outcome === 'LOSS' ? 'Paper Bot VPS reached stop' : '',
-      lesson: 'VPS paper trade — review funding/OI at entry',
+      lesson: t.analysisSummary || (t.analysisStatus === 'DATA_NOT_CAPTURED' ? 'Snapshot entry tidak tersedia untuk trade lama.' : tagText),
       checks: 0, checksPct: 0,
       pnl: Number(t.pnl || 0)
     };
@@ -5611,7 +5635,7 @@ function renderPaperTp1Events() {
   }
   var rows = entries.map(function(e) {
     var at = new Date(e.at);
-    var time = isNaN(at.getTime()) ? sourceEsc(e.at) : at.toLocaleString('id-ID');
+    var time = isNaN(at.getTime()) ? sourceEsc(e.at) : vpsFmtAt(e.at);
     var stateColor = e.state === 'ACTIVE' ? '#58a6ff' : '#8b949e';
     var statusText = e.state === 'ACTIVE' ? 'ACTIVE · sisa posisi berjalan' : 'CLOSED' + (e.outcome ? ' · ' + sourceEsc(e.outcome) : '');
     return '<tr>'
@@ -5639,12 +5663,25 @@ function renderServerPaperScan(status) {
   var el = document.getElementById('bot-last-scan');
   if(!el) return;
   var scan = status && Array.isArray(status.recentScans) ? status.recentScans[0] : null;
+  // /summary is intentionally lightweight and carries lastScanSummary rather
+  // than the full recent scan.  Use it so the dashboard cannot keep showing a
+  // stale scan merely because the detail endpoint has not finished loading.
+  if(!scan && status && status.lastScanSummary) {
+    var summary = status.lastScanSummary;
+    scan = {
+      cycleKey: summary.cycleKey, at: summary.at, reason: summary.reason,
+      candidates: summary.candidates, selected: [], placed: [], rejected: [],
+      placedCount: summary.placed, rejectedCount: summary.rejected,
+      capacity: {blockReason: summary.blockReason, mode: summary.mode,
+        requested: status.perScan || 3}
+    };
+  }
   if(!scan) {
     if(!status || !Array.isArray(status.recentScans)) return;
     el.textContent = 'Last VPS scan: belum ada scan';
     return;
   }
-  var at = scan.at ? new Date(scan.at).toLocaleTimeString('id-ID') : '--';
+  var at = scan.at ? vpsFmtAt(scan.at) : '--';
   var candidates = Array.isArray(scan.selected) ? scan.selected.slice(0, 3) : [];
   var placedCandidates = Array.isArray(scan.placed) ? scan.placed : [];
   var placedBySymbol = {};
@@ -5663,7 +5700,10 @@ function renderServerPaperScan(status) {
     }).join('');
     var mtf = (c.mtfAlignment || mtfSummary.alignmentCount || 0) + '/4 TF';
     var confValue = c.confluencePct == null ? NaN : Number(c.confluencePct);
-    var conf = Number.isFinite(confValue) ? confValue.toFixed(0) + '%' : '--';
+    var alignmentValue = Number(c.mtfAlignment || mtfSummary.alignmentCount || 0);
+    var lowConfidence = Number.isFinite(confValue) && confValue < 85;
+    var partialAlignment = alignmentValue < 4;
+    var conf = Number.isFinite(confValue) ? confValue.toFixed(0) + '%' + (lowConfidence || partialAlignment ? ' ⚠' : '') : '--';
     var confColor = !Number.isFinite(confValue) ? '#8b949e' : confValue >= 85 ? '#3fb950' : confValue >= 75 ? '#e3b341' : '#f85149';
     var reasonsArray = Array.isArray(c.signalReasons) && c.signalReasons.length ? c.signalReasons : c.evidence;
     var reasons = Array.isArray(reasonsArray) ? reasonsArray.slice(0, 4).join(' · ') : '';
@@ -5686,9 +5726,9 @@ function renderServerPaperScan(status) {
       + '<div style="font-size:9px;margin-top:4px;">' + tfLine + '</div>'
       + '<div style="font-size:9px;color:#8b949e;margin-top:3px;">' + sourceEsc(marketLine) + ' · Quality <span style="color:' + qualityColor + ';">' + sourceEsc(quality) + '</span>' + (isMonitoring ? ' · <span style="color:#e3b341;">recorded, no order</span>' : '') + '</div>'
       + levels + scoreLine + indicatorLine
-      + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + sourceEsc(reasons || c.dataQualityReason || c.dataQuality || '') + '</div></div>';
+      + '<div style="color:#8b949e;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (lowConfidence || partialAlignment ? '<span style="color:#e3b341;">WARNING: research signal di bawah confidence 85% atau belum 4/4 TF</span> · ' : '') + sourceEsc(reasons || c.dataQualityReason || c.dataQuality || '') + '</div></div>';
   }).join('');
-  var placed = placedCandidates.length;
+  var placed = placedCandidates.length || Number(scan.placedCount || 0);
   var reason = scan.capacity && scan.capacity.blockReason ? scan.capacity.blockReason : 'READY';
   var capacity = scan.capacity || {};
   var researchMode = capacity.mode === 'RESEARCH_COLLECTION';
@@ -5700,7 +5740,8 @@ function renderServerPaperScan(status) {
     (Array.isArray(item.codes) ? item.codes : []).forEach(function(code){ rejectionCodes.push(code); });
   });
   var rejectionInfo = rejectionCodes.length ? rejectionCodes.slice(0, 8).join(', ') : 'No rejection codes';
-  var rejectedCount = Array.isArray(scan.rejected) ? scan.rejected.length : 0;
+  var rejectedCount = Array.isArray(scan.rejected) && scan.rejected.length
+    ? scan.rejected.length : Number(scan.rejectedCount || 0);
   var dailyPnl = Number(status.dailyRealizedPnl || 0);
   var dailyR = Number(status.dailyLossR || capacity.dailyLossR || 0);
   var maxDailyR = Number(status.maxDailyLossR || 3);
@@ -5833,11 +5874,15 @@ function applyServerPaperStatus(status, announce) {
   if(riskGuard) {
     var riskNow = Number(status.activeRisk || 0);
     var riskMax = Number(status.riskBudget || 0);
-    riskGuard.textContent = '$' + riskNow.toFixed(2) + ' / $' + riskMax.toFixed(2);
-    riskGuard.style.color = riskNow <= riskMax ? '#3fb950' : '#f85149';
+    var riskWarning = status.riskWarning || {};
+    var riskWarnText = riskWarning.triggered ? '⚠ ' : '';
+    riskGuard.textContent = riskWarnText + '$' + riskNow.toFixed(2) + ' / $' + riskMax.toFixed(2);
+    riskGuard.style.color = riskWarning.triggered ? '#e3b341' : riskNow <= riskMax ? '#3fb950' : '#f85149';
     riskGuard.title = 'Risk cohort ' + (status.strategyVersion || 'MTF_ATR_V2') + ': $' + riskNow.toFixed(2)
       + ' | PRE_UPGRADE: $' + Number(status.preUpgradeActiveRisk || 0).toFixed(2)
-      + ' | LEGACY: $' + Number(status.legacyActiveRisk || 0).toFixed(2);
+      + ' | LEGACY: $' + Number(status.legacyActiveRisk || 0).toFixed(2)
+      + ' | headroom: ' + Number(status.riskHeadroomPct || 0).toFixed(1) + '%'
+      + ' | exposure: ' + Number(status.exposureRatio || 0).toFixed(2) + 'x equity';
   }
   var guard = document.getElementById('bot-guard');
   if(guard) {
@@ -5866,11 +5911,19 @@ function applyServerPaperStatus(status, announce) {
     var researchHard = Number(research.hardDrawdownPct || 50);
     var researchText = research.enabled ? ' · Research ' + researchCount + '/' + Number(research.maxActive || 80)
       + ' · RDD ' + researchDd.toFixed(2) + '/' + researchHard.toFixed(0) + '%' : '';
+    var wrAlerts = status.winRateAlerts || {};
+    var wrAlertText = wrAlerts.triggered && Array.isArray(wrAlerts.messages) && wrAlerts.messages.length
+      ? ' · ⚠ ' + wrAlerts.messages.join(' · ') : '';
     var displayState = researchActive ? 'RESEARCH ACTIVE · strict entry paused' : stateLabel;
-    guard.textContent = (displayState ? displayState + ' · ' : 'Guard: ') + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
+    var guardText = (displayState ? displayState + ' · ' : 'Guard: ') + guardReason + ' · Trial ' + strictCount + '/' + (status.maxConcurrent || 30)
       + ' · Pre-upgrade ' + preUpgradeCount + ' · Legacy ' + legacyCount + ' · max/coin ' + (status.maxPerSymbol || 1)
-      + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%' + researchText;
-    guard.style.color = !serverRunning || paperKilled || (status.drawdownGuard && !researchActive) || research.hardStop ? '#f85149' : (status.blockReason && !researchActive ? '#e3b341' : '#3fb950');
+      + ' · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '/' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%' + researchText + wrAlertText;
+    if(researchActive) {
+      guard.innerHTML = '<span style="color:#f0883e;">⛔ STRICT: entry baru ditahan · DD ' + Number(status.drawdownPct || 0).toFixed(2) + '% / ' + Number(status.maxDrawdownPct || 2.5).toFixed(2) + '%</span>'
+        + '<br><span style="color:#3fb950;">🔬 RESEARCH: tetap aktif · RDD ' + researchDd.toFixed(2) + '% / ' + researchHard.toFixed(0) + '% · ' + researchCount + '/' + Number(research.maxActive || 80) + ' posisi</span>'
+        + (wrAlertText ? '<br><span style="color:#f85149;">' + sourceEsc(wrAlertText.replace(/^ · /, '')) + '</span>' : '');
+    } else guard.textContent = guardText;
+    guard.style.color = !serverRunning || paperKilled || (status.drawdownGuard && !researchActive) || research.hardStop || wrAlerts.triggered ? '#f85149' : (status.blockReason && !researchActive ? '#e3b341' : '#3fb950');
     guard.title = status.guardMessage || (status.lastError ? 'Last error: ' + status.lastError : '');
   }
   var wrEl = document.getElementById('bot-winrate');
@@ -5882,7 +5935,9 @@ function applyServerPaperStatus(status, announce) {
     var warnWinRate = strictClosed >= 10 && Number.isFinite(strictWinRate) && strictWinRate < 40;
     wrEl.textContent = strictClosed > 0 && Number.isFinite(strictWinRate) ? strictWinRate.toFixed(1) + '%' : '--';
     wrEl.style.color = warnWinRate ? '#f85149' : strictWinRate >= 50 ? '#3fb950' : strictClosed ? '#e3b341' : '#8b949e';
-    wrEl.title = strictClosed ? 'Strict cohort: ' + Number(strictMetrics.wins || 0) + ' win / ' + Number(strictMetrics.losses || 0) + ' loss · closed ' + strictClosed + (warnWinRate ? ' · WARNING: di bawah 40%' : '') : 'Belum ada cukup trade closed untuk menilai win rate';
+    var alertTitle = status.winRateAlerts && status.winRateAlerts.triggered && Array.isArray(status.winRateAlerts.messages)
+      ? ' · ALERT: ' + status.winRateAlerts.messages.join('; ') : '';
+    wrEl.title = strictClosed ? 'Strict cohort: ' + Number(strictSample.wins || 0) + ' win / ' + Number(strictSample.losses || 0) + ' loss · closed ' + strictClosed + (warnWinRate ? ' · WARNING: di bawah 40%' : '') + alertTitle : 'Belum ada cukup trade closed untuk menilai win rate';
   }
   if(status.equity != null) {
     var equity = Number(status.equity);
@@ -5900,8 +5955,11 @@ function applyServerPaperStatus(status, announce) {
       var totalEq = Number(status.totalEquity == null ? equity : status.totalEquity);
       totalEqEl.textContent = '$' + totalEq.toFixed(2);
       totalEqEl.style.color = totalEq >= Number(status.startingEquity || 285) ? '#3fb950' : '#f85149';
-      totalEqEl.title = 'All paper strategies. Realized $' + Number(status.totalRealizedPnl || status.realizedPnl || 0).toFixed(2)
-        + ' + unrealized $' + Number(status.totalUnrealizedPnl == null ? status.unrealizedPnl || 0 : status.totalUnrealizedPnl).toFixed(2);
+      var ledger = status.equityLedger || {};
+      totalEqEl.title = 'Combined ledger = strict $' + Number(ledger.strict && ledger.strict.equity || equity).toFixed(2)
+        + ' + research $' + Number(ledger.research && ledger.research.equity || 0).toFixed(2)
+        + ' + legacy/pre-upgrade PnL impact $' + Number((ledger.legacyImpact && ledger.legacyImpact.realizedPnl || 0) + (ledger.legacyImpact && ledger.legacyImpact.unrealizedPnl || 0)).toFixed(2)
+        + '. Single-ledger view: $' + Number(ledger.singleLedgerEquity == null ? totalEq : ledger.singleLedgerEquity).toFixed(2);
     }
     var equityInput = document.getElementById('p2-equity');
     if(equityInput && document.activeElement !== equityInput) {
@@ -6022,6 +6080,10 @@ function pollPaperStats() {
   addParam('vps-st-symbol', 'symbol', true);
   addParam('vps-st-direction', 'direction', true);
   addParam('vps-st-tf', 'timeframe', true);
+  addParam('vps-st-outcome', 'outcome', true);
+  addParam('vps-st-funding', 'fundingSign', true);
+  addParam('vps-st-volume', 'volumeBucket', true);
+  addParam('vps-st-market', 'marketTag', true);
   addParam('vps-st-from', 'from', false);
   addParam('vps-st-to', 'to', false);
   fetch(PAPER_API + '/stats' + (params.length ? '?' + params.join('&') : ''), {cache:'no-store'})
@@ -6052,6 +6114,10 @@ function vpsHistoryQuery(monthly) {
   add('vps-st-symbol', 'symbol', true);
   add('vps-st-direction', 'direction', true);
   add('vps-st-tf', 'timeframe', true);
+  add('vps-st-outcome', 'outcome', true);
+  add('vps-st-funding', 'fundingSign', true);
+  add('vps-st-volume', 'volumeBucket', true);
+  add('vps-st-market', 'marketTag', true);
   if(monthly) {
     var now = new Date();
     var first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -6074,10 +6140,11 @@ function exportVpsCsv(monthly) {
   fetch(PAPER_API + '/history' + (query ? '?' + query : ''), {cache:'no-store'})
     .then(function(r){return r.json().then(function(data){if(!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status)); return data;});})
     .then(function(data){
-      var headers = ['closedAt','id','symbol','direction','status','outcome','strategyVersion','cohortId','timeframe','mode','entryLimit','entryActual','exitPrice','sl','tp1','tp2','score','confluencePct','r','pnl','closeReason','createdAt','openedAt','dataQuality','source'];
+      var headers = ['closedAt','id','symbol','direction','status','outcome','strategyVersion','cohortId','timeframe','mode','entryLimit','entryActual','exitPrice','sl','tp1','tp2','score','confluencePct','r','pnl','closeReason','createdAt','openedAt','dataQuality','source','analysisStatus','analysisSummary','exitTags','setupTags','marketTags'];
       var lines = [headers.map(csvCell).join(',')];
       (data.closedTrades || []).forEach(function(t){
-        lines.push([t.closedAt,t.id,t.sym,t.dir,t.status,t.outcome,t.strategyVersion,t.cohortId,t.timeframe || t.tf,t.mode || t.signalMode,t.entryLimit,t.entryActual,t.exitPrice,t.sl,t.tp1,t.tp2,t.score,t.confluencePct,t.r,t.pnl,t.closeReason,t.createdAt,t.openedAt,t.dataQuality,t.source].map(csvCell).join(','));
+        var at=t.analysisTags||{};
+        lines.push([t.closedAt,t.id,t.sym,t.dir,t.status,t.outcome,t.strategyVersion,t.cohortId,t.timeframe || t.tf,t.mode || t.signalMode,t.entryLimit,t.entryActual,t.exitPrice,t.sl,t.tp1,t.tp2,t.score,t.confluencePct,t.r,t.pnl,t.closeReason,t.createdAt,t.openedAt,t.dataQuality,t.source,t.analysisStatus||'DATA_NOT_CAPTURED',t.analysisSummary||'',(at.exit||[]).join('|'),(at.setup||[]).join('|'),(at.market||[]).join('|')].map(csvCell).join(','));
       });
       var blob = new Blob(['\ufeff' + lines.join('\r\n') + '\r\n'], {type:'text/csv;charset=utf-8;'});
       var link = document.createElement('a'); link.href = URL.createObjectURL(blob);
@@ -6100,7 +6167,10 @@ function vpsFmtMs(ms) {
 function vpsFmtAt(value) {
   if(!value) return '--';
   var date = new Date(value);
-  return isNaN(date.getTime()) ? String(value) : date.toLocaleString('id-ID');
+  if(isNaN(date.getTime())) return String(value);
+  var utc = date.toISOString().replace('T',' ').slice(0,16) + ' UTC';
+  var wib = date.toLocaleString('id-ID', {timeZone:'Asia/Jakarta', hour12:false});
+  return utc + ' · ' + wib + ' WIB';
 }
 function vpsKpi(label, value, color) {
   return '<div class="kpi"><div class="l">' + sourceEsc(label) + '</div><div class="v" style="font-size:14px;color:' + (color || '#c9d1d9') + ';">' + sourceEsc(value) + '</div></div>';
@@ -6143,10 +6213,12 @@ function renderVpsStats(data) {
     ['Max DD %', Number(m.maxDrawdownPct || 0).toFixed(2) + '% ($' + Number(m.maxDrawdownPnl || 0).toFixed(2) + ')', Number(m.maxDrawdownPct || 0) > 10 ? '#f85149' : '#e3b341'],
     ['Realized daily Sharpe (ann.)', m.realizedDailySharpe == null ? '-- (' + Number(m.realizedDailySharpeDays || 0) + '/30 days)' : Number(m.realizedDailySharpe).toFixed(2), '#58a6ff'],
     ['TP1 / TP2 / SL', (m.tp1Hits || 0) + ' / ' + (m.tp2Hits || 0) + ' / ' + (m.stopLosses || 0), '#e3b341'],
+    ['Exit quality', (m.fullTp2Wins || 0) + ' TP2 · ' + (m.protectedAfterTp1 || 0) + ' protected · ' + (m.directSlLosses || 0) + ' direct SL', '#c9d1d9'],
     ['Expired', (sample.pendingExpired || 0) + ' (' + Number(m.pendingExpiredRate || 0).toFixed(1) + '%)', '#e3b341'],
     ['Avg / Median R', Number(m.averageR || 0).toFixed(3) + ' / ' + Number(m.medianR || 0).toFixed(3), '#c9d1d9'],
     ['Fill time', vpsFmtMs(m.averageTimeToFillMs) + ' / ' + vpsFmtMs(m.medianTimeToFillMs), '#c9d1d9'],
     ['MFE / MAE', '$' + Number(m.averageMfePnl || 0).toFixed(2) + ' / $' + Number(m.averageMaePnl || 0).toFixed(2), '#c9d1d9'],
+    ['Snapshot capture', Number(data.analysisCoverage && data.analysisCoverage.captureRate || 0).toFixed(1) + '% full · ' + Number(data.analysisCoverage && data.analysisCoverage.partial || 0) + ' partial', Number(data.analysisCoverage && data.analysisCoverage.captureRate || 0) >= 80 ? '#3fb950' : '#e3b341'],
     ['PnL', '$' + Number(m.pnl || 0).toFixed(2), Number(m.pnl || 0) >= 0 ? '#3fb950' : '#f85149']
   ];
   if(kpiEl) kpiEl.innerHTML = kpis.map(function(k){return vpsKpi(k[0], k[1], k[2]);}).join('');
@@ -6155,7 +6227,14 @@ function renderVpsStats(data) {
   ]) + '<div class="muted" style="margin:8px 0 4px;">By direction</div>' + vpsGroupTable(data.byDirection, [
     {label:'Direction',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]);
-  if(qualityEl) qualityEl.innerHTML = '<div class="muted" style="margin:0 0 4px;">By strategy / cohort</div>' + vpsGroupTable(data.byStrategyVersion, [
+  if(qualityEl) { var ac = data.analysisCoverage || {}; var p4Text = ac.p4Ready ? 'P4 AI ready' : ac.p4GatePassed ? '30+ full snapshots, P4 AI implementation pending' : 'P4 waits for 30 full snapshots'; qualityEl.innerHTML = '<div class="muted" style="margin:0 0 4px;">Snapshot coverage: ' + Number(ac.captured || 0) + '/' + Number(ac.totalClosed || sample.closed || 0) + ' full · ' + Number(ac.partial || 0) + ' partial · ' + p4Text + '</div>'
+  + vpsGroupTable(data.byExitTag, [
+    {label:'Exit tag',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By setup quality</div>' + vpsGroupTable(data.bySetupTag, [
+    {label:'Setup tag',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By market condition</div>' + vpsGroupTable(data.byMarketTag, [
+    {label:'Market tag',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
+  ]) + '<div class="muted" style="margin:8px 0 4px;">By strategy / cohort</div>' + vpsGroupTable(data.byStrategyVersion, [
     {label:'Strategy',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + vpsGroupTable(data.byCohort, [
     {label:'Cohort',key:'key'}, {label:'Trades',key:'trades'}, {label:'Win%',value:function(r){return Number(r.winRate || 0).toFixed(1) + '%';}}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
@@ -6165,7 +6244,7 @@ function renderVpsStats(data) {
     {label:'Score',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
   ]) + vpsGroupTable(data.closeReasons, [
     {label:'Close reason',key:'key'}, {label:'Trades',key:'trades'}, {label:'Net R',value:function(r){return Number(r.netR || 0).toFixed(2);}}
-  ]);
+  ]); }
 }
 
 function renderPaperDiagnostics(data) {
@@ -6177,7 +6256,7 @@ function renderPaperDiagnostics(data) {
   var state = data.state || {};
   var lastError = data.lastError || bot.lastError || runtime.lastScanError || runtime.lastMonitorError || '';
   var status = source.displayStatus || source.status || 'UNKNOWN';
-  var statusColor = status === 'LIVE' ? '#3fb950' : status === 'DELAYED' ? '#f0883e' : '#f85149';
+  var statusColor = status === 'LIVE' || status === 'FALLBACK_LIVE' ? '#3fb950' : status === 'DELAYED' ? '#f0883e' : '#f85149';
   el.innerHTML = '<b>VPS operations</b> · scan ' + sourceEsc(data.strategyVersion || '--')
     + ' · <span style="color:' + statusColor + ';">Bitget ' + sourceEsc(status) + '</span>'
     + ' · last ' + sourceEsc(vpsFmtAt(data.lastScanAt || bot.lastScanAt))
@@ -6264,7 +6343,7 @@ function refreshOpsPage() {
       var sources = diag.sources || {};
       sourceHost.innerHTML = Object.keys(sources).map(function(name){
         var src = sources[name] || {}, s = src.displayStatus || src.status || 'UNKNOWN';
-        var cls = s === 'LIVE' ? 'status-live' : s === 'DELAYED' || s === 'UNKNOWN' ? 'status-warn' : 'status-error';
+        var cls = s === 'LIVE' || s === 'FALLBACK_LIVE' ? 'status-live' : s === 'DELAYED' || s === 'UNKNOWN' ? 'status-warn' : 'status-error';
         return '<div class="kpi"><div class="l">' + sourceEsc(name) + '</div><div class="v" style="font-size:14px;"><span class="status-chip ' + cls + '">' + sourceEsc(s) + '</span></div><div class="s">' + sourceEsc(src.lastError || (src.ageSec == null ? 'not checked' : src.ageSec + 's old')) + '</div></div>';
       }).join('');
     }
@@ -6941,9 +7020,24 @@ function updateActiveTradesPanel() {
   }
 
   // Total exposure
-  var exposure = open.concat(partial).reduce(function(s,t){return s+(t.remainingSize != null ? t.remainingSize : t.size);}, 0);
+  var exposureBy = {STRICT:0, RESEARCH:0, PRE_UPGRADE:0, LEGACY:0};
+  var exposureTrades = BOT.activeTrades.filter(function(t){return t.status === 'OPEN' || t.status === 'TP1_PARTIAL';});
+  var exposure = exposureTrades.reduce(function(s,t){
+    var value = t.remainingSize != null ? Number(t.remainingSize) : Number(t.size || 0);
+    var bucket = t.researchCollection || t.strategyVersion === 'RESEARCH_COLLECTION' ? 'RESEARCH'
+      : t.strategyVersion === 'PRE_UPGRADE' ? 'PRE_UPGRADE'
+      : (t.executionClass === 'LEGACY' || t.strategyVersion === 'LEGACY') ? 'LEGACY' : 'STRICT';
+    exposureBy[bucket] += value;
+    return s + value;
+  }, 0);
   var expEl = document.getElementById('bot-exposure');
-  if(expEl) expEl.textContent = '$' + exposure.toFixed(0);
+  if(expEl) {
+    expEl.textContent = '$' + exposure.toFixed(0);
+    expEl.title = 'Exposure breakdown · Strict $' + exposureBy.STRICT.toFixed(0) +
+      ' · Research $' + exposureBy.RESEARCH.toFixed(0) +
+      ' · Pre-upgrade $' + exposureBy.PRE_UPGRADE.toFixed(0) +
+      ' · Legacy $' + exposureBy.LEGACY.toFixed(0);
+  }
 
   // Active trades list
   var listEl = document.getElementById('bot-trades-list');
@@ -7069,13 +7163,15 @@ function renderSourceHealth(sources) {
   var live = 0, stale = 0, errors = 0;
   var html = names.map(function(pair) {
     var item = sources && sources[pair[0]] ? sources[pair[0]] : {};
-    var state = item.status || 'UNKNOWN';
+    var state = item.displayStatus || item.status || 'UNKNOWN';
     var lastOk = item.lastOkAt ? new Date(item.lastOkAt) : null;
     var age = lastOk && !isNaN(lastOk.getTime()) ? (Date.now() - lastOk.getTime()) / 1000 : Infinity;
-    var display = state === 'LIVE' && age > 180 ? 'DELAYED' : state;
-    var color = display === 'LIVE' ? '#3fb950' : display === 'ERROR' ? '#f85149' : display === 'DELAYED' ? '#f0883e' : '#e3b341';
-    if(display === 'LIVE') live++;
+    var display = ((state === 'LIVE' || state === 'FALLBACK_LIVE') && age > 300) ? 'STALE'
+      : ((state === 'LIVE' || state === 'FALLBACK_LIVE') && age > 60) ? 'DELAYED' : state;
+    var color = display === 'LIVE' || display === 'FALLBACK_LIVE' ? '#3fb950' : display === 'ERROR' || display === 'STALE' ? '#f85149' : display === 'DELAYED' ? '#f0883e' : '#e3b341';
+    if(display === 'LIVE' || display === 'FALLBACK_LIVE') live++;
     if(display === 'DELAYED') stale++;
+    if(display === 'STALE') errors++;
     if(display === 'ERROR') errors++;
     var ageText = lastOk ? ' · ' + (age < 60 ? Math.round(age) + 's' : Math.floor(age / 60) + 'm') + ' old' : '';
     var detail = display === 'LIVE' || display === 'DELAYED'
@@ -7092,8 +7188,15 @@ function renderSourceHealth(sources) {
   if(summary) {
     var primary = sources && sources.bitget ? sources.bitget : {};
     var primaryState = primary.displayStatus || primary.status || 'UNKNOWN';
-    summary.textContent = 'Paper primary: ' + primaryState + ' · ' + live + '/' + names.length + ' feeds LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' error' : '');
+    summary.textContent = 'Paper primary: ' + primaryState + ' · ' + live + '/' + names.length + ' feeds LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' stale/error' : '');
     summary.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
+  }
+  var healthEl = document.getElementById('bot-data-health');
+  if(healthEl) {
+    var healthLabel = errors ? 'STALE/ERROR' : stale ? 'DELAYED' : live ? 'LIVE' : 'CHECKING';
+    healthEl.textContent = healthLabel;
+    healthEl.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
+    healthEl.title = 'Feed sehat: ' + live + '/' + names.length + ' · delayed: ' + stale + ' · stale/error: ' + errors;
   }
 }
 
@@ -7106,7 +7209,14 @@ function pollSourceHealth() {
   }
   fetch(PROXY_BASE + '/healthz', {cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
-    .then(function(data){ if(data && data.sources) renderSourceHealth(data.sources); })
+    .then(function(data){
+      if(data && data.sources) renderSourceHealth(data.sources);
+      var buildEl = document.getElementById('app-build');
+      if(buildEl && data && data.buildId) {
+        buildEl.textContent = 'build ' + data.buildId;
+        buildEl.title = 'Build aktif dari VPS · schema ' + (data.schemaVersion == null ? '--' : data.schemaVersion);
+      }
+    })
     .catch(function(){
       var summary = document.getElementById('source-health-summary');
       if(summary) { summary.textContent = 'VPS HEALTH ERROR'; summary.style.color = '#f85149'; }

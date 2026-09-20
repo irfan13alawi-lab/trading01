@@ -49,7 +49,17 @@ const PAPER_MIN_ENTRY_OFFSET_PCT = Math.max(0.05, Math.min(2,
 const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
   Number.isFinite(Number(process.env.PAPER_MIN_RR))
     ? Number(process.env.PAPER_MIN_RR) : 2));
-const PAPER_SCHEMA_VERSION = 9;
+// Expose a verifiable build marker in health/status responses so the browser
+// cannot be mistaken for an older cached HTML or VPS process.
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.0-research-audit-2026-09-20');
+// Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
+// snapshot. Older records remain readable; stored context is labelled PARTIAL
+// when it is usable, while missing indicators are never invented.
+const PAPER_SCHEMA_VERSION = 10;
+// P4 AI is intentionally not enabled by a loose environment flag.  The
+// current build exposes the evidence gate and rule-based summaries only;
+// an AI provider must be integrated and verified before this becomes true.
+const PAPER_P4_AI_IMPLEMENTED = false;
 // This is still paper-only sizing. The trial can keep up to 80 active records
 // so a one-week sample is not starved by pending orders; live exchange keys
 // are not used by this service. Existing legacy trades keep their sizing.
@@ -167,7 +177,8 @@ Object.keys(APIS).forEach(prefix => {
   sourceHealth[prefix.slice(1)] = {
     status: 'UNKNOWN', lastAttemptAt: null, lastOkAt: null,
     lastErrorAt: null, lastLatencyMs: null, lastHttpStatus: null,
-    lastPath: null, lastError: null, requestCount: 0, paths: {}
+    lastPath: null, lastError: null, requestCount: 0, paths: {},
+    lastSuccessfulPath: null, fallbackActive: false, primaryError: null
   };
 });
 
@@ -256,6 +267,8 @@ function markSourceHealth(prefix, result) {
     item.status = 'LIVE';
     item.lastOkAt = now;
     item.lastError = null;
+    item.lastSuccessfulPath = result.path || item.lastPath;
+    item.fallbackActive = false;
   } else {
     item.status = result.status === 429 ? 'RATE_LIMITED' : 'ERROR';
     item.lastErrorAt = now;
@@ -292,14 +305,59 @@ function sourceHealthView() {
     const lastOkMs = item.lastOkAt ? Date.parse(item.lastOkAt) : NaN;
     const ageSec = Number.isFinite(lastOkMs)
       ? Math.max(0, Math.round((now - lastOkMs) / 1000)) : null;
+    const isFreshLive = item.status === 'LIVE' && ageSec != null && ageSec <= 60;
+    const hasFallback = Boolean(item.fallbackActive && item.lastOkAt);
+    const displayStatus = ageSec != null && ageSec > 300
+      ? 'STALE'
+      : ageSec != null && ageSec > 60 ? 'DELAYED'
+      : isFreshLive ? 'LIVE'
+        : hasFallback ? 'FALLBACK_LIVE' : item.status;
     return [name, {
       ...item,
       ageSec,
-      displayStatus: (item.status === 'LIVE' && ageSec != null && ageSec > 180) ||
-        (item.status === 'RATE_LIMITED' && item.lastOkAt)
-        ? 'DELAYED' : item.status
+      displayStatus: (item.status === 'RATE_LIMITED' && item.lastOkAt && ageSec != null && ageSec <= 60)
+        ? 'DELAYED' : displayStatus
     }];
   }));
+}
+
+// These providers are not part of the order decision, but their health must be
+// observable.  A quiet UNKNOWN badge is misleading when the dashboard claims
+// that backup dominance, macro, or exchange feeds are available.  Probe only
+// lightweight public endpoints every five minutes and never let a probe block
+// the paper loop.
+const SOURCE_HEALTH_PROBE_MS = 5 * 60 * 1000;
+let sourceHealthProbeBusy = false;
+async function probeExternalSources() {
+  if (sourceHealthProbeBusy) return;
+  sourceHealthProbeBusy = true;
+  const probes = [
+    ['/coingecko', '/api/v3/global'],
+    ['/coinpaprika', '/v1/global'],
+    ['/okx', '/api/v5/public/time'],
+    // Keep the health probe on the same feed the dashboard consumes.  The
+    // old /calendar.json path can return a different response (or 404), which
+    // made the source look unhealthy even while the actual calendar endpoint
+    // was working.
+    ['/macro', '/ff_calendar_thisweek.json']
+  ];
+  try {
+    for (const [prefix, pathname] of probes) {
+      const startedAt = Date.now();
+      try {
+        const result = await requestUpstream(APIS[prefix] + pathname);
+        markSourceHealth(prefix, {...result, latencyMs: Date.now() - startedAt, path: pathname});
+      } catch (error) {
+        markSourceError(prefix, error, pathname);
+      }
+    }
+    // CryptoCompare's public news endpoint is commonly 401 without an API
+    // key, so health must probe both the primary and the RSS fallback.  This
+    // keeps the badge current even when nobody has the News tab open.
+    await probeCryptoCompareHealth();
+  } finally {
+    sourceHealthProbeBusy = false;
+  }
 }
 
 function cacheTtl(prefix, pathname) {
@@ -322,6 +380,42 @@ const NEWS_IMPACT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEWS_ARTICLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const newsArticleCache = new Map();
 const newsImpactCache = new Map();
+
+async function probeCryptoCompareHealth() {
+  const primaryPath = '/data/v2/news/';
+  const fallbackPath = '/arc/outboundfeeds/rss/';
+  let primaryError = null;
+  try {
+    const startedAt = Date.now();
+    const primary = await requestUpstream(CRYPTOCOMPARE_NEWS_URL + '&limit=1');
+    primary.latencyMs = Date.now() - startedAt;
+    primary.path = primaryPath;
+    markSourceHealth('/cryptocompare', primary);
+    if (primary.status >= 200 && primary.status < 300) {
+      return;
+    }
+    primaryError = 'CryptoCompare primary HTTP ' + primary.status;
+  } catch (error) {
+    primaryError = error.message || 'CryptoCompare primary unavailable';
+    markSourceError('/cryptocompare', error, primaryPath);
+  }
+  try {
+    const startedAt = Date.now();
+    const fallback = await requestUpstream(NEWS_RSS_URL);
+    fallback.latencyMs = Date.now() - startedAt;
+    fallback.path = fallbackPath;
+    markSourceHealth('/cryptocompare', fallback);
+    const health = sourceHealth.cryptocompare;
+    if (fallback.status >= 200 && fallback.status < 300 && health) {
+      health.fallbackActive = true;
+      health.primaryError = primaryError;
+      health.lastError = primaryError;
+      health.lastSuccessfulPath = fallbackPath;
+    }
+  } catch (error) {
+    markSourceError('/cryptocompare', error, fallbackPath);
+  }
+}
 
 function decodeNewsXml(value) {
   return String(value || '')
@@ -581,6 +675,18 @@ async function serveNewsFeed(requestUrl, res) {
       const fallbackRows = parseNewsRss(fallback.body).slice(0, limit);
       rememberNewsArticles(fallbackRows);
       body = JSON.stringify({Type: 100, Message: 'News list successfully returned', Provider: 'CoinDesk RSS fallback', Data: fallbackRows});
+      // CryptoCompare's public news endpoint commonly returns 401 without an
+      // API key.  The RSS feed is the working provider; expose that fact
+      // instead of showing a generic delayed/error badge while the News tab is
+      // actually healthy.
+      const health = sourceHealth.cryptocompare;
+      if (health) {
+        health.fallbackActive = true;
+        health.primaryError = primary && primary.status >= 400
+          ? 'CryptoCompare primary HTTP ' + primary.status : (primaryError && primaryError.message) || null;
+        health.lastError = health.primaryError;
+        health.lastSuccessfulPath = '/arc/outboundfeeds/rss/';
+      }
     } catch (error) {
       markSourceError('/cryptocompare', error, '/arc/outboundfeeds/rss/');
       send(res, 502, JSON.stringify({error: 'News provider unavailable', detail: error.message || (primaryError && primaryError.message) || 'unknown error'}));
@@ -1174,6 +1280,218 @@ function paperNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function paperAnalysisCaptured(trade) {
+  if (!trade) return false;
+  const mtf = trade.mtf && typeof trade.mtf === 'object' ? trade.mtf : {};
+  const tfNames = ['H4', 'H1', 'M30', 'M15'];
+  const hasTfSnapshot = tfNames.every(tf => mtf[tf] &&
+    (mtf[tf].lastClosedCandleAt || (trade.candleAtByTf && trade.candleAtByTf[tf])));
+  // Re-evaluate the raw fields instead of trusting a stale status written by
+  // an older build.  This lets an upgraded process recognise older records
+  // that already contain a complete entry snapshot.
+  return !!(trade.analysisSnapshot && trade.analysisSnapshot.captureLevel === 'FULL') || (
+    !!trade.signalCreatedAt && hasTfSnapshot &&
+    trade.setupValidation && typeof trade.setupValidation === 'object' &&
+    trade.indicators && typeof trade.indicators === 'object' &&
+    trade.dataQuality === 'FULL'
+  );
+}
+
+function paperAnalysisHasPartialContext(trade) {
+  if (!trade) return false;
+  const indicators = trade.indicators && typeof trade.indicators === 'object' ? trade.indicators : {};
+  const mtf = trade.mtf && typeof trade.mtf === 'object' ? trade.mtf : {};
+  const hasMtf = ['H4', 'H1', 'M30', 'M15'].some(tf => mtf[tf] && typeof mtf[tf] === 'object');
+  const hasMarketContext = trade.fund != null || trade.oi != null || trade.volumeRatio != null ||
+    trade.regime || trade.marketRegime || trade.dataQuality || trade.dataAt;
+  const hasIndicatorContext = Object.keys(indicators).length > 0;
+  const hasStoredSnapshot = trade.analysisSnapshot && typeof trade.analysisSnapshot === 'object';
+  const hasSetupContext = trade.setupValidation && typeof trade.setupValidation === 'object' ||
+    trade.signalScores && typeof trade.signalScores === 'object' || trade.entryLimit != null;
+  // Direction and signal time are valid historical facts from the order
+  // record. They are enough for a partial audit row, but never enough for
+  // full factor inference or P4/AI eligibility.
+  return !!(trade.signalCreatedAt || trade.createdAt) && !!trade.dir &&
+    (hasMtf || hasMarketContext || hasIndicatorContext || hasSetupContext || hasStoredSnapshot);
+}
+
+function paperAnalysisGate(capturedCount) {
+  const fullSnapshots = Math.max(0, Number(capturedCount) || 0);
+  const minimumForInference = 30;
+  const p4GatePassed = fullSnapshots >= minimumForInference;
+  const p4AiEnabled = PAPER_P4_AI_IMPLEMENTED &&
+    String(process.env.PAPER_TRADE_AI_ENABLED || '').toLowerCase() === 'true';
+  return {
+    fullSnapshots, minimumForInference, p4GatePassed, p4AiEnabled,
+    p4Ready: p4GatePassed && p4AiEnabled,
+    p4Reason: p4GatePassed
+      ? (p4AiEnabled ? 'P4_AI_READY' : 'P4_AI_IMPLEMENTATION_PENDING')
+      : 'WAITING_FOR_30_FULL_SNAPSHOTS'
+  };
+}
+
+function paperExitClassification(trade) {
+  const reason = String(trade && trade.closeReason || '').toLowerCase();
+  const tp1Hit = !!(trade && trade.tp1Hit);
+  if (reason.includes('tp2')) return 'FULL_TP2';
+  if (reason.includes('sl') && tp1Hit) return 'PROTECTED_AFTER_TP1';
+  if (reason.includes('sl')) return 'DIRECT_SL_LOSS';
+  if (reason.includes('expir')) return 'PENDING_EXPIRED';
+  if (trade && trade.outcome === 'WIN') return 'OTHER_WIN';
+  if (trade && trade.outcome === 'LOSS') return 'OTHER_LOSS';
+  return 'OTHER_CLOSE';
+}
+
+function paperTradeAnalysisTags(trade) {
+  const tags = {exit: [], setup: [], market: []};
+  if (!trade) return tags;
+  const closeReason = String(trade.closeReason || '').toLowerCase();
+  if (closeReason.includes('tp2')) tags.exit.push('HIT_TP2');
+  else if (closeReason.includes('tp1')) tags.exit.push('HIT_TP1');
+  else if (closeReason.includes('sl') && trade.tp1Hit) tags.exit.push('SL_AFTER_TP1');
+  else if (closeReason.includes('sl')) tags.exit.push('HIT_SL');
+  else if (closeReason.includes('expir')) tags.exit.push('EXPIRED');
+  else if (trade.outcome === 'CANCELLED') tags.exit.push('CANCELLED');
+  else if (trade.status === 'CLOSED') tags.exit.push('CLOSED_OTHER');
+
+  const confluence = paperNumber(trade.confluencePct);
+  const alignment = paperNumber(trade.mtfAlignment);
+  const rr = paperNumber(trade.setupValidation && trade.setupValidation.rr || trade.rr);
+  if (alignment >= 3) tags.setup.push('MTF_ALIGNED');
+  if (alignment >= 4) tags.setup.push('MTF_FULL_ALIGNMENT');
+  if (confluence >= 80) tags.setup.push('HIGH_CONFLUENCE');
+  else if (confluence && confluence < 70) tags.setup.push('LOW_CONFLUENCE');
+  if (rr >= 2) tags.setup.push('GOOD_RR');
+  else if (rr > 0) tags.setup.push('LOW_RR');
+  if (trade.dataQuality === 'FULL') tags.setup.push('DATA_FULL');
+  else tags.setup.push('DATA_PARTIAL');
+
+  const summary = trade.mtfSummary || {};
+  if (summary.higherAligned && summary.confirmAligned && summary.triggerAligned) tags.market.push('MTF_TREND_ALIGNED');
+  if (summary.higherOpposed || summary.confirmOpposed) tags.market.push('HIGHER_TF_CONFLICT');
+  if (trade.fund < 0) tags.market.push('FUNDING_NEGATIVE');
+  else if (trade.fund > 0) tags.market.push('FUNDING_POSITIVE');
+  if (trade.oi > 0) tags.market.push('OI_RISING');
+  else if (trade.oi < 0) tags.market.push('OI_FALLING');
+  const volumeRatio = paperNumber(trade.volumeRatio);
+  if (volumeRatio >= 1.5) tags.market.push('HIGH_VOLUME');
+  else if (volumeRatio > 0 && volumeRatio < 1) tags.market.push('LOW_VOLUME');
+  const indicators = trade.indicators || {};
+  if (indicators.candlePattern && indicators.candlePattern !== 'NONE') tags.market.push('CANDLE_' + String(indicators.candlePattern).toUpperCase());
+  const regime = paperTradeRegimeTag(trade);
+  if (regime) tags.market.push(regime);
+  if (trade.outcome === 'WIN') tags.setup.push('GOOD_TRADE_WIN');
+  else if (trade.outcome === 'LOSS' && tags.exit.includes('HIT_SL')) tags.setup.push('GOOD_TRADE_LOSS_REVIEW');
+  return tags;
+}
+
+function paperTradeRegimeTag(trade) {
+  const explicit = String(trade && (trade.regime || trade.marketRegime) || '').trim().toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (['TRENDING_BULL', 'TRENDING_BEAR', 'RANGING', 'HIGH_VOLATILITY', 'LOW_VOLUME'].includes(explicit)) return explicit;
+  const mtf = trade && trade.mtf && typeof trade.mtf === 'object' ? trade.mtf : {};
+  const h4 = String(mtf.H4 && mtf.H4.direction || '').toUpperCase();
+  const h1 = String(mtf.H1 && mtf.H1.direction || '').toUpperCase();
+  if (h4 === 'LONG' && h1 === 'LONG') return 'TRENDING_BULL';
+  if (h4 === 'SHORT' && h1 === 'SHORT') return 'TRENDING_BEAR';
+  const volumeRatio = paperNumber(trade && trade.volumeRatio);
+  if (volumeRatio > 0 && volumeRatio < 0.75) return 'LOW_VOLUME';
+  const atrPct = paperNumber(trade && trade.atrPct);
+  if (atrPct >= 4) return 'HIGH_VOLATILITY';
+  return 'RANGING';
+}
+
+function paperBuildAnalysisSnapshot(trade) {
+  if (!trade || !paperAnalysisHasPartialContext(trade)) return null;
+  const mtf = trade.mtf && typeof trade.mtf === 'object' ? trade.mtf : {};
+  return {
+    schemaVersion: 1,
+    captureLevel: paperAnalysisCaptured(trade) ? 'FULL' : 'PARTIAL',
+    capturedAt: trade.signalCreatedAt || trade.createdAt || null,
+    symbol: trade.sym || null, direction: trade.dir || null,
+    timeframe: trade.timeframe || trade.tf || '15M',
+    market: {
+      change24h: trade.chg == null ? null : trade.chg,
+      funding: trade.fund == null ? null : trade.fund,
+      fundingAvailable: trade.fundingAvailable == null ? null : !!trade.fundingAvailable,
+      oiDeltaPct: trade.oi == null ? null : trade.oi,
+      oiAvailable: trade.oiAvailable == null ? null : !!trade.oiAvailable,
+      volume: trade.volume == null ? null : trade.volume,
+      volumeRatio: trade.volumeRatio == null ? null : trade.volumeRatio,
+      volumeAvailable: trade.volumeAvailable == null ? null : !!trade.volumeAvailable,
+      regime: paperTradeRegimeTag(trade), dataQuality: trade.dataQuality || null,
+      dataQualityReason: trade.dataQualityReason || null, source: trade.source || null,
+      dataAt: trade.dataAt || null
+    },
+    indicators: trade.indicators || null,
+    mtf: Object.fromEntries(['H4', 'H1', 'M30', 'M15'].map(tf => [tf, mtf[tf] ? {
+      direction: mtf[tf].direction || null, status: mtf[tf].status || null,
+      strengthPct: mtf[tf].strengthPct == null ? null : mtf[tf].strengthPct,
+      candleAt: mtf[tf].lastClosedCandleAt || mtf[tf].candleAt || null
+    } : null])),
+    setup: {
+      entryLimit: trade.entryLimit == null ? null : trade.entryLimit,
+      sl: trade.sl == null ? null : trade.sl,
+      tp1: trade.tp1 == null ? null : trade.tp1,
+      tp2: trade.tp2 == null ? null : trade.tp2,
+      rr: trade.setupValidation && trade.setupValidation.rr != null ? trade.setupValidation.rr : null,
+      confluencePct: trade.confluencePct == null ? null : trade.confluencePct,
+      mtfAlignment: trade.mtfAlignment == null ? null : trade.mtfAlignment,
+      signalScore: trade.signalScores && trade.signalScores.total != null ? trade.signalScores.total : null,
+      atr: trade.atr == null ? null : trade.atr,
+      support: trade.support == null ? null : trade.support,
+      resistance: trade.resistance == null ? null : trade.resistance
+    }
+  };
+}
+
+function paperEnsureAnalysis(trade) {
+  if (!trade) return trade;
+  const captured = paperAnalysisCaptured(trade);
+  const partial = !captured && paperAnalysisHasPartialContext(trade);
+  trade.analysisStatus = captured ? 'CAPTURED' : partial ? 'PARTIAL' : 'DATA_NOT_CAPTURED';
+  if ((captured || partial) && !trade.analysisSnapshot) {
+    trade.analysisSnapshot = paperBuildAnalysisSnapshot(trade);
+  }
+  trade.analysisTags = paperTradeAnalysisTags(trade);
+  if (trade.closedAt || trade.status === 'CLOSED') {
+    trade.analysisExit = {
+      closedAt: trade.closedAt || null, exitPrice: trade.exitPrice == null ? null : trade.exitPrice,
+      closeReason: trade.closeReason || null, outcome: trade.outcome || null,
+      tp1Hit: !!trade.tp1Hit, mfePnl: paperNumber(trade.mfePnl), maePnl: paperNumber(trade.maePnl)
+    };
+    if (captured && !trade.analysisSummary) {
+      const exit = trade.analysisTags.exit.join(', ') || 'CLOSED_OTHER';
+      const setup = trade.analysisTags.setup.filter(tag => !/^GOOD_TRADE_/.test(tag)).slice(0, 3).join(', ') || 'SETUP_REVIEW';
+      const market = trade.analysisTags.market.slice(0, 3).join(', ') || 'MARKET_CONTEXT_UNKNOWN';
+      const snapshot = trade.analysisSnapshot || {};
+      const marketData = snapshot.market || {};
+      const indicators = snapshot.indicators || {};
+      const mtf = snapshot.mtf || {};
+      const alignment = snapshot.setup && snapshot.setup.mtfAlignment != null
+        ? snapshot.setup.mtfAlignment + '/4' : 'unknown';
+      const rsi = indicators.rsi == null ? 'n/a' : Number(indicators.rsi).toFixed(1);
+      const funding = marketData.funding == null ? 'n/a' : Number(marketData.funding).toFixed(6);
+      const volume = marketData.volumeRatio == null ? 'n/a' : Number(marketData.volumeRatio).toFixed(2) + 'x';
+      const regime = marketData.regime || paperTradeRegimeTag(trade) || 'UNKNOWN';
+      const mtfDirections = ['H4', 'H1', 'M30', 'M15'].map(tf => mtf[tf] && mtf[tf].direction).filter(Boolean).join('/');
+      const verdict = trade.outcome === 'WIN' ? 'GOOD_TRADE_WIN'
+        : trade.outcome === 'LOSS' && trade.analysisTags.setup.includes('MTF_ALIGNED')
+          ? 'GOOD_TRADE_LOSS_REVIEW' : 'SETUP_NEEDS_REVIEW';
+      trade.analysisSummary = trade.sym + ' ' + (trade.dir || '') + ' ' + (trade.outcome || 'CLOSED') +
+        ' · ' + verdict + ' · Exit: ' + exit + ' · Regime: ' + regime +
+        ' · MTF: ' + alignment + (mtfDirections ? ' (' + mtfDirections + ')' : '') +
+        ' · RSI: ' + rsi + ' · Funding: ' + funding + ' · Volume: ' + volume +
+        ' · Setup: ' + setup + ' · Market: ' + market;
+    } else if (partial && !trade.analysisSummary) {
+      trade.analysisSummary = trade.sym + ' ' + (trade.dir || '') + ' ' + (trade.outcome || 'CLOSED') +
+        ' · PARTIAL_CONTEXT · Exit: ' + (trade.closeReason || 'CLOSED_OTHER') +
+        ' · Snapshot entry tidak lengkap; hanya konteks yang tersimpan yang ditampilkan.';
+    }
+  }
+  return trade;
+}
+
 function paperNormaliseWatchlistAlert(input) {
   const raw = input && typeof input === 'object' ? input : {};
   const sym = String(raw.sym || raw.symbol || '').toUpperCase()
@@ -1204,8 +1522,11 @@ function paperFieldPresent(value) {
 
 function paperTimestamp(value) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return parsed < 100000000000 ? parsed * 1000 : parsed;
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed < 100000000000 ? parsed * 1000 : parsed;
+  }
+  const iso = Date.parse(String(value || ''));
+  return Number.isFinite(iso) && iso > 0 ? iso : 0;
 }
 
 function paperExecutionModel(trade) {
@@ -1254,6 +1575,7 @@ function normalisePaperTrade(trade) {
   next.timeframe = next.timeframe || next.tf || '15M';
   next.tf = next.tf || next.timeframe;
   if (!Array.isArray(next.signalReasons)) next.signalReasons = [];
+  paperEnsureAnalysis(next);
   return next;
 }
 
@@ -1929,7 +2251,10 @@ function paperIndicatorSnapshot(rows) {
 }
 
 function paperTickerSymbol(row) {
-  return String(row.symbol || '').replace(/[_-]?USDT$/i, '').toUpperCase();
+  return String(row.symbol || '')
+    .replace(/(?:_UMCBL|_DMCBL|_CMCBL)$/i, '')
+    .replace(/[_-]?USDT$/i, '')
+    .toUpperCase();
 }
 
 function buildPaperPairs(payload) {
@@ -2361,6 +2686,7 @@ function paperDailyLossR() {
 }
 
 function paperTradeView(trade) {
+  paperEnsureAnalysis(trade);
   const entryForRr = paperNumber(trade.entryActual || trade.entryLimit);
   const stopForRr = paperNumber(trade.sl);
   const tp1ForRr = paperNumber(trade.tp1);
@@ -2378,7 +2704,11 @@ function paperTradeView(trade) {
     contracts: paperTradeOriginalContracts(trade),
     remainingContracts: paperTradeRemainingContracts(trade),
     score: trade.score, tier: trade.tier,
-    fund: trade.fund, oi: trade.oi, volume: trade.volume || 0,
+    chg: trade.chg == null ? null : trade.chg,
+    fund: trade.fund, fundingAvailable: trade.fundingAvailable == null ? null : !!trade.fundingAvailable,
+    oi: trade.oi, oiAvailable: trade.oiAvailable == null ? null : !!trade.oiAvailable,
+    volumeAvailable: trade.volumeAvailable == null ? null : !!trade.volumeAvailable,
+    volume: trade.volume || 0,
     volumeRatio: trade.volumeRatio == null ? null : trade.volumeRatio, mtf: trade.mtf || null,
     createdAt: trade.createdAt,
     openedAt: trade.openedAt || null, cycleKey: trade.cycleKey,
@@ -2434,6 +2764,11 @@ function paperTradeView(trade) {
     signalReasons: Array.isArray(trade.signalReasons) ? trade.signalReasons : [],
     scoreBreakdown: trade.scoreBreakdown || null,
     setupValidation: trade.setupValidation || null,
+    analysisStatus: trade.analysisStatus || 'DATA_NOT_CAPTURED',
+    analysisSnapshot: trade.analysisSnapshot || null,
+    analysisExit: trade.analysisExit || null,
+    analysisTags: trade.analysisTags || {exit: [], setup: [], market: []},
+    analysisSummary: trade.analysisSummary || null,
     reason: trade.reason
   };
 }
@@ -3059,6 +3394,7 @@ function closePaperTrade(trade, exitPrice, outcome, reason) {
   trade.closeReason = reason;
   trade.r = Number(r.toFixed(2));
   trade.pnl = Number(totalPnl.toFixed(2));
+  paperEnsureAnalysis(trade);
   paperAddTradeEvent(trade, 'CLOSED', {price: exitPrice, reason, size: closeSize});
   paperState.closedTrades.unshift({
     ...paperTradeView(trade), exitPrice, closedAt: trade.closedAt,
@@ -3482,8 +3818,9 @@ async function runPaperScan(reason, requestedCycleKey) {
         realizedPnlTp1: 0, realizedPnl: 0, realizedPnlFinal: 0,
         fillMethod: null, lastProcessedCandleAt: null,
         createdAt: Date.now(), openedAt: null, cycleKey,
-        score: pair.sc, tier: pair.tier, fund: pair.fund, oi: pair.oi,
-        volume: pair.volume, volumeRatio: pair.volumeRatio, mtf: pair.mtf,
+        score: pair.sc, tier: pair.tier, chg: pair.chg, fund: pair.fund, oi: pair.oi,
+        fundingAvailable: !!pair.fundingAvailable, oiAvailable: !!pair.oiAvailable,
+        volumeAvailable: !!pair.volumeAvailable, volume: pair.volume, volumeRatio: pair.volumeRatio, mtf: pair.mtf,
          timeframe: '15M', tf: '15M', mode: profile.mode,
          signalMode: profile.signalMode, dataQuality: pair.dataQuality,
          strategyVersion: profile.strategyVersion, cohortId: profile.cohortId,
@@ -3506,8 +3843,12 @@ async function runPaperScan(reason, requestedCycleKey) {
         unrealPnl: 0, mfePnl: 0, maePnl: 0,
         executionModel: 'LIMIT_STRICT',
         executionClass: 'STRICT', legacy: false,
-         reason: (researchMode ? 'Research VPS: 15M scan | ' : 'Auto VPS: 15M scan | ') + candidate.evidence.join('; ')
+        reason: (researchMode ? 'Research VPS: 15M scan | ' : 'Auto VPS: 15M scan | ') + candidate.evidence.join('; ')
        };
+      // Persist the entry snapshot immediately.  If the process restarts
+      // before the order is filled/closed, the research record still keeps
+      // the exact market context used to approve the setup.
+      paperEnsureAnalysis(trade);
       paperAddTradeEvent(trade, 'ORDER_PLACED', {price: setup.entry, reason: cycleKey, size: setup.size});
       paperState.activeTrades.push(trade);
       console.log('[paper] placed', id, pair.sym, setup.dir, '@', setup.entry);
@@ -4099,9 +4440,11 @@ function paperStatus(options) {
   const partial = activeRaw.filter(t => t.status === 'TP1_PARTIAL').length;
   const pending = activeRaw.filter(t => t.status === 'PENDING').length;
   const closed = paperState.closedTrades;
-  const wins = closed.filter(t => t.outcome === 'WIN').length;
-  const losses = closed.filter(t => t.outcome === 'LOSS').length;
-  const netR = closed.reduce((sum, t) => sum + paperNumber(t.r), 0);
+  const closedFilled = closed.filter(t => t.outcome !== 'CANCELLED');
+  const cancelled = closed.filter(t => t.outcome === 'CANCELLED');
+  const wins = closedFilled.filter(t => t.outcome === 'WIN').length;
+  const losses = closedFilled.filter(t => t.outcome === 'LOSS').length;
+  const netR = closedFilled.reduce((sum, t) => sum + paperNumber(t.r), 0);
   // The new bot's risk and sizing must not be changed by the first worker's
   // legacy trades. Those trades remain visible and auditable below, but the
   // default equity/risk figures are strict-bot-only.
@@ -4119,6 +4462,8 @@ function paperStatus(options) {
   const strictActiveCount = paperActiveCount();
   const researchActiveCount = paperResearchActiveCount();
   const researchEquity = paperResearchEquity();
+  const researchRealizedPnl = paperResearchRealizedPnl();
+  const researchUnrealizedPnl = paperResearchUnrealizedPnl();
   const researchActiveRisk = paperResearchActiveRiskDollar();
   const legacyActiveCount = paperLegacyActiveCount();
   const preUpgradeActiveCount = paperPreUpgradeActiveCount();
@@ -4129,6 +4474,16 @@ function paperStatus(options) {
   const preUpgradeActiveRisk = paperState.activeTrades
     .filter(trade => paperIsActive(trade) && paperIsPreUpgradeTrade(trade))
     .reduce((sum, trade) => sum + paperTradeRiskDollar(trade), 0);
+  const startingEquity = paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY);
+  const singleLedgerEquity = startingEquity + totalRealizedPnl + totalUnrealizedPnl;
+  const legacyImpactRealized = totalRealizedPnl - realizedPnl - researchRealizedPnl;
+  const legacyImpactUnrealized = totalUnrealizedPnl - unrealizedPnl - researchUnrealizedPnl;
+  const cohortTotalEquity = equity + researchEquity + legacyImpactRealized + legacyImpactUnrealized;
+  const analysisClosed = closedFilled;
+  analysisClosed.forEach(paperEnsureAnalysis);
+  const analysisCaptured = analysisClosed.filter(paperAnalysisCaptured).length;
+  const analysisPartial = analysisClosed.filter(trade => !paperAnalysisCaptured(trade) && paperAnalysisHasPartialContext(trade)).length;
+  const analysisGate = paperAnalysisGate(analysisCaptured);
   const trialDirectionCounts = paperState.activeTrades
     .filter(trade => paperIsActive(trade) && paperIsTrialTrade(trade))
     .reduce((counts, trade) => {
@@ -4138,15 +4493,34 @@ function paperStatus(options) {
   const riskBudget = equity * PAPER_MAX_ACTIVE_RISK_PCT / 100;
   const availableSlots = Math.max(0, cfg.maxActive - strictActiveCount);
   const availableRisk = Math.max(0, riskBudget - activeRisk);
+  const riskHeadroomPct = riskBudget > 0 ? Math.max(0, availableRisk / riskBudget * 100) : 0;
+  const activeExposureNotional = activeRaw
+    .filter(trade => trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL')
+    .reduce((sum, trade) => sum + paperTradeRemainingSize(trade) *
+      paperNumber(trade.currentPrice || trade.entryActual || trade.entryLimit), 0);
+  const exposureRatio = equity > 0 ? activeExposureNotional / equity : 0;
+  const riskWarning = {
+    triggered: riskHeadroomPct <= 20 || exposureRatio >= 3,
+    riskHeadroomPct: Number(riskHeadroomPct.toFixed(1)),
+    exposureNotional: Number(activeExposureNotional.toFixed(2)),
+    exposureRatio: Number(exposureRatio.toFixed(2)),
+    reasons: [
+      ...(riskHeadroomPct <= 20 ? ['RISK_HEADROOM_LOW'] : []),
+      ...(exposureRatio >= 3 ? ['EXPOSURE_OVER_3X_EQUITY'] : [])
+    ]
+  };
   const stats = includeStats ? paperStats() : null;
-  const trialStats = includeStats ? paperStats({
+  // Keep the compact cohort sample on /paper/summary even when the full
+  // statistics payload is disabled.  Otherwise the header displays "--" as
+  // soon as strict positions reach zero, despite historical trades existing.
+  const trialStats = paperStats({
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: paperState.cohortId
-  }) : null;
-  const researchStats = includeStats ? paperStats({
+  });
+  const researchStats = paperStats({
     strategyVersion: PAPER_RESEARCH_STRATEGY_VERSION,
     cohortId: paperState.researchCohortId
-  }) : null;
+  });
   const dailyLossR = paperDailyLossR();
   const researchDailyLossR = paperResearchDailyLossR();
   paperUpdateEquityPeak();
@@ -4158,6 +4532,7 @@ function paperStatus(options) {
   const drawdownGuard = drawdownPct >= PAPER_MAX_DRAWDOWN_PCT;
   const researchDrawdownWarning = researchDrawdownPct >= PAPER_RESEARCH_WARNING_DD_PCT;
   const researchHardStop = researchDrawdownPct >= PAPER_RESEARCH_HARD_DD_PCT;
+  const winRateAlerts = paperWinRateAlertView();
   const dailyGuard = dailyLossR <= -cfg.maxDailyLossR;
   const researchActive = paperResearchEnabled() && paperStarted && !paperState.paused &&
     !paperState.killSwitch && cfg.strategyEnabled && paperWithinTradingHours(cfg) &&
@@ -4188,7 +4563,7 @@ function paperStatus(options) {
     : entryState === 'ENTRY_ACTIVE' ? 'New paper entries are allowed.' : 'Paper service is not accepting new entries.';
   const lastScan = Array.isArray(paperState.recentScans) ? paperState.recentScans[0] : null;
   return {
-    ok: true, service: 'nexora-paper-bot', enabled: paperState.enabled,
+    ok: true, service: 'nexora-paper-bot', buildId: PAPER_BUILD_ID, enabled: paperState.enabled,
     running: paperStarted, paused: !!paperState.paused, killSwitch: !!paperState.killSwitch,
     interval: '15M', perScan: cfg.perScan,
     pendingTtlMinutes: PAPER_PENDING_TTL_MS / 60000, maxConcurrent: cfg.maxActive,
@@ -4219,8 +4594,8 @@ function paperStatus(options) {
       drawdownWarning: researchDrawdownWarning, hardStop: researchHardStop,
       activeCount: researchActiveCount,
       availableSlots: Math.max(0, PAPER_RESEARCH_MAX_ACTIVE - researchActiveCount),
-      realizedPnl: Number(paperResearchRealizedPnl().toFixed(2)),
-      unrealizedPnl: Number(paperResearchUnrealizedPnl().toFixed(2)),
+      realizedPnl: Number(researchRealizedPnl.toFixed(2)),
+      unrealizedPnl: Number(researchUnrealizedPnl.toFixed(2)),
       equity: Number(researchEquity.toFixed(2)),
       activeRisk: Number(researchActiveRisk.toFixed(2)),
       riskBudget: Number((researchEquity * PAPER_MAX_ACTIVE_RISK_PCT / 100).toFixed(2)),
@@ -4269,8 +4644,41 @@ function paperStatus(options) {
     legacyRealizedPnl: Number(legacyRealizedPnl.toFixed(2)),
     preUpgradeRealizedPnl: Number(preUpgradeRealizedPnl.toFixed(2)),
     legacyUnrealizedPnl: Number((totalUnrealizedPnl - unrealizedPnl).toFixed(2)),
-    totalEquity: Number((paperNumber(paperState.startingEquity || PAPER_STARTING_EQUITY) +
-      totalRealizedPnl + totalUnrealizedPnl).toFixed(2)),
+    totalEquity: Number(cohortTotalEquity.toFixed(2)),
+    equityLedger: {
+      definition: 'strict + research cohort ledgers + legacy/pre-upgrade PnL impact',
+      strict: {
+        starting: Number(startingEquity.toFixed(2)),
+        realizedPnl: Number(realizedPnl.toFixed(2)),
+        unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
+        equity: Number(equity.toFixed(2))
+      },
+      research: {
+        starting: Number(paperNumber(paperState.researchStartingEquity || startingEquity).toFixed(2)),
+        realizedPnl: Number(researchRealizedPnl.toFixed(2)),
+        unrealizedPnl: Number(researchUnrealizedPnl.toFixed(2)),
+        equity: Number(researchEquity.toFixed(2))
+      },
+      legacyImpact: {
+        realizedPnl: Number(legacyImpactRealized.toFixed(2)),
+        unrealizedPnl: Number(legacyImpactUnrealized.toFixed(2))
+      },
+      combinedEquity: Number(cohortTotalEquity.toFixed(2)),
+      singleLedgerEquity: Number(singleLedgerEquity.toFixed(2))
+    },
+    analysisCoverage: {
+      closedFilled: analysisClosed.length, captured: analysisCaptured,
+      partial: analysisPartial,
+      notCaptured: Math.max(0, analysisClosed.length - analysisCaptured - analysisPartial),
+      captureRate: analysisClosed.length ? Number((analysisCaptured / analysisClosed.length * 100).toFixed(1)) : 0,
+      contextCoverageRate: analysisClosed.length ? Number(((analysisCaptured + analysisPartial) / analysisClosed.length * 100).toFixed(1)) : 0,
+      ...analysisGate,
+      aiEligible: analysisGate.p4Ready,
+      p4GatePassed: analysisGate.p4GatePassed,
+      p4AiEnabled: analysisGate.p4AiEnabled,
+      p4Ready: analysisGate.p4Ready,
+      p4Reason: analysisGate.p4Reason
+    },
     riskPct: cfg.riskPct,
     maxActiveRiskPct: PAPER_MAX_ACTIVE_RISK_PCT,
     activeRisk: Number(activeRisk.toFixed(2)),
@@ -4278,6 +4686,11 @@ function paperStatus(options) {
     preUpgradeActiveRisk: Number(Math.max(0, preUpgradeActiveRisk).toFixed(2)),
     riskBudget: Number(riskBudget.toFixed(2)),
     availableRisk: Number(availableRisk.toFixed(2)),
+    riskHeadroomPct: Number(riskHeadroomPct.toFixed(1)),
+    activeExposureNotional: Number(activeExposureNotional.toFixed(2)),
+    exposureRatio: Number(exposureRatio.toFixed(2)),
+    riskWarning,
+    winRateAlerts,
     dailyLossR: Number(dailyLossR.toFixed(2)),
     researchDailyLossR: Number(researchDailyLossR.toFixed(2)),
     dailyPnlDate,
@@ -4322,9 +4735,14 @@ function paperStatus(options) {
       statsSample: stats.sample,
       trialStats: trialStats.metrics,
       trialStatsSample: trialStats.sample,
-      researchStats: researchStats ? researchStats.metrics : null,
-      researchStatsSample: researchStats ? researchStats.sample : null
-    } : {}),
+      researchStats: researchStats.metrics,
+      researchStatsSample: researchStats.sample
+    } : {
+      trialStats: trialStats.metrics,
+      trialStatsSample: trialStats.sample,
+      researchStats: researchStats.metrics,
+      researchStatsSample: researchStats.sample
+    }),
     runtime: {
       startedAt: paperRuntime.startedAt,
       lastScanSuccessAt: paperRuntime.lastScanCompletedAt,
@@ -4337,7 +4755,10 @@ function paperStatus(options) {
       monitorsFailed: paperRuntime.monitorsFailed
     },
     summary: {
-      open, partial, pending, closed: closed.length, wins, losses,
+      open, partial, pending, orders: closed.length,
+      closed: closedFilled.length, closedFilled: closedFilled.length,
+      pendingExpired: cancelled.filter(t => String(t.closeReason || '').toLowerCase().includes('expired')).length,
+      cancelled: cancelled.length, wins, losses,
       invalidated: paperState.invalidatedTrades.length,
       netR: Number(netR.toFixed(2)),
       equity: Number(equity.toFixed(2))
@@ -4350,7 +4771,7 @@ function paperDiagnostics() {
   const status = paperStatus({details: false, stats: false});
   return {
     ok: true,
-    service: 'nexora-paper-bot',
+    service: 'nexora-paper-bot', buildId: PAPER_BUILD_ID,
     strategyVersion: PAPER_STRATEGY_VERSION,
     cohortId: paperState.cohortId,
     state: status.state,
@@ -4590,6 +5011,7 @@ function manualPaperTrade(input) {
     setupValidation: validation, executionModel: 'LIMIT_STRICT', executionClass: 'STRICT',
     events: []
   };
+  paperEnsureAnalysis(trade);
   paperAddTradeEvent(trade, 'ORDER_PLACED', {price: entry, reason: trade.reason, size});
   paperState.activeTrades.push(trade);
   savePaperState();
@@ -4604,6 +5026,9 @@ function paperHistoryFilters(query) {
     direction: String(get('direction') || get('dir') || '').trim().toUpperCase(),
     timeframe: String(get('timeframe') || get('tf') || '').trim().toUpperCase(),
     outcome: String(get('outcome') || '').trim().toUpperCase(),
+    fundingSign: String(get('fundingSign') || get('funding') || '').trim().toUpperCase(),
+    volumeBucket: String(get('volumeBucket') || get('volume') || '').trim().toUpperCase(),
+    marketTag: String(get('marketTag') || get('regime') || '').trim().toUpperCase(),
     strategyVersion: String(get('strategyVersion') || get('strategy') || '').trim(),
     cohortId: String(get('cohortId') || get('cohort') || '').trim(),
     from: String(get('from') || '').trim(),
@@ -4616,6 +5041,21 @@ function paperHistoryMatches(trade, filters) {
   if (filters.direction && String(trade.dir || '').toUpperCase() !== filters.direction) return false;
   if (filters.timeframe && String(trade.timeframe || trade.tf || '').toUpperCase() !== filters.timeframe) return false;
   if (filters.outcome && String(trade.outcome || '').toUpperCase() !== filters.outcome) return false;
+  if (filters.fundingSign) {
+    const funding = paperNumber(trade.fund);
+    const actual = funding < 0 ? 'NEGATIVE' : funding > 0 ? 'POSITIVE' : 'ZERO_OR_UNKNOWN';
+    if (actual !== filters.fundingSign) return false;
+  }
+  if (filters.volumeBucket) {
+    const ratio = paperNumber(trade.volumeRatio);
+    const actual = ratio >= 2 ? 'GE2X' : ratio >= 1.5 ? '1_5_1_99X' : ratio >= 1 ? '1_1_49X' : ratio > 0 ? 'LT1X' : 'UNKNOWN';
+    if (actual !== filters.volumeBucket) return false;
+  }
+  if (filters.marketTag) {
+    paperEnsureAnalysis(trade);
+    if (!trade.analysisTags || !Array.isArray(trade.analysisTags.market) ||
+        !trade.analysisTags.market.includes(filters.marketTag)) return false;
+  }
   if (filters.strategyVersion && String(trade.strategyVersion || paperTradeStrategyVersion(trade)) !== filters.strategyVersion) return false;
   if (filters.cohortId && String(trade.cohortId || '') !== filters.cohortId) return false;
   const rawDate = trade.closedAt || trade.createdAt || '';
@@ -4647,10 +5087,22 @@ function paperGroupStats(trades, keyFn) {
   })).sort((a, b) => b.netR - a.netR);
 }
 
+function paperTagGroupStats(trades, category) {
+  const tagged = [];
+  trades.forEach(trade => {
+    paperEnsureAnalysis(trade);
+    const tags = trade.analysisTags && Array.isArray(trade.analysisTags[category])
+      ? trade.analysisTags[category] : ['UNKNOWN'];
+    [...new Set(tags.length ? tags : ['UNKNOWN'])].forEach(tag => tagged.push({...trade, analysisTag: tag}));
+  });
+  return paperGroupStats(tagged, row => row.analysisTag);
+}
+
 function paperStats(query) {
   const filters = paperHistoryFilters(query);
   const all = paperState.closedTrades.slice(0, PAPER_MAX_CLOSED_TRADES)
     .filter(trade => paperHistoryMatches(trade, filters));
+  all.forEach(paperEnsureAnalysis);
   const cancelled = all.filter(trade => trade.outcome === 'CANCELLED');
   const expired = cancelled.filter(trade => String(trade.closeReason || '').toLowerCase().includes('expired'));
   const closed = all.filter(trade => trade.outcome !== 'CANCELLED');
@@ -4735,15 +5187,25 @@ function paperStats(query) {
     return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
   };
   const profitFactor = grossLossR < 0 ? grossProfitR / Math.abs(grossLossR) : null;
+  const captured = closed.filter(paperAnalysisCaptured).length;
+  const partial = closed.filter(trade => !paperAnalysisCaptured(trade) && paperAnalysisHasPartialContext(trade)).length;
+  const notCaptured = Math.max(0, closed.length - captured - partial);
+  const analysisGate = paperAnalysisGate(captured);
+  const exitClassification = {};
+  closed.forEach(trade => {
+    const key = paperExitClassification(trade);
+    exitClassification[key] = (exitClassification[key] || 0) + 1;
+  });
   return {
-    ok: true,
+    ok: true, buildId: PAPER_BUILD_ID,
     asOf: new Date().toISOString(),
-    filters: {...filters, symbol: filters.symbol || 'all', direction: filters.direction || 'all', timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all'},
+    filters: {...filters, symbol: filters.symbol || 'all', direction: filters.direction || 'all', timeframe: filters.timeframe || 'all', outcome: filters.outcome || 'all', fundingSign: filters.fundingSign || 'all', volumeBucket: filters.volumeBucket || 'all', marketTag: filters.marketTag || 'all'},
     sample: {
       orders: all.length, closed: closed.length, filled: filled.length,
       pendingExpired: expired.length, cancelled: cancelled.length,
       wins: wins.length, losses: losses.length,
       breakeven: closed.filter(trade => paperNumber(trade.r) === 0).length,
+      analysisCaptured: captured, analysisPartial: partial, analysisNotCaptured: notCaptured,
       strategyVersion: filters.strategyVersion || 'all',
       cohortId: filters.cohortId || 'all', direction: filters.direction || 'all'
     },
@@ -4774,7 +5236,26 @@ function paperStats(query) {
       tp1HitRate: closed.length ? Number((closed.filter(trade => trade.tp1Hit).length / closed.length * 100).toFixed(1)) : 0,
       tp2HitRate: closed.length ? Number((closed.filter(trade => String(trade.closeReason || '').toLowerCase().includes('tp2')).length / closed.length * 100).toFixed(1)) : 0,
       slHitRate: closed.length ? Number((closed.filter(trade => String(trade.closeReason || '').toLowerCase().includes('sl')).length / closed.length * 100).toFixed(1)) : 0,
+      fullTp2Wins: exitClassification.FULL_TP2 || 0,
+      protectedAfterTp1: exitClassification.PROTECTED_AFTER_TP1 || 0,
+      directSlLosses: exitClassification.DIRECT_SL_LOSS || 0,
+      exitClassification,
       pendingExpiredRate: all.length ? Number((expired.length / all.length * 100).toFixed(1)) : 0
+    },
+    analysisCoverage: {
+      totalClosed: closed.length, captured, partial, notCaptured,
+      captureRate: closed.length ? Number((captured / closed.length * 100).toFixed(1)) : 0,
+      contextCoverageRate: closed.length ? Number(((captured + partial) / closed.length * 100).toFixed(1)) : 0,
+      ...analysisGate,
+      aiEligible: analysisGate.p4Ready,
+      p4GatePassed: analysisGate.p4GatePassed,
+      p4AiEnabled: analysisGate.p4AiEnabled,
+      p4Ready: analysisGate.p4Ready,
+      p4Reason: analysisGate.p4Reason,
+      note: notCaptured
+        ? 'Sebagian trade lama hanya memiliki konteks parsial; indikator yang tidak tersimpan tidak diisi ulang dengan data perkiraan.'
+        : partial ? 'Semua trade memiliki konteks entry, tetapi sebagian belum lengkap untuk inferensi faktor.'
+          : 'Semua trade memiliki snapshot entry lengkap.'
     },
     bySymbol: paperGroupStats(closed, trade => trade.sym),
     byDirection: paperGroupStats(closed, trade => trade.dir),
@@ -4789,7 +5270,17 @@ function paperStats(query) {
     }),
     byFunding: paperGroupStats(closed, trade => {
       const value = paperNumber(trade.fund);
-      return value <= -0.0005 ? '<=-0.05%' : value <= 0.0005 ? '-0.05%..0.05%' : '>0.05%';
+      return value <= -0.001 ? '<=-0.10%' : value <= -0.0005 ? '-0.10%..-0.05%'
+        : value < 0 ? '-0.05%..0%' : value === 0 ? '0%' : value <= 0.0005 ? '0%..0.05%'
+          : value <= 0.001 ? '0.05%..0.10%' : '>0.10%';
+    }),
+    byFundingSign: paperGroupStats(closed, trade => {
+      const value = paperNumber(trade.fund);
+      return value < 0 ? 'NEGATIVE' : value > 0 ? 'POSITIVE' : 'ZERO_OR_UNKNOWN';
+    }),
+    byOISign: paperGroupStats(closed, trade => {
+      const value = paperNumber(trade.oi);
+      return value > 0 ? 'RISING' : value < 0 ? 'FALLING' : 'FLAT_OR_UNKNOWN';
     }),
     byVolumeRatio: paperGroupStats(closed, trade => {
       const value = paperNumber(trade.volumeRatio);
@@ -4799,6 +5290,9 @@ function paperStats(query) {
       const score = paperNumber(trade.score);
       return score >= 8 ? '8-12' : score >= 6.5 ? '6.5-7.9' : '<6.5';
     }),
+    byExitTag: paperTagGroupStats(closed, 'exit'),
+    bySetupTag: paperTagGroupStats(closed, 'setup'),
+    byMarketTag: paperTagGroupStats(closed, 'market'),
     closeReasons: paperGroupStats(closed, trade => trade.closeReason || 'UNKNOWN')
   };
 }
@@ -4814,9 +5308,52 @@ function paperHistory(query) {
     invalidatedTrades: paperState.invalidatedTrades.slice(0, 100),
     monitoringSignals: (paperState.monitoringSignals || []).slice(0, PAPER_MAX_MONITORING_SIGNALS),
     filters: {symbol: filters.symbol || 'all', timeframe: filters.timeframe || 'all',
-      outcome: filters.outcome || 'all', strategyVersion: filters.strategyVersion || 'all',
+      outcome: filters.outcome || 'all', fundingSign: filters.fundingSign || 'all',
+      volumeBucket: filters.volumeBucket || 'all', marketTag: filters.marketTag || 'all',
+      strategyVersion: filters.strategyVersion || 'all',
       cohortId: filters.cohortId || 'all', direction: filters.direction || 'all', from: filters.from, to: filters.to},
     total: closedTrades.length
+  };
+}
+
+function paperWinRateAlertView() {
+  const now = Date.now();
+  const strictClosed = paperState.closedTrades
+    .filter(trade => paperIsTrialTrade(trade) && trade.outcome !== 'CANCELLED')
+    .slice()
+    .sort((a, b) => (paperTimestamp(a.closedAt) || Number(a.createdAt) || 0) -
+      (paperTimestamp(b.closedAt) || Number(b.createdAt) || 0));
+  const windowView = (windowMs, thresholdPct, minimumTrades) => {
+    const rows = strictClosed.filter(trade => {
+      const at = paperTimestamp(trade.closedAt) || Number(trade.createdAt) || 0;
+      return at >= now - windowMs;
+    });
+    const wins = rows.filter(trade => trade.outcome === 'WIN').length;
+    const losses = rows.filter(trade => trade.outcome === 'LOSS').length;
+    const winRate = rows.length ? Number((wins / rows.length * 100).toFixed(1)) : null;
+    return {
+      trades: rows.length, wins, losses, winRate,
+      thresholdPct, minimumTrades,
+      triggered: rows.length >= minimumTrades && winRate < thresholdPct
+    };
+  };
+  let consecutiveLosses = 0;
+  for (let index = strictClosed.length - 1; index >= 0; index -= 1) {
+    if (strictClosed[index].outcome !== 'LOSS') break;
+    consecutiveLosses += 1;
+  }
+  const daily = windowView(24 * 60 * 60 * 1000, 40, 5);
+  const weekly = windowView(7 * 24 * 60 * 60 * 1000, 45, 10);
+  const messages = [];
+  if (daily.triggered) messages.push('daily win rate ' + daily.winRate.toFixed(1) + '% < 40%');
+  if (weekly.triggered) messages.push('weekly win rate ' + weekly.winRate.toFixed(1) + '% < 45%');
+  if (consecutiveLosses >= 4) messages.push(consecutiveLosses + ' strict losses berturut-turut');
+  return {
+    cohort: paperState.cohortId,
+    daily, weekly, consecutiveLosses,
+    consecutiveLossTriggered: consecutiveLosses >= 4,
+    triggered: messages.length > 0,
+    messages
   };
 }
 
@@ -4831,7 +5368,8 @@ function paperExportCsv(query) {
   const headers = ['closedAt', 'id', 'symbol', 'direction', 'status', 'outcome',
     'strategyVersion', 'cohortId', 'timeframe', 'mode', 'entryLimit', 'entryActual',
     'exitPrice', 'sl', 'tp1', 'tp2', 'score', 'confluencePct', 'r', 'pnl',
-    'closeReason', 'createdAt', 'openedAt', 'dataQuality', 'source'];
+    'closeReason', 'createdAt', 'openedAt', 'dataQuality', 'source',
+    'analysisStatus', 'analysisSummary', 'exitTags', 'setupTags', 'marketTags'];
   const lines = [headers.map(paperCsvCell).join(',')];
   rows.forEach(trade => {
     lines.push([
@@ -4841,6 +5379,11 @@ function paperExportCsv(query) {
       trade.entryLimit, trade.entryActual, trade.exitPrice, trade.sl, trade.tp1,
       trade.tp2, trade.score, trade.confluencePct, trade.r, trade.pnl,
       trade.closeReason, trade.createdAt, trade.openedAt, trade.dataQuality, trade.source
+      , trade.analysisStatus || 'DATA_NOT_CAPTURED',
+      trade.analysisSummary || '',
+      trade.analysisTags && Array.isArray(trade.analysisTags.exit) ? trade.analysisTags.exit.join('|') : '',
+      trade.analysisTags && Array.isArray(trade.analysisTags.setup) ? trade.analysisTags.setup.join('|') : '',
+      trade.analysisTags && Array.isArray(trade.analysisTags.market) ? trade.analysisTags.market.join('|') : ''
     ].map(paperCsvCell).join(','));
   });
   return '\ufeff' + lines.join('\r\n') + '\r\n';
@@ -4851,6 +5394,8 @@ function startPaperBot() {
   paperStarted = true;
   paperRuntime.startedAt = new Date().toISOString();
   console.log('[paper] VPS Paper Bot ON: scan every 15M, top 3, pending expiry 120m');
+  void probeExternalSources();
+  setInterval(() => void probeExternalSources(), SOURCE_HEALTH_PROBE_MS);
   startTelegramCommandBot();
   void sendConfiguredAlert('NEXORA PAPER BOT ON\nScan 15M · top 3 · limit strict\nLegacy trades tidak memakai budget bot baru');
   if (PAPER_DAILY_SUMMARY_SCHEDULER) {
@@ -4880,6 +5425,7 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, JSON.stringify({
       ok: true,
       service: 'nexora-proxy',
+      buildId: PAPER_BUILD_ID,
       port: PORT,
       paperBot: paperStarted,
       paperBotEnabled: paperState.enabled,
