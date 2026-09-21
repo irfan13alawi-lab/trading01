@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   normalizeBaseSymbol,
+  confirmedCryptoSymbolSet,
   isEligibleBaseSymbol,
   sharedEntryGateRejectionCodes,
   partitionSharedEntryGate,
@@ -12,9 +13,11 @@ const {
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0);
 const ACTIVE = new Set();
+const CRYPTO = new Set();
 
 function ticker(base, volume, overrides) {
   ACTIVE.add(base);
+  CRYPTO.add(base);
   return {
     symbol: base + 'USDT',
     lastPr: '10',
@@ -28,6 +31,7 @@ function select(rows, options) {
   return selectLiquidUniverse(rows, {
     now: NOW,
     activeSymbols: ACTIVE,
+    cryptoSymbols: CRYPTO,
     minQuoteVolumeUsdt: 1_000_000,
     ...(options || {})
   });
@@ -48,7 +52,7 @@ test('selects no more than 60, ordered by validated quote volume', () => {
   assert.equal(result.selectedCount, 60);
   assert.equal(result.selectedSymbols[0], 'TKN079');
   assert.equal(result.selectedSymbols.at(-1), 'TKN020');
-  assert.ok(result.selectedRows.every(row => row._nexoraUniverseVersion === 'LIQUID_TOP60_V1'));
+  assert.ok(result.selectedRows.every(row => row._nexoraUniverseVersion === 'LIQUID_TOP60_CRYPTO_V1'));
 });
 
 test('uses all eligible symbols when fewer than 60 are available', () => {
@@ -113,9 +117,66 @@ test('requires active-contract metadata and honors the active set', () => {
   const noMetadata = selectLiquidUniverse([row], {now: NOW, minQuoteVolumeUsdt: 1_000_000});
   assert.equal(noMetadata.selectedCount, 0);
   assert.equal(noMetadata.rejectionCounts.ACTIVE_METADATA_UNAVAILABLE, 1);
-  const inactive = selectLiquidUniverse([row], {now: NOW, activeSymbols: new Set(['ETH']), minQuoteVolumeUsdt: 1_000_000});
+  const inactive = selectLiquidUniverse([row], {now: NOW, activeSymbols: new Set(['ETH']), cryptoSymbols: CRYPTO, minQuoteVolumeUsdt: 1_000_000});
   assert.equal(inactive.selectedCount, 0);
   assert.equal(inactive.rejectionCounts.CONTRACT_NOT_ACTIVE, 1);
+});
+
+test('only Bitget contracts positively marked isRwa=NO are classified as crypto', () => {
+  const classified = confirmedCryptoSymbolSet(new Map([
+    ['BTCUSDT', {active: true, isRwa: 'NO'}],
+    ['ETHUSDT', {active: true, isRwa: 'no'}],
+    ['MSTRUSDT', {active: true, isRwa: 'YES'}],
+    ['NVDAUSDT', {active: true, isRwa: 'YES'}],
+    ['XAUUSDT', {active: true, isRwa: 'YES'}],
+    ['SOXLUSDT', {active: true, isRwa: 'YES'}],
+    ['UNKNOWNUSDT', {active: true}]
+  ]));
+  assert.deepEqual([...classified].sort(), ['BTC', 'ETH']);
+
+  const result = selectLiquidUniverse([
+    ticker('BTC', 9_000_000),
+    ticker('MSTR', 8_000_000),
+    ticker('NVDA', 7_000_000),
+    ticker('XAU', 6_000_000),
+    ticker('SOXL', 5_000_000),
+    ticker('UNKNOWN', 4_000_000)
+  ], {now: NOW, activeSymbols: ACTIVE, cryptoSymbols: classified, minQuoteVolumeUsdt: 1_000_000});
+  assert.deepEqual(result.selectedSymbols, ['BTC']);
+  assert.equal(result.rejectionCounts.NOT_CONFIRMED_CRYPTO, 5);
+});
+
+test('RWA tickers cannot displace crypto contracts from the 60-slot universe', () => {
+  const crypto = Array.from({length: 70}, (_, i) => 'COIN' + String(i).padStart(2, '0'));
+  const rwa = Array.from({length: 20}, (_, i) => 'RWA' + String(i).padStart(2, '0'));
+  const rows = [
+    ...crypto.map((base, i) => ticker(base, (70 - i) * 1_000_000)),
+    ...rwa.map((base, i) => ticker(base, (200 - i) * 1_000_000))
+  ];
+  const result = selectLiquidUniverse(rows, {
+    now: NOW,
+    activeSymbols: new Set([...crypto, ...rwa]),
+    cryptoSymbols: new Set(crypto),
+    minQuoteVolumeUsdt: 1_000_000
+  });
+  assert.equal(result.selectedCount, 60);
+  assert.ok(result.selectedSymbols.every(base => crypto.includes(base)));
+  assert.equal(result.rejectionCounts.NOT_CONFIRMED_CRYPTO, 20);
+});
+
+test('fails closed if Bitget crypto classification is unavailable or unknown', () => {
+  const row = ticker('BTC', 9_000_000);
+  const unavailable = selectLiquidUniverse([row], {
+    now: NOW, activeSymbols: ACTIVE, minQuoteVolumeUsdt: 1_000_000
+  });
+  assert.equal(unavailable.selectedCount, 0);
+  assert.equal(unavailable.rejectionCounts.CRYPTO_CLASSIFICATION_UNAVAILABLE, 1);
+
+  const unknown = select([ticker('NOINFO', 8_000_000)], {
+    cryptoSymbols: new Map([['NOINFOUSDT', {active: true}]])
+  });
+  assert.equal(unknown.selectedCount, 0);
+  assert.equal(unknown.rejectionCounts.NOT_CONFIRMED_CRYPTO, 1);
 });
 
 test('rejects non-perpetual contract metadata even with a USDT-like symbol', () => {
@@ -159,5 +220,3 @@ test('keeps all 60 selected tickers available for MTF while classifying the unch
   assert.equal(partition.rejectionCounts.INVALID_PRICE, 1);
   assert.deepEqual(sharedEntryGateRejectionCodes({price: 1, volume: 1, fund: 0, chg: 0}), []);
 });
-
-

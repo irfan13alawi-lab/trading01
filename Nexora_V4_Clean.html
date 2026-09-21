@@ -339,7 +339,8 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     <div class="hstat"><span class="l">ETH</span><span class="v" id="h-eth">--</span></div>
     <div class="hstat"><span class="l">F&amp;G</span><span class="v" id="h-fg">--</span></div>
     <div class="hstat"><span class="l">Regime</span><span class="v" id="h-reg">--</span></div>
-    <div class="hstat"><span class="l">Scanned</span><span class="v" id="h-cnt">0</span></div>
+    <div class="hstat"><span class="l">Market</span><span class="v" id="h-cnt">0/0</span></div>
+    <div class="hstat"><span class="l">VPS Crypto</span><span class="v" id="h-vps-scan" title="Universe Paper Bot VPS">--</span></div>
     <div class="hstat"><span class="l">Drawdown</span><span class="v dd-gauge" id="h-dd"><span class="dd-gauge-track"><span class="dd-gauge-fill dd-bar" id="dd-bar"></span></span><span id="dd-pct-text">--</span></span></div>
   </div>
   <div class="hright">
@@ -698,7 +699,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
     </div>
     <div class="frow" style="grid-template-columns:repeat(11,1fr);">
       <div class="fg"><label>Strategy</label><select id="vps-st-strategy" onchange="pollPaperStats()"><option value="">All</option><option value="MTF_ATR_V2">MTF_ATR_V2</option><option value="RESEARCH_COLLECTION">RESEARCH_COLLECTION</option><option value="PRE_UPGRADE">PRE_UPGRADE</option><option value="LEGACY">LEGACY</option></select></div>
-      <div class="fg"><label>Universe</label><select id="vps-st-universe" onchange="pollPaperStats()"><option value="">All</option><option value="LIQUID_TOP60_V1">Liquid Top 60</option><option value="LEGACY">Legacy / unknown</option></select></div>
+      <div class="fg"><label>Universe</label><select id="vps-st-universe" onchange="pollPaperStats()"><option value="">All</option><option value="LIQUID_TOP60_CRYPTO_V1">Crypto Top 60</option><option value="LIQUID_TOP60_V1">Legacy Liquid Top 60</option><option value="LEGACY">Legacy / unknown</option></select></div>
       <div class="fg"><label>Cohort</label><select id="vps-st-cohort" onchange="pollPaperStats()"><option value="">All</option></select></div>
       <div class="fg"><label>Symbol</label><input id="vps-st-symbol" placeholder="All" onchange="pollPaperStats()"></div>
       <div class="fg"><label>Direction</label><select id="vps-st-direction" onchange="pollPaperStats()"><option value="">All</option><option>LONG</option><option>SHORT</option></select></div>
@@ -1574,7 +1575,7 @@ function doRefresh() {
     setDot('ok'); setUpd('Preview mode (open in browser for live data)');
     var demoPairs = buildDemoPairs();
     G.pairs = demoPairs;
-    document.getElementById('h-cnt').textContent = demoPairs.length;
+    document.getElementById('h-cnt').textContent = demoPairs.length + '/' + COINS.length;
     renderTable();
     renderSigs(demoPairs);
     try { computeTop5(demoPairs); } catch(e) {}
@@ -1820,7 +1821,7 @@ function continueRefresh(pairs, fg, news) {
     var marketName = marketLabel();
     var marketNote = document.getElementById('market-note');
     if (marketNote) marketNote.textContent = marketIsSpot() ? 'Funding/OI tidak berlaku di Spot · Paper Bot tetap Futures' : marketIsBinance() ? 'Binance Futures via VPS · Paper Bot memakai fallback Bitget → Binance → OKX' : 'Paper Bot VPS memakai Bitget Futures';
-    document.getElementById('h-cnt').textContent = pairs.length;
+    document.getElementById('h-cnt').textContent = pairs.length + '/' + COINS.length;
     document.getElementById('c-l1').textContent = pairs.filter(function(p){return p.layer==='L1';}).length;
     document.getElementById('c-l2').textContent = pairs.filter(function(p){return p.layer==='L2';}).length;
     document.getElementById('c-tot').textContent = pairs.length;
@@ -5701,9 +5702,33 @@ function renderPaperTp1Events() {
 }
 
 function renderServerPaperScan(status) {
+  var headerScan = document.getElementById('h-vps-scan');
+  var latestScan = status && Array.isArray(status.recentScans) ? status.recentScans[0] : null;
+  var latestUniverse = latestScan && latestScan.universe ||
+    (status && status.lastScanSummary && status.lastScanSummary.universe) || null;
+  if(headerScan) {
+    if(latestUniverse && latestUniverse.version === 'LIQUID_TOP60_CRYPTO_V1') {
+      var picked = Number(latestUniverse.selectedCount || 0);
+      var target = Number(latestUniverse.target || 60);
+      headerScan.textContent = picked + '/' + target;
+      headerScan.title = 'VPS crypto-only scan · ' + picked + ' koin terpilih dari target ' + target
+        + ' · MTF diperiksa ' + Number(latestUniverse.mtfEvaluated || 0) + '/' + picked
+        + ' · universe ' + latestUniverse.version;
+      headerScan.style.color = picked >= target ? '#3fb950' : '#e3b341';
+    } else if(latestUniverse) {
+      headerScan.textContent = 'legacy';
+      headerScan.title = 'Scan terakhir menggunakan universe lama: ' + (latestUniverse.version || 'unknown')
+        + '. Ini bukan konfirmasi scan crypto-only.';
+      headerScan.style.color = '#e3b341';
+    } else {
+      headerScan.textContent = '--';
+      headerScan.title = 'Belum ada telemetry VPS scan.';
+      headerScan.style.color = '#8b949e';
+    }
+  }
   var el = document.getElementById('bot-last-scan');
   if(!el) return;
-  var scan = status && Array.isArray(status.recentScans) ? status.recentScans[0] : null;
+  var scan = latestScan;
   // /summary is intentionally lightweight and carries lastScanSummary rather
   // than the full recent scan.  Use it so the dashboard cannot keep showing a
   // stale scan merely because the detail endpoint has not finished loading.
@@ -6015,7 +6040,7 @@ function applyServerPaperStatus(status, announce) {
     dailyPnlEl.title = 'Realized paper PnL for UTC ' + (status.dailyPnlDate || '--') + '; closed trial trades only';
   }
   if(Array.isArray(status.closedTrades)) applyServerClosedTrades(status.closedTrades);
-  if(Array.isArray(status.recentScans)) renderServerPaperScan(status);
+  if(Array.isArray(status.recentScans) || status.lastScanSummary) renderServerPaperScan(status);
   updateActiveTradesPanel();
   try { renderPositionsWidget(); } catch(e) {}
   try { renderDrawdownBanner(status); } catch(e) {}
@@ -6471,11 +6496,13 @@ function renderPaperUniverseTelemetry(universe) {
   var actual = Number(universe.selectedCount || 0) + '/' + Number(universe.target || 60);
   var insufficient = Number(universe.eligibleCount || 0) < Number(universe.target || 60)
     ? ' · Tidak ada ticker stale/fiktif yang ditambahkan untuk mengejar target.' : '';
-  el.innerHTML = '<b>Scan universe</b> · <span style="color:'+color+';">'+sourceEsc(status)+'</span>'
+  el.innerHTML = '<b>Crypto-only scan universe</b> · <span style="color:'+color+';">'+sourceEsc(status)+'</span>'
     +' · '+sourceEsc(universe.version || 'unknown')
+    +' · asset scope '+sourceEsc(universe.assetScope || 'crypto only; unknown rejected')
     +' · raw '+Number(universe.rawTickerCount||0)
     +' → eligible '+Number(universe.eligibleCount||0)
     +' → terpilih '+sourceEsc(actual)
+    +' · metadata crypto '+Number(universe.cryptoMetadataCount||0)
     +' · MTF '+Number(universe.mtfEvaluated||0)+'/'+Number(universe.selectedCount||0)+' diperiksa ('+Number(universe.mtfFull||0)+' full, '
       +Number(universe.mtfPartial||0)+' partial, '+Number(universe.mtfStale||0)+' stale, '
       +Number(universe.mtfUnavailable||0)+' unavailable)'

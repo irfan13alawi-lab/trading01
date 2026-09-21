@@ -4,7 +4,7 @@ const DEFAULT_UNIVERSE_LIMIT = 60;
 const DEFAULT_MIN_QUOTE_VOLUME_USDT = 1_000_000;
 const DEFAULT_MAX_TICKER_AGE_MS = 180_000;
 const DEFAULT_MAX_FUTURE_SKEW_MS = 30_000;
-const UNIVERSE_VERSION = 'LIQUID_TOP60_V1';
+const UNIVERSE_VERSION = 'LIQUID_TOP60_CRYPTO_V1';
 
 const STABLE_BASES = new Set([
   'USDT', 'USDC', 'BUSD', 'TUSD', 'FDUSD', 'DAI', 'USDE', 'USDS', 'USDP',
@@ -145,6 +145,31 @@ function activeSymbolSet(value) {
   return null;
 }
 
+// Bitget marks RWA instruments with isRwa=YES. Only active contracts positively
+// classified as non-RWA are allowed into the crypto universe; missing or
+// unfamiliar metadata must never be interpreted as crypto.
+function confirmedCryptoSymbolSet(value) {
+  if (value == null) return null;
+  const out = new Set();
+  if (value instanceof Map) {
+    for (const [symbol, info] of value.entries()) {
+      if (info && info.active === true && String(info.isRwa || '').trim().toUpperCase() === 'NO') {
+        const base = normalizeBaseSymbol(symbol);
+        if (base) out.add(base);
+      }
+    }
+    return out;
+  }
+  if (value instanceof Set || Array.isArray(value)) {
+    for (const item of value) {
+      const base = normalizeBaseSymbol(typeof item === 'string' ? item : item && (item.symbol || item.instId));
+      if (base) out.add(base);
+    }
+    return out;
+  }
+  return null;
+}
+
 function selectLiquidUniverse(rows, options) {
   const cfg = options || {};
   const now = Number.isFinite(Number(cfg.now)) ? Number(cfg.now) : Date.now();
@@ -157,6 +182,7 @@ function selectLiquidUniverse(rows, options) {
   const maxFutureSkewMs = Math.max(0,
     Number.isFinite(Number(cfg.maxFutureSkewMs)) ? Number(cfg.maxFutureSkewMs) : DEFAULT_MAX_FUTURE_SKEW_MS);
   const actives = activeSymbolSet(cfg.activeSymbols);
+  const cryptoSymbols = confirmedCryptoSymbolSet(cfg.cryptoSymbols);
   const rejectionCounts = Object.create(null);
   const reject = reason => { rejectionCounts[reason] = (rejectionCounts[reason] || 0) + 1; };
   const unique = new Map();
@@ -168,6 +194,8 @@ function selectLiquidUniverse(rows, options) {
     if (!isEligibleBaseSymbol(base)) { reject('EXCLUDED_BASE_ASSET'); continue; }
     if (actives == null) { reject('ACTIVE_METADATA_UNAVAILABLE'); continue; }
     if (!actives.has(base)) { reject('CONTRACT_NOT_ACTIVE'); continue; }
+    if (cryptoSymbols == null) { reject('CRYPTO_CLASSIFICATION_UNAVAILABLE'); continue; }
+    if (!cryptoSymbols.has(base)) { reject('NOT_CONFIRMED_CRYPTO'); continue; }
     const price = tickerPrice(row);
     if (!price) { reject('INVALID_PRICE'); continue; }
     const quoteVolume = tickerQuoteVolume(row);
@@ -210,10 +238,12 @@ function selectLiquidUniverse(rows, options) {
 
   return {
     version: UNIVERSE_VERSION,
+    assetScope: 'CRYPTO_ONLY_IS_RWA_NO',
     target: limit,
     minQuoteVolumeUsdt: minQuoteVolume,
     maxTickerAgeMs: maxAgeMs,
     rawTickerCount: input.length,
+    cryptoMetadataCount: cryptoSymbols ? cryptoSymbols.size : 0,
     eligibleCount: eligible.length,
     selectedCount: selectedRows.length,
     selectedSymbols: chosen.map(item => item.base),
@@ -230,6 +260,7 @@ module.exports = {
   DEFAULT_MAX_FUTURE_SKEW_MS,
   UNIVERSE_VERSION,
   normalizeBaseSymbol,
+  confirmedCryptoSymbolSet,
   isEligibleBaseSymbol,
   isUsdtPerpetualTicker,
   parseTimestampMs,
@@ -238,4 +269,3 @@ module.exports = {
   partitionSharedEntryGate,
   selectLiquidUniverse
 };
-

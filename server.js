@@ -7,6 +7,7 @@ const {
   DEFAULT_MAX_TICKER_AGE_MS,
   UNIVERSE_VERSION,
   normalizeBaseSymbol,
+  confirmedCryptoSymbolSet,
   isEligibleBaseSymbol,
   tickerPrice,
   partitionSharedEntryGate,
@@ -72,7 +73,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.4-liquid-top60-trade-universe-tag-2026-09-21');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.5-crypto-only-top60-2026-09-21');
 // Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
 // snapshot. Older records remain readable; stored context is labelled PARTIAL
 // when it is usable, while missing indicators are never invented.
@@ -4386,9 +4387,12 @@ async function fetchPaperTickersFromBitget() {
     .filter(([, info]) => info && info.active === true)
     .map(([symbol]) => symbol);
   if (!activeSymbols.length) throw new Error('Bitget active USDT perpetual metadata unavailable');
+  const cryptoSymbols = confirmedCryptoSymbolSet(instruments);
+  if (!cryptoSymbols || !cryptoSymbols.size) throw new Error('Bitget crypto classification unavailable; refusing non-verified assets');
   payload._nexoraFetchedAt = new Date().toISOString();
   payload._nexoraSource = 'Bitget Futures';
   payload._nexoraActiveSymbols = activeSymbols;
+  payload._nexoraCryptoSymbols = [...cryptoSymbols];
   return payload;
 }
 
@@ -4396,6 +4400,15 @@ const paperFallbackContractCache = {
   binance: {loadedAt: 0, symbols: new Set()},
   okx: {loadedAt: 0, instruments: new Map()}
 };
+
+async function fetchPaperCryptoSymbols() {
+  const instruments = await fetchPaperInstruments();
+  const symbols = confirmedCryptoSymbolSet(instruments);
+  if (!symbols || !symbols.size) {
+    throw new Error('Bitget crypto classification unavailable; refusing fallback assets without positive crypto metadata');
+  }
+  return symbols;
+}
 
 async function fetchPaperBinanceActiveSymbols() {
   const cacheItem = paperFallbackContractCache.binance;
@@ -4484,6 +4497,7 @@ async function fetchPaperTickersFromBinance() {
   catch (_) { throw new Error('Binance tickers returned invalid JSON'); }
   if (!Array.isArray(rows)) throw new Error((rows && rows.msg) || 'Binance tickers response invalid');
   const activeSymbols = await fetchPaperBinanceActiveSymbols();
+  const cryptoSymbols = await fetchPaperCryptoSymbols();
   const data = rows.filter(row => activeSymbols.has(normalizeBaseSymbol(row.symbol)))
     .map(row => ({
       symbol: String(row.symbol).toUpperCase(), lastPr: row.lastPrice,
@@ -4508,7 +4522,8 @@ async function fetchPaperTickersFromBinance() {
     code: '00000', msg: 'success', data,
     _nexoraFetchedAt: new Date().toISOString(),
     _nexoraSource: 'Binance Futures fallback',
-    _nexoraActiveSymbols: [...activeSymbols]
+    _nexoraActiveSymbols: [...activeSymbols],
+    _nexoraCryptoSymbols: [...cryptoSymbols]
   };
 }
 
@@ -4532,6 +4547,7 @@ async function fetchPaperTickersFromOkx() {
     throw new Error((payload && payload.msg) || 'OKX tickers response invalid');
   }
   const instruments = await fetchPaperOkxActiveInstruments();
+  const cryptoSymbols = await fetchPaperCryptoSymbols();
   const data = payload.data.filter(row => instruments.has(String(row.instId || '').toUpperCase()))
     .map(row => {
       const last = Number(row.last), open = Number(row.open24h);
@@ -4550,7 +4566,8 @@ async function fetchPaperTickersFromOkx() {
     code: '00000', msg: 'success', data,
     _nexoraFetchedAt: new Date().toISOString(),
     _nexoraSource: 'OKX Swap fallback',
-    _nexoraActiveSymbols: [...new Set([...instruments.values()].map(item => item.base))]
+    _nexoraActiveSymbols: [...new Set([...instruments.values()].map(item => item.base))],
+    _nexoraCryptoSymbols: [...cryptoSymbols]
   };
 }
 
@@ -4607,6 +4624,7 @@ async function fetchPaperInstruments() {
       quoteCoin: String(item.quoteCoin || '').toUpperCase(),
       symbolType: String(item.symbolType || '').toLowerCase(),
       symbolStatus: String(item.symbolStatus || '').toLowerCase(),
+      isRwa: String(item.isRwa || '').trim().toUpperCase(),
       active: String(item.quoteCoin || '').toUpperCase() === 'USDT' &&
         String(item.symbolType || '').toLowerCase() === 'perpetual' &&
         String(item.symbolStatus || '').toLowerCase() === 'normal',
@@ -4662,10 +4680,12 @@ async function runPaperScan(reason, requestedCycleKey) {
       limit: PAPER_UNIVERSE_LIMIT,
       minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
       maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
-      activeSymbols: payload && payload._nexoraActiveSymbols
+      activeSymbols: payload && payload._nexoraActiveSymbols,
+      cryptoSymbols: payload && payload._nexoraCryptoSymbols
     });
     universeTelemetry = {
       version: universe.version,
+      assetScope: universe.assetScope,
       target: PAPER_UNIVERSE_LIMIT,
       minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
       maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
@@ -4678,6 +4698,8 @@ async function runPaperScan(reason, requestedCycleKey) {
       fetchedAt: payload && payload._nexoraFetchedAt || null,
       activeMetadataCount: Array.isArray(payload && payload._nexoraActiveSymbols)
         ? payload._nexoraActiveSymbols.length : 0,
+      cryptoMetadataCount: Array.isArray(payload && payload._nexoraCryptoSymbols)
+        ? payload._nexoraCryptoSymbols.length : 0,
       rejectionCounts: universe.rejectionCounts,
       contextCandidates: 0,
       mtfCandidates: 0,
@@ -4697,7 +4719,7 @@ async function runPaperScan(reason, requestedCycleKey) {
     };
     paperRuntime.lastUniverseScan = {...universeTelemetry};
     if (!universe.selectedCount) {
-      throw new Error('No valid liquid USDT perpetual tickers: ' +
+      throw new Error('No valid liquid crypto USDT perpetual tickers: ' +
         JSON.stringify(universe.rejectionCounts));
     }
     const instruments = await fetchPaperInstruments().catch(error => {
@@ -5692,10 +5714,12 @@ function paperStatus(options) {
   const universeSummary = lastUniverse ? {
     status: lastUniverse.status || 'OK',
     version: lastUniverse.version || UNIVERSE_VERSION,
+    assetScope: lastUniverse.assetScope || 'CRYPTO_ONLY_IS_RWA_NO',
     target: Number(lastUniverse.target || PAPER_UNIVERSE_LIMIT),
     rawTickerCount: Number(lastUniverse.rawTickerCount || 0),
     eligibleCount: Number(lastUniverse.eligibleCount || 0),
     selectedCount: Number(lastUniverse.selectedCount || 0),
+    cryptoMetadataCount: Number(lastUniverse.cryptoMetadataCount || 0),
     concurrency: Number(lastUniverse.concurrency || PAPER_MTF_CONCURRENCY),
     contextCandidates: Number(lastUniverse.contextCandidates || 0),
     filteredBeforeMtf: Number(lastUniverse.filteredBeforeMtf || 0),
@@ -5949,7 +5973,9 @@ function paperDiagnostics() {
       maxDailyLossR: cfg.maxDailyLossR, tp1ClosePct: cfg.tp1ClosePct,
       maxDrawdownPct: PAPER_MAX_DRAWDOWN_PCT,
       universe: {
-        version: UNIVERSE_VERSION, target: PAPER_UNIVERSE_LIMIT,
+        version: UNIVERSE_VERSION, assetScope: 'CRYPTO_ONLY_IS_RWA_NO',
+        classificationSource: 'Bitget contract isRwa=NO; fail closed on unknown',
+        target: PAPER_UNIVERSE_LIMIT,
         minQuoteVolumeUsdt: PAPER_MIN_24H_QUOTE_VOLUME_USDT,
         maxTickerAgeMs: PAPER_TICKER_MAX_AGE_MS,
         mtfCandidates: PAPER_MTF_MAX_CANDIDATES,
