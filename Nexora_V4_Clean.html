@@ -7406,13 +7406,22 @@ function renderDrawdownBanner(status) {
 }
 
 function renderSourceHealth(sources) {
+  // The Paper Bot has one authoritative market feed: Bitget Futures.  The
+  // other feeds are context, cross-checks, news, or fallbacks.  A failed
+  // optional feed must not make healthy Paper data look unusable.
+  var selectedCore = G.marketExchange === 'binance' ? 'binance'
+    : G.marketExchange === 'coingecko' ? 'coingecko' : 'bitget';
+  var coreKeys = ['bitget'];
+  if(selectedCore !== 'bitget') coreKeys.push(selectedCore);
   var names = [
     ['bitget', 'Bitget', 'PAPER PRIMARY'], ['bingx', 'BingX', 'derivatives cross-check'], ['gate', 'Gate.io', 'derivatives cross-check'],
     ['coingecko', 'CoinGecko', 'BTC dominance / spot'], ['binance', 'Binance Futures', 'PAPER fallback / selected market'], ['okx', 'OKX Swap', 'PAPER fallback'], ['altme', 'Fear & Greed', 'market context'], ['coinpaprika', 'CoinPaprika', 'market context'], ['cryptocompare', 'Crypto News', 'optional news'], ['macro', 'Macro calendar', 'optional events']
   ];
-  var live = 0, stale = 0, errors = 0;
+  var live = 0, delayed = 0, errors = 0;
+  var coreLive = 0, coreDelayed = 0, coreErrors = 0, coreUnknown = 0, optionalIssues = 0;
   var html = names.map(function(pair) {
     var item = sources && sources[pair[0]] ? sources[pair[0]] : {};
+    var isCore = coreKeys.indexOf(pair[0]) !== -1;
     var state = item.displayStatus || item.status || 'UNKNOWN';
     var lastOk = item.lastOkAt ? new Date(item.lastOkAt) : null;
     var age = lastOk && !isNaN(lastOk.getTime()) ? (Date.now() - lastOk.getTime()) / 1000 : Infinity;
@@ -7420,9 +7429,16 @@ function renderSourceHealth(sources) {
       : ((state === 'LIVE' || state === 'FALLBACK_LIVE') && age > 60) ? 'DELAYED' : state;
     var color = display === 'LIVE' || display === 'FALLBACK_LIVE' ? '#3fb950' : display === 'ERROR' || display === 'STALE' ? '#f85149' : display === 'DELAYED' ? '#f0883e' : '#e3b341';
     if(display === 'LIVE' || display === 'FALLBACK_LIVE') live++;
-    if(display === 'DELAYED') stale++;
-    if(display === 'STALE') errors++;
-    if(display === 'ERROR') errors++;
+    if(display === 'DELAYED') delayed++;
+    if(display === 'STALE' || display === 'ERROR') errors++;
+    if(isCore) {
+      if(display === 'LIVE' || display === 'FALLBACK_LIVE') coreLive++;
+      else if(display === 'DELAYED') coreDelayed++;
+      else if(display === 'STALE' || display === 'ERROR') coreErrors++;
+      else coreUnknown++;
+    } else if(display === 'STALE' || display === 'ERROR') {
+      optionalIssues++;
+    }
     var ageText = lastOk ? ' · ' + (age < 60 ? Math.round(age) + 's' : Math.floor(age / 60) + 'm') + ' old' : '';
     var detail = display === 'LIVE' || display === 'DELAYED'
       ? ((item.lastLatencyMs != null ? item.lastLatencyMs + ' ms' : 'reachable') + (lastOk ? ' · ' + lastOk.toLocaleTimeString('id-ID') : '') + ageText)
@@ -7438,15 +7454,20 @@ function renderSourceHealth(sources) {
   if(summary) {
     var primary = sources && sources.bitget ? sources.bitget : {};
     var primaryState = primary.displayStatus || primary.status || 'UNKNOWN';
-    summary.textContent = 'Paper primary: ' + primaryState + ' · ' + live + '/' + names.length + ' feeds LIVE' + (stale ? ' · ' + stale + ' delayed' : '') + (errors ? ' · ' + errors + ' stale/error' : '');
-    summary.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
+    summary.textContent = 'Paper primary: ' + primaryState
+      + ' · core ' + coreLive + '/' + coreKeys.length + ' LIVE'
+      + ' · all ' + live + '/' + names.length + ' LIVE'
+      + (delayed ? ' · ' + delayed + ' delayed' : '')
+      + (errors ? ' · ' + errors + ' stale/error' : '')
+      + (optionalIssues ? ' · ' + optionalIssues + ' optional issue' + (optionalIssues === 1 ? '' : 's') : '');
+    summary.style.color = coreErrors ? '#f85149' : coreDelayed || coreUnknown ? '#f0883e' : optionalIssues ? '#e3b341' : coreLive ? '#3fb950' : '#e3b341';
   }
   var healthEl = document.getElementById('bot-data-health');
   if(healthEl) {
-    var healthLabel = errors ? 'STALE/ERROR' : stale ? 'DELAYED' : live ? 'LIVE' : 'CHECKING';
+    var healthLabel = coreErrors ? 'STALE/ERROR' : coreDelayed || coreUnknown ? 'DELAYED' : coreLive === coreKeys.length ? 'LIVE' : 'CHECKING';
     healthEl.textContent = healthLabel;
-    healthEl.style.color = errors ? '#f85149' : stale ? '#f0883e' : live ? '#3fb950' : '#e3b341';
-    healthEl.title = 'Feed sehat: ' + live + '/' + names.length + ' · delayed: ' + stale + ' · stale/error: ' + errors;
+    healthEl.style.color = coreErrors ? '#f85149' : coreDelayed || coreUnknown ? '#f0883e' : coreLive === coreKeys.length ? '#3fb950' : '#e3b341';
+    healthEl.title = 'Core feed: ' + coreLive + '/' + coreKeys.length + ' live · delayed/unknown: ' + (coreDelayed + coreUnknown) + ' · core error: ' + coreErrors + ' · optional issue: ' + optionalIssues;
   }
 }
 
