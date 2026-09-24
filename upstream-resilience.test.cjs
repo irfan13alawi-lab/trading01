@@ -74,6 +74,7 @@ test('upstream 429, 5xx, abort timeout and Retry-After stay bounded without taki
     assert.ok(path.basename(stateDir).startsWith('nexora-retry-smoke-'));
     await fs.promises.copyFile(path.join(__dirname, 'server.js'), path.join(stateDir, 'server.js'));
     await fs.promises.copyFile(path.join(__dirname, 'scan-universe.cjs'), path.join(stateDir, 'scan-universe.cjs'));
+    await fs.promises.copyFile(path.join(__dirname, 'prebreakout-scanner.cjs'), path.join(stateDir, 'prebreakout-scanner.cjs'));
     const port = await reservePort();
     const childSource = String.raw`
       const Module = require('node:module');

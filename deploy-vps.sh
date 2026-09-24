@@ -18,6 +18,7 @@ download() {
 }
 
 download server.js
+download prebreakout-scanner.cjs
 download package.json
 download Nexora_V4_Clean.html
 download nexora-mobile.html
@@ -28,6 +29,7 @@ download nexora-journald.conf
 
 cd "$PROXY_DIR"
 install -m 0644 "$TMP_DIR/server.js" server.js
+install -m 0644 "$TMP_DIR/prebreakout-scanner.cjs" prebreakout-scanner.cjs
 install -m 0644 "$TMP_DIR/package.json" package.json
 npm install --omit=dev
 
@@ -40,6 +42,7 @@ sudo install -d -m 0755 /etc/systemd/journald.conf.d
 sudo install -m 0644 "$TMP_DIR/nexora-journald.conf" /etc/systemd/journald.conf.d/nexora.conf
 
 node --check "$PROXY_DIR/server.js"
+node --check "$PROXY_DIR/prebreakout-scanner.cjs"
 sudo systemctl daemon-reload
 sudo systemctl restart systemd-journald
 sudo journalctl --vacuum-size=300M

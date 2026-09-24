@@ -13,8 +13,10 @@ cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT
 
 curl -fsSL --retry 3 --max-time 60 "$RAW_BASE/server.js" -o "$tmpdir/server.js"
+curl -fsSL --retry 3 --max-time 60 "$RAW_BASE/prebreakout-scanner.cjs" -o "$tmpdir/prebreakout-scanner.cjs"
 curl -fsSL --retry 3 --max-time 60 "$RAW_BASE/Nexora_V4_Clean.html" -o "$tmpdir/index.html"
 test -s "$tmpdir/server.js"
+test -s "$tmpdir/prebreakout-scanner.cjs"
 test -s "$tmpdir/index.html"
 node_bin="$(command -v node || true)"
 if [ -z "$node_bin" ] && [ -x /home/ubuntu/.local/bin/node ]; then
@@ -25,8 +27,10 @@ if [ -z "$node_bin" ]; then
   exit 127
 fi
 "$node_bin" --check "$tmpdir/server.js"
+"$node_bin" --check "$tmpdir/prebreakout-scanner.cjs"
 grep -Fq "PAPER VPS CHECKING..." "$tmpdir/index.html"
-grep -Fq "build v4.9-research" "$tmpdir/index.html"
+grep -Fq "build v5.3.5-crypto-only-top60-2026-09-21" "$tmpdir/index.html"
+grep -Fq "PREBREAKOUT_RESEARCH_V1" "$tmpdir/server.js"
 grep -Fq "MONITORING_ONLY" "$tmpdir/server.js"
 grep -Fq "RESEARCH_COLLECTION" "$tmpdir/server.js"
 grep -Fq "PAPER_RESEARCH_HARD_DD_PCT = 50" "$tmpdir/server.js"
@@ -35,11 +39,15 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 if [ -f /home/ubuntu/nexora-proxy/server.js ]; then
   cp -a /home/ubuntu/nexora-proxy/server.js "/home/ubuntu/nexora-proxy/server.js.pre-$stamp"
 fi
+if [ -f /home/ubuntu/nexora-proxy/prebreakout-scanner.cjs ]; then
+  cp -a /home/ubuntu/nexora-proxy/prebreakout-scanner.cjs "/home/ubuntu/nexora-proxy/prebreakout-scanner.cjs.pre-$stamp"
+fi
 if [ -f /var/www/html/nexora/index.html ]; then
   sudo cp -a /var/www/html/nexora/index.html "/var/www/html/nexora/index.html.pre-$stamp"
 fi
 
 install -o ubuntu -g ubuntu -m 0644 "$tmpdir/server.js" /home/ubuntu/nexora-proxy/server.js
+install -o ubuntu -g ubuntu -m 0644 "$tmpdir/prebreakout-scanner.cjs" /home/ubuntu/nexora-proxy/prebreakout-scanner.cjs
 sudo install -o root -g root -m 0644 "$tmpdir/index.html" /var/www/html/nexora/index.html
 sudo systemctl restart nexora-proxy
 sleep 3

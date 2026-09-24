@@ -13,6 +13,11 @@ const {
   partitionSharedEntryGate,
   selectLiquidUniverse
 } = require('./scan-universe.cjs');
+const {
+  makeSignal: makePrebreakoutSignal,
+  buildPaperSetup: buildPrebreakoutSetup,
+  DEFAULTS: PREBREAKOUT_DEFAULTS
+} = require('./prebreakout-scanner.cjs');
 
 const PORT = Number(process.env.PORT || 18085);
 const REQUEST_TIMEOUT_MS = 12000;
@@ -167,6 +172,12 @@ const PAPER_LAB_STRATEGIES = {
     label: 'Range Mean Reversion', version: 'RANGE_MEAN_REVERSION_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
     trailing: {enabled: false, afterTp1: false, atrMult: 0}
+  },
+  PREBREAKOUT_RESEARCH_V1: {
+    label: 'Pre-Breakout Research', version: 'PREBREAKOUT_RESEARCH_V1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: 60 * 60 * 1000,
+    trailing: {enabled: true, afterTp1: true, atrMult: 1},
+    execution: 'BREAKOUT_CONFIRMED_PAPER_LIMIT'
   }
 };
 const PAPER_DEFAULT_STRATEGY_SETTINGS = {
@@ -1744,6 +1755,7 @@ function paperLabDefaultAccount(strategyId) {
     activeTrades: [],
     closedTrades: [],
     monitoringSignals: [],
+    signalCooldowns: {},
     recentRejections: [],
     lastScanAt: null,
     lastPlacedAt: null,
@@ -1804,6 +1816,7 @@ function paperLabNormaliseState(input) {
       activeTrades: Array.isArray(source.activeTrades) ? source.activeTrades : [],
       closedTrades: Array.isArray(source.closedTrades) ? source.closedTrades.slice(0, PAPER_LAB_MAX_CLOSED_TRADES) : [],
       monitoringSignals: Array.isArray(source.monitoringSignals) ? source.monitoringSignals.slice(0, 100) : [],
+      signalCooldowns: source.signalCooldowns && typeof source.signalCooldowns === 'object' ? source.signalCooldowns : {},
       recentRejections: Array.isArray(source.recentRejections) ? source.recentRejections.slice(0, 50) : []
     };
   });
@@ -2445,6 +2458,76 @@ function paperLabStructureSnapshot(rows, atr) {
   };
 }
 
+// A pre-breakout order is allowed only after a closed-candle breakout has
+// been followed by a closed-candle retest that holds the broken level. This
+// keeps the research strategy from buying the first wick outside the range.
+function paperBreakoutRetestSnapshot(rows, atrSeries) {
+  if (!Array.isArray(rows) || rows.length < 30) {
+    return {valid: false, direction: null, retestConfirmed: false, reason: 'INSUFFICIENT_CANDLES'};
+  }
+  const lastIndex = rows.length - 1;
+  let candidate = null;
+  const firstBreakoutIndex = Math.max(20, lastIndex - 6);
+  for (let index = firstBreakoutIndex; index < lastIndex; index++) {
+    const row = rows[index];
+    const previous = rows.slice(index - 20, index);
+    if (previous.length < 20) continue;
+    const high = Math.max(...previous.map(item => item.high));
+    const low = Math.min(...previous.map(item => item.low));
+    const atr = Math.max(paperNumber(atrSeries && atrSeries[index]), row.close * 0.0025);
+    const bodyPct = Math.abs(row.close - row.open) / Math.max(row.high - row.low, 1e-12);
+    const avgVolume = paperMean(previous.map(item => item.volume));
+    const volumeRatio = avgVolume > 0 ? row.volume / avgVolume : null;
+    const longBreak = row.close >= high + atr * 0.2 && bodyPct >= 0.5 && volumeRatio != null && volumeRatio >= 1.5;
+    const shortBreak = row.close <= low - atr * 0.2 && bodyPct >= 0.5 && volumeRatio != null && volumeRatio >= 1.5;
+    if (longBreak || shortBreak) {
+      candidate = {
+        direction: longBreak ? 'LONG' : 'SHORT',
+        level: longBreak ? high : low,
+        breakoutAt: Number.isFinite(row.ts) ? new Date(row.ts).toISOString() : null,
+        breakoutIndex: index,
+        breakoutAtr: atr,
+        distanceAtr: Math.abs(row.close - (longBreak ? high : low)) / atr,
+        volumeRatio
+      };
+    }
+  }
+  if (!candidate) return {valid: false, direction: null, retestConfirmed: false, reason: 'NO_VALID_BREAKOUT'};
+  let retestAt = null;
+  let invalidated = false;
+  for (let index = candidate.breakoutIndex + 1; index <= lastIndex; index++) {
+    const row = rows[index];
+    const buffer = candidate.breakoutAtr * 0.1;
+    const tolerance = candidate.breakoutAtr * 0.25;
+    if (candidate.direction === 'LONG') {
+      if (row.close < candidate.level - buffer) invalidated = true;
+      if (!invalidated && row.low <= candidate.level + tolerance && row.close >= candidate.level) {
+        retestAt = Number.isFinite(row.ts) ? new Date(row.ts).toISOString() : null;
+      }
+    } else {
+      if (row.close > candidate.level + buffer) invalidated = true;
+      if (!invalidated && row.high >= candidate.level - tolerance && row.close <= candidate.level) {
+        retestAt = Number.isFinite(row.ts) ? new Date(row.ts).toISOString() : null;
+      }
+    }
+  }
+  const latest = rows[lastIndex];
+  const stillHolding = candidate.direction === 'LONG'
+    ? latest.close >= candidate.level
+    : latest.close <= candidate.level;
+  return {
+    valid: !!retestAt && !invalidated && stillHolding,
+    direction: candidate.direction,
+    level: candidate.level,
+    breakoutAt: candidate.breakoutAt,
+    retestAt,
+    retestConfirmed: !!retestAt && !invalidated && stillHolding,
+    distanceAtr: candidate.distanceAtr,
+    volumeRatio: candidate.volumeRatio,
+    invalidated
+  };
+}
+
 function paperIndicatorSnapshot(rows) {
   if (!Array.isArray(rows) || rows.length < PAPER_MIN_CANDLES) return null;
   const closes = rows.map(row => row.close);
@@ -2473,6 +2556,7 @@ function paperIndicatorSnapshot(rows) {
   const bollinger = paperBollingerSnapshot(closes, lastIndex, 20, 2);
   const previousBollinger = paperBollingerSnapshot(closes, Math.max(0, lastIndex - 1), 20, 2);
   const structure = paperLabStructureSnapshot(rows, atrSeries[lastIndex] || 0);
+  const breakoutRetest = paperBreakoutRetestSnapshot(rows, atrSeries);
   const body = Math.abs(last.close - last.open);
   const longVotes = [
     ema9[lastIndex] > ema21[lastIndex] && ema21[lastIndex] > ema50[lastIndex],
@@ -2542,6 +2626,7 @@ function paperIndicatorSnapshot(rows) {
       liquiditySweep: structure.sweep,
       fvg: structure.fvg,
       orderBlock: structure.orderBlock,
+      breakoutRetest,
       supertrend,
       candlePattern: candlePattern.name,
       candleDirection: candlePattern.direction
@@ -2847,7 +2932,10 @@ function paperLabCreateSetup(pair, account, dir, levels, metadata) {
     trailing: metadata && metadata.trailing || PAPER_LAB_STRATEGIES[account.strategyId].trailing,
     signalReason: metadata && metadata.signalReason || null,
     entryModel: metadata && metadata.entryModel || account.strategyId,
-    strategyEvidence: metadata && metadata.strategyEvidence || []
+    strategyEvidence: metadata && metadata.strategyEvidence || [],
+    signalState: metadata && metadata.signalState || null,
+    preScore: metadata && metadata.preScore != null ? metadata.preScore : null,
+    confirmationScore: metadata && metadata.confirmationScore != null ? metadata.confirmationScore : null
   };
   const validation = validatePaperSetup(pair, setup);
   if (validation.rr < Number(account.minRR || 2)) {
@@ -3070,6 +3158,43 @@ function paperLabEvaluateRange(pair, account) {
     setupResult.validation.reasonCodes, setupResult.validation.reasons);
 }
 
+function paperLabEvaluatePrebreakout(pair, account) {
+  const signal = makePrebreakoutSignal(pair, PREBREAKOUT_DEFAULTS);
+  const reject = (codes, reasons) => {
+    const result = paperLabReject(account.strategyId, pair, codes, reasons);
+    result.signal = signal;
+    return result;
+  };
+  if (signal.status !== 'BREAKOUT_CONFIRMED') {
+    return reject(['PREBREAKOUT_' + signal.status], [
+      signal.status + ' · pre-score ' + signal.preScore + '/100 · confirmation ' + signal.confirmationScore + '/100'
+    ]);
+  }
+  if (!pair || pair.mtfStatus !== 'FULL' || pair.dataQuality === 'STALE' || pair.dataQuality === 'REJECTED') {
+    return reject(['PREBREAKOUT_DATA_NOT_FULL'], ['Breakout terkonfirmasi tetapi kualitas MTF/data belum FULL']);
+  }
+  const levels = buildPrebreakoutSetup(signal);
+  if (!levels) return reject(['PREBREAKOUT_SETUP_INVALID'], ['Level breakout atau ATR tidak valid']);
+  const setupResult = paperLabCreateSetup(pair, account, signal.direction, levels, {
+    exitModel: 'PREBREAKOUT_ATR', entryModel: 'BREAKOUT_RETEST_LIMIT',
+    trailing: PAPER_LAB_STRATEGIES.PREBREAKOUT_RESEARCH_V1.trailing,
+    signalReason: 'BREAKOUT_CONFIRMED · pre-score ' + signal.preScore + '/100 · confirmation ' + signal.confirmationScore + '/100',
+    signalState: signal.status, preScore: signal.preScore, confirmationScore: signal.confirmationScore,
+    strategyEvidence: signal.evidence.concat([
+      'retest ' + (signal.breakout.retestConfirmed ? 'confirmed' : 'not confirmed'),
+      'invalidation: ' + signal.invalidation
+    ])
+  });
+  if (!setupResult.validation.ok) {
+    const result = paperLabReject(account.strategyId, pair, setupResult.validation.reasonCodes,
+      setupResult.validation.reasons);
+    result.signal = signal;
+    return result;
+  }
+  return {ok: true, setup: setupResult.setup, validation: setupResult.validation,
+    signal, reason: 'Pre-breakout confirmed ' + signal.direction};
+}
+
 function paperLabEvaluateCandidate(pair, strategyId, account) {
   if (!pair || !account || !account.enabled) {
     return paperLabReject(strategyId, pair, ['STRATEGY_DISABLED'], ['Strategi disabled']);
@@ -3080,6 +3205,7 @@ function paperLabEvaluateCandidate(pair, strategyId, account) {
     case 'BREAKOUT_RETEST_V1': return paperLabEvaluateBreakout(pair, account);
     case 'SMC_LIQUIDITY_V1': return paperLabEvaluateSmc(pair, account);
     case 'RANGE_MEAN_REVERSION_V1': return paperLabEvaluateRange(pair, account);
+    case 'PREBREAKOUT_RESEARCH_V1': return paperLabEvaluatePrebreakout(pair, account);
     default: return paperLabReject(strategyId, pair, ['STRATEGY_UNKNOWN'], ['Strategi tidak dikenal']);
   }
 }
@@ -3115,6 +3241,7 @@ function paperLabCreateTrade(pair, account, result, cycleKey) {
       [tf, pair.mtf && pair.mtf[tf] ? pair.mtf[tf].lastClosedCandleAt || pair.mtf[tf].candleAt : null])),
     entryModel: setup.entryModel, exitModel: setup.exitModel, nativeExit: true,
     trailing: setup.trailing, strategyEvidence: setup.strategyEvidence || [],
+    signalState: setup.signalState || null, preScore: setup.preScore, confirmationScore: setup.confirmationScore,
     signalReason: setup.signalReason || result.reason, setupValidation: result.validation,
     pendingTtlMs: account.pendingTtlMs, executionModel: 'SHADOW_LIMIT_1M',
     fillMethod: null, fillCandleAt: null, lastProcessedCandleAt: null,
@@ -3132,15 +3259,44 @@ function paperLabCreateTrade(pair, account, result, cycleKey) {
   return trade;
 }
 
-function paperLabScan(ranked, cycleKey, reason) {
+function paperLabRecordSignal(account, signal) {
+  if (!account || !signal || !signal.sym ||
+      !['WATCH', 'PRE_BREAKOUT', 'BREAKOUT_CONFIRMED', 'EXTENDED_OR_RISKY'].includes(signal.status)) return false;
+  const key = [signal.sym, signal.status, signal.direction || 'NEUTRAL'].join(':');
+  const now = Date.parse(signal.signalAt) || Date.now();
+  const previous = Number(account.signalCooldowns && account.signalCooldowns[key] || 0);
+  if (previous > 0 && now - previous < 60 * 60 * 1000) return false;
+  account.signalCooldowns = account.signalCooldowns || {};
+  account.signalCooldowns[key] = now;
+  const snapshot = {
+    ...signal,
+    strategyId: account.strategyId,
+    strategyVersion: account.version,
+    cohortId: 'lab-' + account.strategyId,
+    mode: PAPER_LAB_MODE,
+    execution: PAPER_LAB_STRATEGIES[account.strategyId].execution || 'PAPER_LIMIT',
+    recordedAt: new Date(now).toISOString()
+  };
+  account.monitoringSignals = [snapshot].concat(account.monitoringSignals || [])
+    .slice(0, PAPER_MAX_MONITORING_SIGNALS);
+  return true;
+}
+
+function paperLabScan(ranked, cycleKey, reason, options) {
   const lab = paperState.strategyLab;
   if (!lab || lab.enabled === false) return false;
-  if (lab.lastCycleKey === cycleKey) return false;
+  const selectedIds = options && Array.isArray(options.strategyIds)
+    ? new Set(options.strategyIds) : null;
+  const updateLabCycle = !(options && options.updateLabCycle === false);
+  if (updateLabCycle) {
+    if (lab.lastCycleKey === cycleKey) return false;
+  }
   const placedByStrategy = {};
   const rejectedByStrategy = {};
+  const signalCountsByStrategy = {};
   const usedSymbols = {};
   let changed = false;
-  Object.keys(PAPER_LAB_STRATEGIES).forEach(strategyId => {
+  Object.keys(PAPER_LAB_STRATEGIES).filter(strategyId => !selectedIds || selectedIds.has(strategyId)).forEach(strategyId => {
     const account = lab.accounts[strategyId];
     if (!account || !account.enabled) return;
     paperLabUpdatePeak(account);
@@ -3160,6 +3316,10 @@ function paperLabScan(ranked, cycleKey, reason) {
     for (const pair of ranked) {
       if (activeSymbols.has(pair.sym)) continue;
       const result = paperLabEvaluateCandidate(pair, strategyId, account);
+      if (result.signal && paperLabRecordSignal(account, result.signal)) {
+        signalCountsByStrategy[strategyId] = (signalCountsByStrategy[strategyId] || 0) + 1;
+        changed = true;
+      }
       if (!result.ok) {
         rejections.push({sym: pair.sym, codes: result.codes, reasons: result.reasons});
         continue;
@@ -3188,11 +3348,11 @@ function paperLabScan(ranked, cycleKey, reason) {
     .map(([sym, strategies]) => ({sym, strategies, cycleKey, at: new Date().toISOString()}));
   if (overlaps.length) lab.overlapEvents = overlaps.concat(lab.overlapEvents || []).slice(0, 100);
   lab.lastScanAt = new Date().toISOString();
-  lab.lastCycleKey = cycleKey;
+  if (updateLabCycle) lab.lastCycleKey = cycleKey;
   lab.lastError = null;
   lab.recentScans = [{cycleKey, at: lab.lastScanAt, reason: reason || '15M close',
     placed: placedByStrategy, rejected: rejectedByStrategy,
-    candidates: ranked.length, overlaps,
+    signalCounts: signalCountsByStrategy, candidates: ranked.length, overlaps,
     universeVersion: ranked[0] && ranked[0].universeVersion || UNIVERSE_VERSION}]
     .concat(lab.recentScans || []).slice(0, 200);
   return changed;
@@ -3344,6 +3504,10 @@ function paperLabAccountSummary(account) {
     netR: Number(netR.toFixed(2)), expectancyR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
     profitFactor: grossLoss < 0 ? Number((grossProfit / Math.abs(grossLoss)).toFixed(2)) : null,
     maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
+    execution: PAPER_LAB_STRATEGIES[account.strategyId].execution || 'PAPER_LIMIT',
+    signalCount: Array.isArray(account.monitoringSignals) ? account.monitoringSignals.length : 0,
+    lastSignalAt: account.monitoringSignals && account.monitoringSignals[0]
+      ? account.monitoringSignals[0].recordedAt || account.monitoringSignals[0].signalAt : null,
     status: paperLabDrawdownPct(account) >= account.emergencyDrawdownPct ? 'EMERGENCY_STOP'
       : paperLabDrawdownPct(account) >= account.warningDrawdownPct ? 'RISK_WARNING' : 'ACTIVE',
     lastScanAt: account.lastScanAt, lastPlacedAt: account.lastPlacedAt, lastError: account.lastError
@@ -3385,7 +3549,8 @@ function paperStrategyLabSummary(includeTrades, options) {
           : id === 'SR_REJECTION_V1' ? 'H1/H4 zone + 2 reactions + rejection candle'
             : id === 'BREAKOUT_RETEST_V1' ? '20-candle close breakout + volume + retest'
               : id === 'SMC_LIQUIDITY_V1' ? 'sweep + BOS + deterministic OB/FVG retest'
-                : 'ADX<18 + Bollinger re-entry + RSI extreme',
+                : id === 'RANGE_MEAN_REVERSION_V1' ? 'ADX<18 + Bollinger re-entry + RSI extreme'
+                  : 'WATCH/PRE_BREAKOUT → confirmed close + volume + retest',
         exit: definition.trailing.enabled ? 'TP1 2R, TP2 3R, break-even + ATR trail' : 'native structure/band targets with TP1 50%'
       }]))
     }
@@ -3692,6 +3857,12 @@ function paperTradeView(trade) {
     analysisExit: trade.analysisExit || null,
     analysisTags: trade.analysisTags || {exit: [], setup: [], market: []},
     analysisSummary: trade.analysisSummary || null,
+    signalState: trade.signalState || null,
+    preScore: trade.preScore == null ? null : trade.preScore,
+    confirmationScore: trade.confirmationScore == null ? null : trade.confirmationScore,
+    entryModel: trade.entryModel || null,
+    exitModel: trade.exitModel || null,
+    strategyEvidence: Array.isArray(trade.strategyEvidence) ? trade.strategyEvidence : [],
     reason: trade.reason
   };
 }
@@ -4749,6 +4920,18 @@ async function runPaperScan(reason, requestedCycleKey) {
       else if (pair.mtfStatus === 'PARTIAL') universeTelemetry.mtfPartial += 1;
       else universeTelemetry.mtfUnavailable += 1;
     });
+    // Pre-breakout research must see the complete validated 60-coin MTF
+    // universe. The shared entry gate is reserved for the existing order
+    // strategies because a pre-breakout candidate is often valuable before
+    // it becomes a conventional trend entry.
+    try {
+      paperLabScan(mtfCandidates, cycleKey, reason || '15M close', {
+        strategyIds: ['PREBREAKOUT_RESEARCH_V1'], updateLabCycle: false
+      });
+    } catch (labError) {
+      paperState.strategyLab.lastError = labError.message;
+      console.error('[paper] pre-breakout lab scan failed:', labError.message);
+    }
     const entryGate = partitionSharedEntryGate(mtfCandidates);
     universeTelemetry.entryGateEligibleCount = entryGate.passed.length;
     universeTelemetry.entryGateRejectedCount = entryGate.rejected.length;
@@ -4763,7 +4946,10 @@ async function runPaperScan(reason, requestedCycleKey) {
     // ledgers are independent from strict/research and failures are isolated
     // so a single experimental rule cannot stop the main paper bot.
     try {
-      paperLabScan(ranked, cycleKey, reason || '15M close');
+      paperLabScan(ranked, cycleKey, reason || '15M close', {
+        strategyIds: Object.keys(PAPER_LAB_STRATEGIES)
+          .filter(strategyId => strategyId !== 'PREBREAKOUT_RESEARCH_V1')
+      });
     } catch (labError) {
       paperState.strategyLab.lastError = labError.message;
       console.error('[paper] strategy lab scan failed:', labError.message);
