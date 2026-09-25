@@ -8,7 +8,8 @@ $ErrorActionPreference = 'Stop'
 $rawBase = 'https://raw.githubusercontent.com/irfan13alawi-lab/trading01/main'
 $remoteScript = @'
 set -eu
-tmpdir="$(mktemp -d /tmp/nexora-deploy.XXXXXX)"
+tmpdir="/home/ubuntu/nexora-proxy/.nexora-deploy.$$"
+mkdir "$tmpdir"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT
 
@@ -51,10 +52,10 @@ install -o ubuntu -g ubuntu -m 0644 "$tmpdir/prebreakout-scanner.cjs" /home/ubun
 sudo install -o root -g root -m 0644 "$tmpdir/index.html" /var/www/html/nexora/index.html
 sudo systemctl restart nexora-proxy
 sleep 3
-curl -fsS --max-time 15 http://127.0.0.1:18085/healthz >/tmp/nexora-health.json
-curl -fsS --max-time 15 http://127.0.0.1:18085/paper/summary >/tmp/nexora-summary.json
-grep -Fq '"ok":true' /tmp/nexora-health.json
-grep -Fq '"ok":true' /tmp/nexora-summary.json
+curl -fsS --max-time 15 http://127.0.0.1:18085/healthz >"$tmpdir/health.json"
+curl -fsS --max-time 15 http://127.0.0.1:18085/paper/summary >"$tmpdir/summary.json"
+grep -Fq '"ok":true' "$tmpdir/health.json"
+grep -Fq '"ok":true' "$tmpdir/summary.json"
 printf 'DEPLOY_OK\n'
 '@
 
