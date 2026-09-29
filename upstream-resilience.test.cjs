@@ -148,13 +148,30 @@ test('upstream 429, 5xx, abort timeout and Retry-After stay bounded without taki
       const summaryText = await summaryResponse.text();
       const summary = JSON.parse(summaryText);
       assert.ok(Buffer.byteLength(summaryText, 'utf8') < 15000,
-        'compact paper summary should not include long Strategy Lab scan history');
+        'compact paper summary should not include long Strategy Lab scan history (' + Buffer.byteLength(summaryText, 'utf8') + ' bytes)');
       assert.equal(Object.hasOwn(summary.strategyLab, 'recentScans'), false);
 
       const compactLabResponse = await request('http://127.0.0.1:' + port + '/paper/strategy-lab?details=false');
       assert.equal(compactLabResponse.status, 200);
       const compactLab = await compactLabResponse.json();
       assert.equal(Object.hasOwn(compactLab, 'recentScans'), false);
+      assert.equal(compactLab.strategyCount, 10);
+      assert.equal(compactLab.accounts.length, 10);
+      assert.ok(compactLab.accounts.every(account => account.startingEquity === 200));
+      const expectedStrategies = [
+        'MTF_ATR_V2', 'SR_REJECTION_V1', 'BREAKOUT_RETEST_V1', 'SMC_LIQUIDITY_V1',
+        'RANGE_MEAN_REVERSION_V1', 'PREBREAKOUT_RESEARCH_V1', 'SR_REJECTION_V1.1',
+        'BREAKOUT_RETEST_V1.1', 'RELATIVE_STRENGTH_V1', 'FUNDING_OI_DIVERGENCE_V1'
+      ];
+      assert.deepEqual(compactLab.accounts.map(account => account.strategyId).sort(), expectedStrategies.slice().sort());
+      assert.equal(compactLab.definition.strategies['SR_REJECTION_V1.1'].challengerOf, 'SR_REJECTION_V1');
+      assert.equal(compactLab.definition.strategies['BREAKOUT_RETEST_V1.1'].challengerOf, 'BREAKOUT_RETEST_V1');
+      assert.equal(compactLab.evaluationGate.minimumCostedClosedTrades, 100);
+      assert.equal(compactLab.evaluationGate.holdoutMinimumTrades, 20);
+      assert.equal(compactLab.evaluationGate.automaticPromotion, false);
+      assert.equal(compactLab.evaluationGate.requiresManualReview, true);
+      assert.ok(compactLab.definition.strategies.RELATIVE_STRENGTH_V1);
+      assert.ok(compactLab.definition.strategies.FUNDING_OI_DIVERGENCE_V1);
 
       const historyResponse = await request('http://127.0.0.1:' + port + '/paper/history?limit=1&offset=0');
       assert.equal(historyResponse.status, 200);

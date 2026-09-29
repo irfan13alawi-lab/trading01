@@ -78,11 +78,11 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.3.5-crypto-only-top60-2026-09-21');
-// Schema 10 adds an explicit equity reconciliation and immutable trade-analysis
-// snapshot. Older records remain readable; stored context is labelled PARTIAL
-// when it is usable, while missing indicators are never invented.
-const PAPER_SCHEMA_VERSION = 12;
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.4.0-strategy-lab-10-ledgers-2026-09-29');
+// Schema 13 adds costed, versioned Strategy Lab ledgers and execution events.
+// Existing trades remain readable and are explicitly tagged when their original
+// signal/config/cost snapshots were never recorded; no historical values are fabricated.
+const PAPER_SCHEMA_VERSION = 13;
 // P4 AI is intentionally not enabled by a loose environment flag.  The
 // current build exposes the evidence gate and rule-based summaries only;
 // an AI provider must be integrated and verified before this becomes true.
@@ -147,37 +147,85 @@ const PAPER_LAB_PER_SCAN = 1;
 const PAPER_LAB_MAX_ACTIVE = 20;
 const PAPER_LAB_PENDING_TTL_MS = 120 * 60 * 1000;
 const PAPER_LAB_MAX_CLOSED_TRADES = 2000;
+const PAPER_LAB_MIN_EVALUATION_TRADES = 100;
+// Bitget standard USDT-M futures rates are used only as an explicit estimate.
+// Account VIP/BGB discounts can differ; every value is frozen in each new trade.
+const PAPER_LAB_MAKER_FEE_RATE = Number.isFinite(Number(process.env.PAPER_LAB_MAKER_FEE_RATE))
+  ? Math.max(0, Math.min(0.01, Number(process.env.PAPER_LAB_MAKER_FEE_RATE))) : 0.0002;
+const PAPER_LAB_TAKER_FEE_RATE = Number.isFinite(Number(process.env.PAPER_LAB_TAKER_FEE_RATE))
+  ? Math.max(0, Math.min(0.01, Number(process.env.PAPER_LAB_TAKER_FEE_RATE))) : 0.0006;
+const PAPER_LAB_TAKER_SLIPPAGE_BPS = Number.isFinite(Number(process.env.PAPER_LAB_TAKER_SLIPPAGE_BPS))
+  ? Math.max(0, Math.min(200, Number(process.env.PAPER_LAB_TAKER_SLIPPAGE_BPS))) : 5;
+const PAPER_LAB_FALLBACK_SPREAD_BPS = Number.isFinite(Number(process.env.PAPER_LAB_FALLBACK_SPREAD_BPS))
+  ? Math.max(0, Math.min(200, Number(process.env.PAPER_LAB_FALLBACK_SPREAD_BPS))) : 10;
+const PAPER_LAB_FILL_PARTICIPATION_RATE = Number.isFinite(Number(process.env.PAPER_LAB_FILL_PARTICIPATION_RATE))
+  ? Math.max(0.0001, Math.min(0.1, Number(process.env.PAPER_LAB_FILL_PARTICIPATION_RATE))) : 0.01;
+const PAPER_LAB_COST_MODEL_VERSION = 'BITGET_SHADOW_COST_V1';
 const PAPER_LAB_STRATEGIES = {
   MTF_ATR_V2: {
     label: 'MTF + ATR', version: 'MTF_ATR_V2', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
-    trailing: {enabled: true, afterTp1: true, atrMult: 1.5}
+    trailing: {enabled: true, afterTp1: true, atrMult: 1.5},
+    rules: {entry: 'H4/H1/M30/M15 gate + EMA21/structure pullback', stopAtr: 1.5, tp1R: 2, tp2R: 3}
   },
   SR_REJECTION_V1: {
     label: 'Support / Resistance', version: 'SR_REJECTION_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
-    trailing: {enabled: false, afterTp1: false, atrMult: 0}
+    trailing: {enabled: false, afterTp1: false, atrMult: 0},
+    rules: {entry: 'H1/H4 support-resistance zone + 2 timeframe confluences + rejection candle', minZoneTimeframes: 2}
+  },
+  'SR_REJECTION_V1.1': {
+    label: 'S/R — Challenger 1.1', version: 'SR_REJECTION_V1.1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
+    trailing: {enabled: false, afterTp1: false, atrMult: 0}, challengerOf: 'SR_REJECTION_V1',
+    rules: {entry: 'Same as SR_REJECTION_V1; requires 3 timeframe zone confluences (vs 2 baseline)', minZoneTimeframes: 3}
   },
   BREAKOUT_RETEST_V1: {
-    label: 'Breakout + Retest', version: 'BREAKOUT_RETEST_V1', enabled: true, riskPct: 0.5,
+    label: 'Breakout Close — baseline', version: 'BREAKOUT_RETEST_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: 60 * 60 * 1000,
-    trailing: {enabled: true, afterTp1: true, atrMult: 1}
+    trailing: {enabled: true, afterTp1: true, atrMult: 1},
+    rules: {entry: '20-candle close breakout + volume; preserved baseline (no explicit retest gate)', minVolumeRatio: 1.5}
+  },
+  'BREAKOUT_RETEST_V1.1': {
+    label: 'Breakout + Retest — Challenger 1.1', version: 'BREAKOUT_RETEST_V1.1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: 60 * 60 * 1000,
+    trailing: {enabled: true, afterTp1: true, atrMult: 1}, challengerOf: 'BREAKOUT_RETEST_V1',
+    rules: {entry: 'Same breakout/volume rules as baseline, plus a retest that holds within 4 M15 candles',
+      minVolumeRatio: 1.5, requireRetest: true, retestMaxCandles: 4}
   },
   SMC_LIQUIDITY_V1: {
     label: 'SMC + Liquidity', version: 'SMC_LIQUIDITY_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
-    trailing: {enabled: true, afterTp1: true, atrMult: 1.5}
+    trailing: {enabled: true, afterTp1: true, atrMult: 1.5},
+    rules: {entry: 'sweep + BOS + deterministic OB/FVG retest'}
   },
   RANGE_MEAN_REVERSION_V1: {
     label: 'Range Mean Reversion', version: 'RANGE_MEAN_REVERSION_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
-    trailing: {enabled: false, afterTp1: false, atrMult: 0}
+    trailing: {enabled: false, afterTp1: false, atrMult: 0},
+    rules: {entry: 'ADX<18 + Bollinger re-entry + RSI extreme'}
   },
   PREBREAKOUT_RESEARCH_V1: {
     label: 'Pre-Breakout Research', version: 'PREBREAKOUT_RESEARCH_V1', enabled: true, riskPct: 0.5,
     minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: 60 * 60 * 1000,
     trailing: {enabled: true, afterTp1: true, atrMult: 1},
-    execution: 'BREAKOUT_CONFIRMED_PAPER_LIMIT'
+    execution: 'BREAKOUT_CONFIRMED_PAPER_LIMIT',
+    rules: {entry: 'WATCH/PRE_BREAKOUT → confirmed close + volume + retest'}
+  },
+  RELATIVE_STRENGTH_V1: {
+    label: 'Relative Strength', version: 'RELATIVE_STRENGTH_V1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
+    trailing: {enabled: true, afterTp1: true, atrMult: 1.5},
+    rules: {entry: 'Top/bottom 20% relative 24h + 3h strength vs BTC + H4/H1/M15 confirmation',
+      relative24hThresholdPct: 1.5, relative3hThresholdPct: 0.15, percentile: 80, stopAtr: 1.5, tp1R: 2, tp2R: 3}
+  },
+  FUNDING_OI_DIVERGENCE_V1: {
+    label: 'Funding + OI Divergence', version: 'FUNDING_OI_DIVERGENCE_V1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: PAPER_LAB_PENDING_TTL_MS,
+    trailing: {enabled: false, afterTp1: false, atrMult: 0},
+    rules: {entry: 'Fresh extreme funding + rising 1h OI + price/MTF reversal trigger',
+      fundingAbsMin: 0.0002, fundingPercentile: 80, oiChange1hPct: 1, triggerChangePct: 0.2,
+      stopAtr: 1.5, tp1R: 2, tp2R: 3}
   }
 };
 const PAPER_DEFAULT_STRATEGY_SETTINGS = {
@@ -1500,25 +1548,39 @@ function paperBuildAnalysisSnapshot(trade) {
     captureLevel: paperAnalysisCaptured(trade) ? 'FULL' : 'PARTIAL',
     capturedAt: trade.signalCreatedAt || trade.createdAt || null,
     symbol: trade.sym || null, direction: trade.dir || null,
+    strategy: trade.strategyId ? {
+      id: trade.strategyId, version: trade.strategyVersion || null,
+      config: trade.strategyConfigSnapshot || null
+    } : null,
     timeframe: trade.timeframe || trade.tf || '15M',
     market: {
       change24h: trade.chg == null ? null : trade.chg,
       funding: trade.fund == null ? null : trade.fund,
       fundingAvailable: trade.fundingAvailable == null ? null : !!trade.fundingAvailable,
       oiDeltaPct: trade.oi == null ? null : trade.oi,
+      oiUnits: trade.oiUnits == null ? null : trade.oiUnits,
+      oiNotionalUsd: trade.oiUSD == null ? null : trade.oiUSD,
       oiAvailable: trade.oiAvailable == null ? null : !!trade.oiAvailable,
       volume: trade.volume == null ? null : trade.volume,
       volumeRatio: trade.volumeRatio == null ? null : trade.volumeRatio,
       volumeAvailable: trade.volumeAvailable == null ? null : !!trade.volumeAvailable,
       regime: paperTradeRegimeTag(trade), dataQuality: trade.dataQuality || null,
       dataQualityReason: trade.dataQualityReason || null, source: trade.source || null,
-      dataAt: trade.dataAt || null
+      dataAt: trade.dataAt || null,
+      relativeStrength: trade.relativeStrength || null,
+      fundingPercentile: trade.fundingPercentile == null ? null : trade.fundingPercentile,
+      oiChange1hPct: trade.oiChange1hPct == null ? null : trade.oiChange1hPct
     },
     indicators: trade.indicators || null,
     mtf: Object.fromEntries(['H4', 'H1', 'M30', 'M15'].map(tf => [tf, mtf[tf] ? {
       direction: mtf[tf].direction || null, status: mtf[tf].status || null,
       strengthPct: mtf[tf].strengthPct == null ? null : mtf[tf].strengthPct,
-      candleAt: mtf[tf].lastClosedCandleAt || mtf[tf].candleAt || null
+      candleAt: mtf[tf].lastClosedCandleAt || mtf[tf].candleAt || null,
+      sampleSize: mtf[tf].sampleSize == null ? null : mtf[tf].sampleSize,
+      atr: mtf[tf].atr == null ? null : mtf[tf].atr,
+      atrPct: mtf[tf].atrPct == null ? null : mtf[tf].atrPct,
+      volumeRatio: mtf[tf].volumeRatio == null ? null : mtf[tf].volumeRatio,
+      indicators: mtf[tf].indicators || null
     } : null])),
     setup: {
       entryLimit: trade.entryLimit == null ? null : trade.entryLimit,
@@ -1528,11 +1590,18 @@ function paperBuildAnalysisSnapshot(trade) {
       rr: trade.setupValidation && trade.setupValidation.rr != null ? trade.setupValidation.rr : null,
       confluencePct: trade.confluencePct == null ? null : trade.confluencePct,
       mtfAlignment: trade.mtfAlignment == null ? null : trade.mtfAlignment,
+      quoteSnapshotAtOrder: trade.quoteSnapshotAtOrder || null,
+      priceAtSignal: trade.priceAtSignal == null ? null : trade.priceAtSignal,
       signalScore: trade.signalScores && trade.signalScores.total != null ? trade.signalScores.total : null,
       atr: trade.atr == null ? null : trade.atr,
       support: trade.support == null ? null : trade.support,
       resistance: trade.resistance == null ? null : trade.resistance
-    }
+    },
+    execution: trade.executionCostModel ? {
+      model: trade.executionCostModel, status: trade.costStatus || null,
+      costs: trade.costs || null, fillStatus: trade.fillStatus || null,
+      fillEvents: trade.fillEvents || [], exitCostEstimate: trade.exitCostEstimate || null
+    } : null
   };
 }
 
@@ -1549,7 +1618,18 @@ function paperEnsureAnalysis(trade) {
     trade.analysisExit = {
       closedAt: trade.closedAt || null, exitPrice: trade.exitPrice == null ? null : trade.exitPrice,
       closeReason: trade.closeReason || null, outcome: trade.outcome || null,
-      tp1Hit: !!trade.tp1Hit, mfePnl: paperNumber(trade.mfePnl), maePnl: paperNumber(trade.maePnl)
+      exitCandleAt: trade.exitCandleAt || null,
+      exitDelayMs: trade.exitDelayMs == null ? null : trade.exitDelayMs,
+      exitCandleDelayMs: trade.exitCandleDelayMs == null ? null : trade.exitCandleDelayMs,
+      entryDelayMs: trade.entryDelayMs == null ? null : trade.entryDelayMs,
+      entryCandleDelayMs: trade.entryCandleDelayMs == null ? null : trade.entryCandleDelayMs,
+      filledAt: trade.filledAt || null,
+      firstFillObservedAt: trade.firstFillObservedAt || null,
+      tp1Hit: !!trade.tp1Hit, tp1CandleAt: trade.tp1CandleAt || null,
+      timeToTp1Ms: trade.timeToTp1Ms == null ? null : trade.timeToTp1Ms,
+      tp1CandleDelayMs: trade.tp1CandleDelayMs == null ? null : trade.tp1CandleDelayMs,
+      mfePnl: paperNumber(trade.mfePnl), maePnl: paperNumber(trade.maePnl),
+      costs: trade.costs || null, fillEvents: Array.isArray(trade.fillEvents) ? trade.fillEvents : []
     };
     if (captured && !trade.analysisSummary) {
       const exit = trade.analysisTags.exit.join(', ') || 'CLOSED_OTHER';
@@ -1763,6 +1843,40 @@ function paperLabDefaultAccount(strategyId) {
   };
 }
 
+function paperLabLegacyMissingFields(trade) {
+  const missing = [];
+  if (!trade || !trade.strategyId) missing.push('strategyId');
+  if (!trade || !trade.strategyVersion) missing.push('strategyVersion');
+  if (!trade || !trade.strategyConfigSnapshot) missing.push('strategyConfigSnapshot');
+  if (!trade || !trade.signalCreatedAt) missing.push('signalCreatedAt');
+  if (!trade || !trade.quoteSnapshotAtOrder) missing.push('quoteSnapshotAtOrder');
+  if (!trade || !trade.costModelVersion || !trade.executionCostModel) missing.push('executionCostModel');
+  if (!trade || !trade.costs || trade.costStatus !== 'ESTIMATED_COMPLETE') missing.push('completeCostLedger');
+  return missing;
+}
+
+function paperLabTagLegacyTrade(trade) {
+  if (!trade || typeof trade !== 'object') return trade;
+  const missing = paperLabLegacyMissingFields(trade);
+  if (missing.length) {
+    trade.dataCompleteness = 'LEGACY_DATA_INCOMPLETE';
+    trade.legacyDataMissingFields = missing;
+    // Preserve old pending orders' requested exposure while making their
+    // unfilled-order state explicit for the new partial-fill monitor.
+    if (trade.status === 'PENDING' && trade.orderRemainingSize == null) {
+      trade.orderRequestedSize = paperNumber(trade.originalSize || trade.size);
+      trade.orderRemainingSize = trade.orderRequestedSize;
+      trade.filledSize = 0;
+      trade.remainingSize = 0;
+      trade.remainingContracts = 0;
+    }
+  } else if (!trade.dataCompleteness) {
+    trade.dataCompleteness = 'COMPLETE_ESTIMATED';
+    trade.legacyDataMissingFields = [];
+  }
+  return trade;
+}
+
 function paperLabDefaultState() {
   return {
     schemaVersion: 1,
@@ -1813,8 +1927,10 @@ function paperLabNormaliseState(input) {
       tp1ClosePct: PAPER_TP1_CLOSE_PCT,
       warningDrawdownPct: 10,
       emergencyDrawdownPct: 50,
-      activeTrades: Array.isArray(source.activeTrades) ? source.activeTrades : [],
-      closedTrades: Array.isArray(source.closedTrades) ? source.closedTrades.slice(0, PAPER_LAB_MAX_CLOSED_TRADES) : [],
+      activeTrades: Array.isArray(source.activeTrades)
+        ? source.activeTrades.map(paperLabTagLegacyTrade) : [],
+      closedTrades: Array.isArray(source.closedTrades)
+        ? source.closedTrades.slice(0, PAPER_LAB_MAX_CLOSED_TRADES).map(paperLabTagLegacyTrade) : [],
       monitoringSignals: Array.isArray(source.monitoringSignals) ? source.monitoringSignals.slice(0, 100) : [],
       signalCooldowns: source.signalCooldowns && typeof source.signalCooldowns === 'object' ? source.signalCooldowns : {},
       recentRejections: Array.isArray(source.recentRejections) ? source.recentRejections.slice(0, 50) : []
@@ -2461,13 +2577,14 @@ function paperLabStructureSnapshot(rows, atr) {
 // A pre-breakout order is allowed only after a closed-candle breakout has
 // been followed by a closed-candle retest that holds the broken level. This
 // keeps the research strategy from buying the first wick outside the range.
-function paperBreakoutRetestSnapshot(rows, atrSeries) {
+function paperBreakoutRetestSnapshot(rows, atrSeries, maxLookback) {
   if (!Array.isArray(rows) || rows.length < 30) {
     return {valid: false, direction: null, retestConfirmed: false, reason: 'INSUFFICIENT_CANDLES'};
   }
   const lastIndex = rows.length - 1;
   let candidate = null;
-  const firstBreakoutIndex = Math.max(20, lastIndex - 6);
+  const lookback = Math.max(1, Math.min(6, Number(maxLookback) || 6));
+  const firstBreakoutIndex = Math.max(20, lastIndex - lookback);
   for (let index = firstBreakoutIndex; index < lastIndex; index++) {
     const row = rows[index];
     const previous = rows.slice(index - 20, index);
@@ -2492,7 +2609,8 @@ function paperBreakoutRetestSnapshot(rows, atrSeries) {
       };
     }
   }
-  if (!candidate) return {valid: false, direction: null, retestConfirmed: false, reason: 'NO_VALID_BREAKOUT'};
+  if (!candidate) return {valid: false, direction: null, retestConfirmed: false,
+    maxRetestCandles: lookback, reason: 'NO_VALID_BREAKOUT'};
   let retestAt = null;
   let invalidated = false;
   for (let index = candidate.breakoutIndex + 1; index <= lastIndex; index++) {
@@ -2521,6 +2639,7 @@ function paperBreakoutRetestSnapshot(rows, atrSeries) {
     level: candidate.level,
     breakoutAt: candidate.breakoutAt,
     retestAt,
+    maxRetestCandles: lookback,
     retestConfirmed: !!retestAt && !invalidated && stillHolding,
     distanceAtr: candidate.distanceAtr,
     volumeRatio: candidate.volumeRatio,
@@ -2557,6 +2676,7 @@ function paperIndicatorSnapshot(rows) {
   const previousBollinger = paperBollingerSnapshot(closes, Math.max(0, lastIndex - 1), 20, 2);
   const structure = paperLabStructureSnapshot(rows, atrSeries[lastIndex] || 0);
   const breakoutRetest = paperBreakoutRetestSnapshot(rows, atrSeries);
+  const breakoutRetest4 = paperBreakoutRetestSnapshot(rows, atrSeries, 4);
   const body = Math.abs(last.close - last.open);
   const longVotes = [
     ema9[lastIndex] > ema21[lastIndex] && ema21[lastIndex] > ema50[lastIndex],
@@ -2627,6 +2747,7 @@ function paperIndicatorSnapshot(rows) {
       fvg: structure.fvg,
       orderBlock: structure.orderBlock,
       breakoutRetest,
+      breakoutRetest4,
       supertrend,
       candlePattern: candlePattern.name,
       candleDirection: candlePattern.direction
@@ -2648,6 +2769,10 @@ function buildPaperPairs(payload) {
     if (!sym || !isEligibleBaseSymbol(sym)) return;
     const price = tickerPrice(row);
     if (!price) return;
+    const bidPrice = paperNumber(row.bidPr || row.bestBid || row.bid);
+    const askPrice = paperNumber(row.askPr || row.bestAsk || row.ask);
+    const spreadBps = bidPrice > 0 && askPrice >= bidPrice
+      ? Number((((askPrice - bidPrice) / ((askPrice + bidPrice) / 2)) * 10000).toFixed(3)) : null;
     const chg = row.change24h != null
       ? paperNumber(row.change24h) * 100
       : paperNumber(row.priceChangePercent);
@@ -2662,7 +2787,7 @@ function buildPaperPairs(payload) {
       paperState.oiSnapshot[sym] = oiUsd;
       const history = paperState.oiHistory[sym] || (paperState.oiHistory[sym] = []);
       const ts = Date.parse(dataAt) || Date.now();
-      const sample = {ts, oiUSD: oiUsd, source: payload && payload._nexoraSource || 'Futures ticker'};
+      const sample = {ts, oiUSD: oiUsd, oiUnits, source: payload && payload._nexoraSource || 'Futures ticker'};
       const last = history[history.length - 1];
       if (last && Number(last.ts) === ts) history[history.length - 1] = sample;
       else if (!last || Number(last.ts) < ts) history.push(sample);
@@ -2671,6 +2796,11 @@ function buildPaperPairs(payload) {
     const sc = paperScore(chg, fund, oi, oiReady);
     const pair = {
       sym, price, chg,
+      oiUnits: oiAvailable && oiUnits > 0 ? oiUnits : null,
+      bidPrice: bidPrice > 0 ? bidPrice : null,
+      askPrice: askPrice > 0 ? askPrice : null,
+      spreadBps,
+      quoteAt: dataAt,
       volume: paperNumber(row._nexoraQuoteVolume || row.quoteVolume || row.usdtVolume || row.quoteVolume24h),
       fund, oi, oiUSD: oiAvailable && oiUsd > 0 ? oiUsd : null, oiReady,
       fundingAvailable: paperFieldPresent(row.fundingRate) || paperFieldPresent(row.fundingRate24h),
@@ -2851,14 +2981,15 @@ function validatePaperSetup(pair, setup) {
 }
 
 function paperLabIsActive(trade) {
-  return trade && (trade.status === 'PENDING' || trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL');
+  return trade && (trade.status === 'PENDING' || trade.status === 'PARTIALLY_FILLED' ||
+    trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL');
 }
 
 function paperLabAccountEquity(account) {
   if (!account) return PAPER_LAB_STARTING_EQUITY;
   const realized = (account.closedTrades || []).reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
   const unrealized = (account.activeTrades || [])
-    .filter(trade => trade.status === 'OPEN' || trade.status === 'TP1_PARTIAL')
+    .filter(trade => trade.status === 'OPEN' || trade.status === 'PARTIALLY_FILLED' || trade.status === 'TP1_PARTIAL')
     .reduce((sum, trade) => sum + paperNumber(trade.realizedPnl) + paperNumber(trade.unrealPnl), 0);
   return paperNumber(account.startingEquity || PAPER_LAB_STARTING_EQUITY) + realized + unrealized;
 }
@@ -3007,15 +3138,16 @@ function paperLabEvaluateSr(pair, account) {
     const item = pair.mtf[tf]; const value = paperNumber(item && item.resistance);
     return value > 0 && Math.abs(value - (levels.resistance || value)) <= atr * 0.5;
   }).length;
-  const bullishReject = levels.support && supportTouches >= 2 && i.candleDirection === 'LONG' &&
+  const minZoneTimeframes = Number(PAPER_LAB_STRATEGIES[account.strategyId].rules.minZoneTimeframes || 2);
+  const bullishReject = levels.support && supportTouches >= minZoneTimeframes && i.candleDirection === 'LONG' &&
     ['HAMMER', 'BULLISH_ENGULFING', 'BULLISH_CLOSE'].includes(i.candlePattern) &&
     h1.direction !== 'SHORT' && h4.direction !== 'SHORT';
-  const bearishReject = levels.resistance && resistanceTouches >= 2 && i.candleDirection === 'SHORT' &&
+  const bearishReject = levels.resistance && resistanceTouches >= minZoneTimeframes && i.candleDirection === 'SHORT' &&
     ['SHOOTING_STAR', 'BEARISH_ENGULFING', 'BEARISH_CLOSE'].includes(i.candlePattern) &&
     h4.direction !== 'LONG';
   const dir = bullishReject ? 'LONG' : bearishReject ? 'SHORT' : null;
   if (!dir) return paperLabReject(account.strategyId, pair, ['SR_REJECTION_NOT_CONFIRMED'],
-    ['Zona H1/H4 belum memiliki 2 reaksi + candle rejection yang valid']);
+    ['Zona belum memiliki ' + minZoneTimeframes + ' timeframe konfluensi + candle rejection yang valid']);
   const zone = dir === 'LONG' ? levels.support : levels.resistance;
   const entry = dir === 'LONG' ? zone + atr * 0.05 : zone - atr * 0.05;
   const sl = dir === 'LONG' ? zone - atr * 0.3 : zone + atr * 0.3;
@@ -3050,14 +3182,27 @@ function paperLabEvaluateBreakout(pair, account) {
   const atr = Math.max(paperNumber(m15.atr), price * 0.0025);
   const volumeRatio = paperNumber(m15.volumeRatio || pair.volumeRatio);
   const bodyPct = paperNumber(i.bodyPct) / 100;
-  const longBreak = i.rangeHigh20 > 0 && i.close >= i.rangeHigh20 + atr * 0.2 &&
-    volumeRatio >= 1.5 && bodyPct >= 0.5 && h1.direction !== 'SHORT';
-  const shortBreak = i.rangeLow20 > 0 && i.close <= i.rangeLow20 - atr * 0.2 &&
-    volumeRatio >= 1.5 && bodyPct >= 0.5 && h1.direction !== 'LONG';
-  const dir = longBreak ? 'LONG' : shortBreak ? 'SHORT' : null;
+  const rules = PAPER_LAB_STRATEGIES[account.strategyId].rules;
+  const minVolumeRatio = Number(rules.minVolumeRatio || 1.5);
+  const retest = rules.requireRetest ? i.breakoutRetest4 : null;
+  if (rules.requireRetest && (!retest || !retest.valid ||
+      retest.maxRetestCandles !== Number(rules.retestMaxCandles || 4) ||
+      Number(retest.volumeRatio || 0) < minVolumeRatio)) {
+    return paperLabReject(account.strategyId, pair, ['BREAKOUT_RETEST_NOT_CONFIRMED'], [
+      'Belum ada breakout valid dengan volume ≥' + minVolumeRatio.toFixed(1) + 'x yang diretest dan bertahan dalam ' +
+      Number(rules.retestMaxCandles || 4) + ' candle M15'
+    ]);
+  }
+  const longBreak = !rules.requireRetest && i.rangeHigh20 > 0 && i.close >= i.rangeHigh20 + atr * 0.2 &&
+    volumeRatio >= minVolumeRatio && bodyPct >= 0.5 && h1.direction !== 'SHORT';
+  const shortBreak = !rules.requireRetest && i.rangeLow20 > 0 && i.close <= i.rangeLow20 - atr * 0.2 &&
+    volumeRatio >= minVolumeRatio && bodyPct >= 0.5 && h1.direction !== 'LONG';
+  const retestDir = rules.requireRetest && retest && retest.valid && ['LONG', 'SHORT'].includes(retest.direction) &&
+    (retest.direction === 'LONG' ? h1.direction !== 'SHORT' : h1.direction !== 'LONG') ? retest.direction : null;
+  const dir = retestDir || (longBreak ? 'LONG' : shortBreak ? 'SHORT' : null);
   if (!dir) return paperLabReject(account.strategyId, pair, ['BREAKOUT_NOT_VALID'],
-    ['Close belum menembus range 20 candle dengan ≥0.2 ATR, volume ≥1.5x, dan body ≥50%']);
-  const level = dir === 'LONG' ? i.rangeHigh20 : i.rangeLow20;
+    ['Close belum menembus range 20 candle dengan ≥0.2 ATR, volume ≥' + minVolumeRatio.toFixed(1) + 'x, dan body ≥50%']);
+  const level = rules.requireRetest ? paperNumber(retest.level) : dir === 'LONG' ? i.rangeHigh20 : i.rangeLow20;
   const entry = level;
   const sl = dir === 'LONG' ? level - atr * 0.8 : level + atr * 0.8;
   const risk = Math.abs(entry - sl);
@@ -3066,9 +3211,11 @@ function paperLabEvaluateBreakout(pair, account) {
   const setupResult = paperLabCreateSetup(pair, account, dir,
     {entry, sl, tp1, tp2, atr, structureSupport: dir === 'LONG' ? level : null,
       structureResistance: dir === 'SHORT' ? level : null}, {
-      exitModel: 'BREAKOUT_ATR', entryModel: '20C_RANGE_RETEST',
-      signalReason: 'breakout close + retest ≤4 candle',
-      strategyEvidence: ['range20', 'volume ' + volumeRatio.toFixed(2) + 'x', 'body ' + (bodyPct * 100).toFixed(0) + '%']
+      exitModel: 'BREAKOUT_ATR', entryModel: rules.requireRetest ? '20C_BREAKOUT_RETEST4' : '20C_BREAKOUT_CLOSE',
+      signalReason: rules.requireRetest ? 'breakout volume + successful retest ≤4 M15 candles' : 'breakout close of 20-candle range',
+    strategyEvidence: ['range20', 'volume ' + Number(rules.requireRetest ? retest.volumeRatio : volumeRatio).toFixed(2) +
+      'x (min ' + minVolumeRatio.toFixed(1) + 'x)', rules.requireRetest ? 'retest held ' + retest.retestAt :
+      'breakout close ≥0.2 ATR outside range', 'body ' + (bodyPct * 100).toFixed(0) + '%']
     });
   return setupResult.validation.ok ? {ok: true, setup: setupResult.setup, validation: setupResult.validation,
     reason: 'Breakout ' + dir} : paperLabReject(account.strategyId, pair,
@@ -3195,6 +3342,165 @@ function paperLabEvaluatePrebreakout(pair, account) {
     signal, reason: 'Pre-breakout confirmed ' + signal.direction};
 }
 
+function paperLabRelativeStrengthSnapshot(pairs) {
+  const list = Array.isArray(pairs) ? pairs : [];
+  const btc = list.find(pair => pair && pair.sym === 'BTC');
+  if (!btc || !btc.mtf || !btc.mtf.H1 || btc.mtf.H1.status !== 'FULL' || !Number.isFinite(Number(btc.mtf.H1.change))) return {};
+  const btcH1 = paperNumber(btc.mtf && btc.mtf.H1 && btc.mtf.H1.change);
+  const rows = list.filter(pair => pair && Number.isFinite(Number(pair.chg)) &&
+    pair.mtf && pair.mtf.H1 && pair.mtf.H1.status === 'FULL' && Number.isFinite(Number(pair.mtf.H1.change)));
+  const ordered = rows.map(pair => ({
+    sym: pair.sym,
+    relative24hPct: Number((paperNumber(pair.chg) - paperNumber(btc.chg)).toFixed(3)),
+    relative3hPct: Number((paperNumber(pair.mtf && pair.mtf.H1 && pair.mtf.H1.change) - btcH1).toFixed(3))
+  })).sort((a, b) => a.relative24hPct - b.relative24hPct || a.sym.localeCompare(b.sym));
+  const ranks = {};
+  ordered.forEach((item, index) => {
+    ranks[item.sym] = {...item, percentile: ordered.length > 1
+      ? Number((index / (ordered.length - 1) * 100).toFixed(1)) : 50,
+    universeCount: ordered.length, benchmark: 'BTC'};
+  });
+  return ranks;
+}
+
+function paperLabFundingPercentiles(pairs, nowMs) {
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const fresh = (Array.isArray(pairs) ? pairs : []).filter(pair => {
+    const age = now - (Date.parse(pair && (pair.quoteAt || pair.dataAt)) || 0);
+    return pair && pair.fundingAvailable && Number.isFinite(Number(pair.fund)) && age >= 0 && age <= 10 * 60 * 1000;
+  }).sort((a, b) => Number(a.fund) - Number(b.fund) || String(a.sym).localeCompare(String(b.sym)));
+  const ranks = {};
+  fresh.forEach((pair, index) => {
+    ranks[pair.sym] = fresh.length > 1 ? Number((index / (fresh.length - 1) * 100).toFixed(1)) : 50;
+  });
+  return ranks;
+}
+
+function paperLabOiChange1h(pair, nowMs, oiHistory) {
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const history = oiHistory && Array.isArray(oiHistory[pair && pair.sym]) ? oiHistory[pair.sym] : [];
+  if (!pair || !pair.oiAvailable || history.length < 2) return null;
+  // USD notional changes with price. Use contract units to avoid mistaking a
+  // price move for new open interest; old snapshots without units stay unknown.
+  const valid = history.filter(row => row && Number(row.ts) > 0 && Number(row.oiUnits) > 0 && Number(row.ts) <= now)
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+  const latest = valid[valid.length - 1];
+  if (!latest || now - Number(latest.ts) > 15 * 60 * 1000) return null;
+  const target = now - 60 * 60 * 1000;
+  const baseline = valid.filter(row => Number(row.ts) <= target && Number(row.ts) >= now - 80 * 60 * 1000)
+    .sort((a, b) => Math.abs(Number(a.ts) - target) - Math.abs(Number(b.ts) - target))[0];
+  if (!baseline || Math.abs(Number(baseline.ts) - target) > 20 * 60 * 1000) return null;
+  return Number(((Number(latest.oiUnits) - Number(baseline.oiUnits)) / Number(baseline.oiUnits) * 100).toFixed(3));
+}
+
+function paperLabLastClosedBarChangePct(timeframe) {
+  const indicators = timeframe && timeframe.indicators || {};
+  const open = paperNumber(indicators.open);
+  const close = paperNumber(indicators.close);
+  return open > 0 && close > 0 ? Number(((close / open - 1) * 100).toFixed(3)) : null;
+}
+
+function paperLabEvaluateRelativeStrength(pair, account) {
+  const base = paperLabRequireMtf(pair);
+  if (base) return {...base, strategyId: account.strategyId};
+  const rules = PAPER_LAB_STRATEGIES[account.strategyId].rules;
+  const rs = pair.relativeStrength || {};
+  const m15 = paperLabTimeframe(pair, 'M15');
+  const h1 = paperLabTimeframe(pair, 'H1');
+  const h4 = paperLabTimeframe(pair, 'H4');
+  const price = paperNumber(pair.price);
+  const atr = Math.max(paperNumber(m15.atr), price * 0.0025);
+  const i = m15.indicators || {};
+  if (rs.relative3hPct == null || !Number.isFinite(Number(rs.percentile)) ||
+      !Number.isFinite(Number(rs.relative24hPct)) || !Number.isFinite(Number(rs.relative3hPct))) {
+    return paperLabReject(account.strategyId, pair, ['RS_BENCHMARK_MISSING'], ['Relative strength/BTC benchmark belum tersedia']);
+  }
+  const long = rs.percentile >= Number(rules.percentile) && rs.relative24hPct >= Number(rules.relative24hThresholdPct) &&
+    rs.relative3hPct >= Number(rules.relative3hThresholdPct) && h4.direction === 'LONG' && h1.direction === 'LONG' &&
+    i.candleDirection === 'LONG' && paperNumber(i.close) > paperNumber(i.ema21);
+  const short = rs.percentile <= 100 - Number(rules.percentile) && rs.relative24hPct <= -Number(rules.relative24hThresholdPct) &&
+    rs.relative3hPct <= -Number(rules.relative3hThresholdPct) && h4.direction === 'SHORT' && h1.direction === 'SHORT' &&
+    i.candleDirection === 'SHORT' && paperNumber(i.close) < paperNumber(i.ema21);
+  const dir = long ? 'LONG' : short ? 'SHORT' : null;
+  if (!dir) return paperLabReject(account.strategyId, pair, ['RS_FILTER_NOT_VALID'], [
+    'Butuh percentile ' + (dir === 'SHORT' ? '≤' + (100 - rules.percentile) : '≥' + rules.percentile) +
+    ', relative 24h/3h melewati ambang, H4/H1 searah dan trigger M15'
+  ]);
+  const distanceFromEma = Math.abs(price - paperNumber(i.ema21));
+  if (!paperNumber(i.ema21) || distanceFromEma > atr) {
+    return paperLabReject(account.strategyId, pair, ['RS_ENTRY_EXTENDED'], ['Harga lebih dari 1 ATR dari EMA21; tidak mengejar koin yang sudah extended']);
+  }
+  const entry = paperNumber(i.ema21);
+  const risk = atr * Number(rules.stopAtr);
+  const sl = dir === 'LONG' ? entry - risk : entry + risk;
+  const tp1 = dir === 'LONG' ? entry + risk * Number(rules.tp1R) : entry - risk * Number(rules.tp1R);
+  const tp2 = dir === 'LONG' ? entry + risk * Number(rules.tp2R) : entry - risk * Number(rules.tp2R);
+  const setupResult = paperLabCreateSetup(pair, account, dir, {entry, sl, tp1, tp2, atr}, {
+    exitModel: 'RS_ATR_2R_3R', entryModel: 'RELATIVE_STRENGTH_EMA21_PULLBACK',
+    signalReason: 'Relative ' + rs.relative24hPct + '%/24h and ' + rs.relative3hPct + '%/3h vs BTC · rank ' + rs.percentile + '%',
+    strategyEvidence: ['BTC-relative 24h ' + rs.relative24hPct + '%', 'BTC-relative 3h ' + rs.relative3hPct + '%',
+      'universe percentile ' + rs.percentile + '% (' + rs.universeCount + ' coins)', 'H4/H1/M15 aligned']
+  });
+  return setupResult.validation.ok
+    ? {ok: true, setup: setupResult.setup, validation: setupResult.validation, reason: 'Relative strength ' + dir}
+    : paperLabReject(account.strategyId, pair, setupResult.validation.reasonCodes, setupResult.validation.reasons);
+}
+
+function paperLabEvaluateFundingOi(pair, account) {
+  const rules = PAPER_LAB_STRATEGIES[account.strategyId].rules;
+  const m15 = paperLabTimeframe(pair, 'M15');
+  const h1 = paperLabTimeframe(pair, 'H1');
+  if (!m15 || !h1) return paperLabReject(account.strategyId, pair, ['FUNDING_OI_MTF_UNAVAILABLE'],
+    ['H1 dan M15 harus lengkap dan fresh']);
+  const now = Date.now();
+  const quoteAt = Date.parse(pair.quoteAt || pair.dataAt) || 0;
+  const fundingFresh = quoteAt > 0 && now >= quoteAt && now - quoteAt <= 10 * 60 * 1000;
+  const oiChange1hPct = paperLabOiChange1h(pair, now, paperState.oiHistory || {});
+  const fundingPercentile = paperNumber(pair.fundingPercentile);
+  const price1hChangePct = paperLabLastClosedBarChangePct(h1);
+  const i = m15.indicators || {};
+  if (!pair.fundingAvailable || !fundingFresh || !pair.oiAvailable || oiChange1hPct == null || price1hChangePct == null) {
+    const reasons = [];
+    if (!pair.fundingAvailable || !fundingFresh) reasons.push('funding tidak tersedia atau stale');
+    if (!pair.oiAvailable || oiChange1hPct == null) reasons.push('OI 1 jam memerlukan baseline fresh');
+    if (price1hChangePct == null) reasons.push('open/close candle H1 terakhir tidak tersedia');
+    return paperLabReject(account.strategyId, pair, ['FUNDING_OI_DATA_INCOMPLETE'], reasons);
+  }
+  const short = Number(pair.fund) >= Number(rules.fundingAbsMin) &&
+    fundingPercentile >= Number(rules.fundingPercentile) && oiChange1hPct >= Number(rules.oiChange1hPct) &&
+    price1hChangePct <= -Number(rules.triggerChangePct) && i.candleDirection === 'SHORT' &&
+    paperNumber(i.close) < paperNumber(i.ema21);
+  const long = Number(pair.fund) <= -Number(rules.fundingAbsMin) &&
+    fundingPercentile <= 100 - Number(rules.fundingPercentile) && oiChange1hPct >= Number(rules.oiChange1hPct) &&
+    price1hChangePct >= Number(rules.triggerChangePct) && i.candleDirection === 'LONG' &&
+    paperNumber(i.close) > paperNumber(i.ema21);
+  const dir = short ? 'SHORT' : long ? 'LONG' : null;
+  if (!dir) return paperLabReject(account.strategyId, pair, ['FUNDING_OI_DIVERGENCE_NOT_CONFIRMED'], [
+    'Perlu funding ekstrem berlawanan dengan trigger harga, OI 1h naik ≥' + rules.oiChange1hPct +
+    '%, dan candle M15 konfirmasi'
+  ]);
+  const price = paperNumber(pair.price);
+  const atr = Math.max(paperNumber(m15.atr), price * 0.0025);
+  const distanceFromEma = Math.abs(price - paperNumber(i.ema21));
+  if (!paperNumber(i.ema21) || distanceFromEma > atr) {
+    return paperLabReject(account.strategyId, pair, ['FUNDING_OI_ENTRY_EXTENDED'], ['Harga lebih dari 1 ATR dari EMA21']);
+  }
+  const entry = paperNumber(i.ema21);
+  const risk = atr * Number(rules.stopAtr);
+  const sl = dir === 'LONG' ? entry - risk : entry + risk;
+  const tp1 = dir === 'LONG' ? entry + risk * Number(rules.tp1R) : entry - risk * Number(rules.tp1R);
+  const tp2 = dir === 'LONG' ? entry + risk * Number(rules.tp2R) : entry - risk * Number(rules.tp2R);
+  const setupResult = paperLabCreateSetup(pair, account, dir, {entry, sl, tp1, tp2, atr}, {
+    exitModel: 'FUNDING_OI_ATR_2R_3R', entryModel: 'FUNDING_OI_DIVERGENCE_EMA21',
+    signalReason: 'Funding ' + Number(pair.fund).toFixed(6) + ' · OI 1h +' + oiChange1hPct + '% · H1 ' + price1hChangePct + '%',
+    strategyEvidence: ['funding percentile ' + fundingPercentile + '%', 'funding ' + Number(pair.fund).toFixed(6),
+      'OI 1h +' + oiChange1hPct + '%', 'H1 price change ' + price1hChangePct + '%', 'M15 reversal trigger']
+  });
+  return setupResult.validation.ok
+    ? {ok: true, setup: setupResult.setup, validation: setupResult.validation, reason: 'Funding/OI divergence ' + dir}
+    : paperLabReject(account.strategyId, pair, setupResult.validation.reasonCodes, setupResult.validation.reasons);
+}
+
 function paperLabEvaluateCandidate(pair, strategyId, account) {
   if (!pair || !account || !account.enabled) {
     return paperLabReject(strategyId, pair, ['STRATEGY_DISABLED'], ['Strategi disabled']);
@@ -3206,6 +3512,8 @@ function paperLabEvaluateCandidate(pair, strategyId, account) {
     case 'SMC_LIQUIDITY_V1': return paperLabEvaluateSmc(pair, account);
     case 'RANGE_MEAN_REVERSION_V1': return paperLabEvaluateRange(pair, account);
     case 'PREBREAKOUT_RESEARCH_V1': return paperLabEvaluatePrebreakout(pair, account);
+    case 'RELATIVE_STRENGTH_V1': return paperLabEvaluateRelativeStrength(pair, account);
+    case 'FUNDING_OI_DIVERGENCE_V1': return paperLabEvaluateFundingOi(pair, account);
     default: return paperLabReject(strategyId, pair, ['STRATEGY_UNKNOWN'], ['Strategi tidak dikenal']);
   }
 }
@@ -3213,38 +3521,82 @@ function paperLabEvaluateCandidate(pair, strategyId, account) {
 function paperLabCreateTrade(pair, account, result, cycleKey) {
   const setup = result.setup;
   const strategyId = account.strategyId;
+  const definition = PAPER_LAB_STRATEGIES[strategyId];
   const id = 'LAB-' + String(++paperState.strategyLab.nextId).padStart(6, '0');
   const candidate = paperCandidateView(pair);
+  const signalCreatedAt = new Date().toISOString();
+  const executionCostModel = {
+    version: PAPER_LAB_COST_MODEL_VERSION,
+    feeSource: 'Bitget standard USDT-M futures estimate; user VIP/BGB rate may differ',
+    makerFeeRate: PAPER_LAB_MAKER_FEE_RATE,
+    takerFeeRate: PAPER_LAB_TAKER_FEE_RATE,
+    takerSlippageBps: PAPER_LAB_TAKER_SLIPPAGE_BPS,
+    fallbackSpreadBps: PAPER_LAB_FALLBACK_SPREAD_BPS,
+    fillParticipationRate: PAPER_LAB_FILL_PARTICIPATION_RATE,
+    sameCandleRule: 'STOP_FIRST_CONSERVATIVE',
+    spreadModel: pair.spreadBps == null ? 'FALLBACK_ESTIMATE' : 'OBSERVED_AT_ORDER'
+  };
+  const strategyConfigSnapshot = JSON.parse(JSON.stringify({
+    rules: definition.rules || {}, riskPct: account.riskPct, minRR: account.minRR,
+    maxActive: account.maxActive, pendingTtlMs: account.pendingTtlMs,
+    tp1ClosePct: account.tp1ClosePct, trailing: setup.trailing || definition.trailing,
+    executionCostModel
+  }));
   const trade = {
     id, sym: pair.sym, dir: setup.dir, status: 'PENDING',
     entryLimit: setup.entry, entryActual: null, currentPrice: pair.price,
     sl: setup.sl, tp1: setup.tp1, tp2: setup.tp2,
-    size: setup.size, originalSize: setup.size, remainingSize: setup.size,
-    contracts: setup.contracts, originalContracts: setup.contracts, remainingContracts: setup.contracts,
+    size: setup.size, originalSize: setup.size, remainingSize: 0,
+    orderRequestedSize: setup.size, orderRemainingSize: setup.size, filledSize: 0,
+    contracts: setup.contracts, originalContracts: setup.contracts, remainingContracts: 0,
     riskPct: setup.riskPct, riskDollar: setup.riskDollar, riskDollarAtEntry: setup.riskDollar,
-    tp1ClosePct: account.tp1ClosePct, tp1Hit: false, tp1HitAt: null, slAfterTp1: null,
-    realizedPnlTp1: 0, realizedPnl: 0, realizedPnlFinal: 0, unrealPnl: 0, mfePnl: 0, maePnl: 0,
-    createdAt: Date.now(), openedAt: null, closedAt: null, cycleKey,
+    tp1ClosePct: account.tp1ClosePct, tp1Hit: false, tp1HitAt: null, tp1CandleAt: null,
+    timeToTp1Ms: null, tp1CandleDelayMs: null, slAfterTp1: null,
+    realizedPnlTp1: 0, realizedPnl: 0, realizedGrossPnl: 0, grossPnl: 0,
+    netPnlAfterCosts: 0, realizedPnlFinal: 0, unrealPnl: 0, mfePnl: 0, maePnl: 0,
+    costs: {entryFeesUsd: 0, exitFeesUsd: 0, spreadUsd: 0, slippageUsd: 0, totalUsd: 0},
+    costStatus: 'ESTIMATED_COMPLETE', costModelVersion: PAPER_LAB_COST_MODEL_VERSION,
+    dataCompleteness: 'COMPLETE_ESTIMATED', legacyDataMissingFields: [],
+    createdAt: Date.now(), signalCreatedAt, orderCreatedAt: signalCreatedAt, signalSnapshotVersion: 1,
+    priceAtSignal: paperNumber(pair.price),
+    filledAt: null, openedAt: null, closedAt: null, cycleKey,
     strategyId, strategyVersion: account.version, cohortId: 'lab-' + strategyId,
+    strategyConfigSnapshot,
+    quoteSnapshotAtOrder: {
+      bid: pair.bidPrice == null ? null : pair.bidPrice,
+      ask: pair.askPrice == null ? null : pair.askPrice,
+      mid: pair.bidPrice > 0 && pair.askPrice > 0 ? (pair.bidPrice + pair.askPrice) / 2 : pair.price,
+      spreadBps: pair.spreadBps == null ? PAPER_LAB_FALLBACK_SPREAD_BPS : pair.spreadBps,
+      observedAt: pair.quoteAt || pair.dataAt || signalCreatedAt,
+      source: pair.source || 'Bitget Futures',
+      basis: pair.spreadBps == null ? 'ESTIMATED_FALLBACK' : 'BID_ASK_TICKER'
+    },
+    executionCostModel,
     universeVersion: pair.universeVersion || UNIVERSE_VERSION,
     mode: PAPER_LAB_MODE, signalMode: 'NATIVE', timeframe: '15M', tf: '15M',
     dataQuality: pair.dataQuality || 'PARTIAL', dataAt: pair.dataAt, source: pair.source,
-    chg: pair.chg, fund: pair.fund, oi: pair.oi, volume: pair.volume,
+    chg: pair.chg, fund: pair.fund, oi: pair.oi, oiUnits: pair.oiUnits == null ? null : pair.oiUnits,
+    oiUSD: pair.oiUSD == null ? null : pair.oiUSD, volume: pair.volume,
     volumeRatio: pair.volumeRatio, fundingAvailable: !!pair.fundingAvailable,
     oiAvailable: !!pair.oiAvailable, volumeAvailable: !!pair.volumeAvailable,
     mtf: pair.mtf, mtfDirection: pair.mtfDirection, mtfAlignment: pair.mtfAlignment,
     mtfSummary: pair.mtfSummary, confluencePct: pair.confluencePct,
+    relativeStrength: pair.relativeStrength || null,
+    fundingPercentile: pair.fundingPercentile == null ? null : pair.fundingPercentile,
+    oiChange1hPct: pair.oiChange1hPct == null ? null : pair.oiChange1hPct,
     indicators: pair.mtf && pair.mtf.M15 ? pair.mtf.M15.indicators : null,
     signalScores: pair.signalScores || null, score: pair.sc || null, tier: pair.tier || null,
-    signalCreatedAt: new Date().toISOString(),
     candleAtByTf: Object.fromEntries(['H4', 'H1', 'M30', 'M15'].map(tf =>
       [tf, pair.mtf && pair.mtf[tf] ? pair.mtf[tf].lastClosedCandleAt || pair.mtf[tf].candleAt : null])),
     entryModel: setup.entryModel, exitModel: setup.exitModel, nativeExit: true,
     trailing: setup.trailing, strategyEvidence: setup.strategyEvidence || [],
     signalState: setup.signalState || null, preScore: setup.preScore, confirmationScore: setup.confirmationScore,
     signalReason: setup.signalReason || result.reason, setupValidation: result.validation,
-    pendingTtlMs: account.pendingTtlMs, executionModel: 'SHADOW_LIMIT_1M',
-    fillMethod: null, fillCandleAt: null, lastProcessedCandleAt: null,
+    pendingTtlMs: account.pendingTtlMs, executionModel: 'SHADOW_LIMIT_1M_PARTICIPATION',
+    fillModel: '1M_QUOTE_VOLUME_PARTICIPATION', fillStatus: 'PENDING', fillEvents: [],
+    fillMethod: null, fillCandleAt: null, entryDelayMs: null, entryCandleDelayMs: null,
+    firstFillObservedAt: null, lastProcessedCandleAt: null,
+    exitCandleAt: null, exitDelayMs: null, exitCandleDelayMs: null,
     closeStage: null, closeReason: null, outcome: null, exitPrice: null, r: 0, pnl: 0,
     events: [{type: 'ORDER_PLACED', at: new Date().toISOString(), price: setup.entry,
       candleAt: null, reason: result.reason, size: setup.size}]
@@ -3288,6 +3640,16 @@ function paperLabScan(ranked, cycleKey, reason, options) {
   const selectedIds = options && Array.isArray(options.strategyIds)
     ? new Set(options.strategyIds) : null;
   const updateLabCycle = !(options && options.updateLabCycle === false);
+  const analysisUniverse = options && Array.isArray(options.analysisUniverse)
+    ? options.analysisUniverse : ranked;
+  const relativeStrengthBySymbol = paperLabRelativeStrengthSnapshot(analysisUniverse);
+  const fundingPercentileBySymbol = paperLabFundingPercentiles(analysisUniverse, Date.now());
+  const contextualBySymbol = Object.fromEntries(analysisUniverse.map(pair => [pair.sym, {
+    ...pair,
+    relativeStrength: relativeStrengthBySymbol[pair.sym] || null,
+    fundingPercentile: fundingPercentileBySymbol[pair.sym] == null ? null : fundingPercentileBySymbol[pair.sym],
+    oiChange1hPct: paperLabOiChange1h(pair, Date.now(), paperState.oiHistory || {})
+  }]));
   if (updateLabCycle) {
     if (lab.lastCycleKey === cycleKey) return false;
   }
@@ -3313,7 +3675,10 @@ function paperLabScan(ranked, cycleKey, reason, options) {
       return;
     }
     const activeSymbols = new Set(active.map(trade => trade.sym));
-    for (const pair of ranked) {
+    const strategyUniverse = options && options.strategyUniverses &&
+      Array.isArray(options.strategyUniverses[strategyId]) ? options.strategyUniverses[strategyId] : ranked;
+    for (const rawPair of strategyUniverse) {
+      const pair = contextualBySymbol[rawPair.sym] || rawPair;
       if (activeSymbols.has(pair.sym)) continue;
       const result = paperLabEvaluateCandidate(pair, strategyId, account);
       if (result.signal && paperLabRecordSignal(account, result.signal)) {
@@ -3352,27 +3717,147 @@ function paperLabScan(ranked, cycleKey, reason, options) {
   lab.lastError = null;
   lab.recentScans = [{cycleKey, at: lab.lastScanAt, reason: reason || '15M close',
     placed: placedByStrategy, rejected: rejectedByStrategy,
-    signalCounts: signalCountsByStrategy, candidates: ranked.length, overlaps,
+    signalCounts: signalCountsByStrategy, candidates: analysisUniverse.length, overlaps,
     universeVersion: ranked[0] && ranked[0].universeVersion || UNIVERSE_VERSION}]
     .concat(lab.recentScans || []).slice(0, 200);
   return changed;
 }
 
-function paperLabCloseTrade(account, trade, exitPrice, outcome, reason) {
+function paperLabExecutionCost(trade, referencePrice, size, liquidity) {
+  const model = trade && trade.executionCostModel || {};
+  const entry = paperNumber(trade && (trade.entryActual || trade.entryLimit));
+  const price = paperNumber(referencePrice);
+  const notional = entry > 0 && price > 0 ? Math.abs(paperNumber(size)) * price / entry : 0;
+  const taker = String(liquidity || '').toUpperCase() === 'TAKER';
+  const feeRate = Math.max(0, paperNumber(taker ? model.takerFeeRate : model.makerFeeRate));
+  const spreadBps = Math.max(0, paperNumber(trade && trade.quoteSnapshotAtOrder &&
+    trade.quoteSnapshotAtOrder.spreadBps != null ? trade.quoteSnapshotAtOrder.spreadBps : model.fallbackSpreadBps));
+  const slippageBps = taker ? Math.max(0, paperNumber(model.takerSlippageBps)) : 0;
+  const feeUsd = notional * feeRate;
+  const spreadUsd = taker ? notional * (spreadBps / 2) / 10000 : 0;
+  const slippageUsd = notional * slippageBps / 10000;
+  return {
+    liquidity: taker ? 'TAKER' : 'MAKER', notionalUsd: Number(notional.toFixed(8)), feeRate,
+    feeUsd: Number(feeUsd.toFixed(8)), spreadBps, spreadUsd: Number(spreadUsd.toFixed(8)),
+    slippageBps, slippageUsd: Number(slippageUsd.toFixed(8)),
+    totalUsd: Number((feeUsd + spreadUsd + slippageUsd).toFixed(8))
+  };
+}
+
+function paperLabAccumulateCosts(trade, cost, phase) {
+  if (!trade || !cost) return;
+  trade.costs = trade.costs || {entryFeesUsd: 0, exitFeesUsd: 0, spreadUsd: 0, slippageUsd: 0, totalUsd: 0};
+  if (phase === 'ENTRY') trade.costs.entryFeesUsd = paperNumber(trade.costs.entryFeesUsd) + cost.feeUsd;
+  else trade.costs.exitFeesUsd = paperNumber(trade.costs.exitFeesUsd) + cost.feeUsd;
+  trade.costs.spreadUsd = paperNumber(trade.costs.spreadUsd) + cost.spreadUsd;
+  trade.costs.slippageUsd = paperNumber(trade.costs.slippageUsd) + cost.slippageUsd;
+  trade.costs.totalUsd = paperNumber(trade.costs.totalUsd) + cost.totalUsd;
+  Object.keys(trade.costs).forEach(key => { trade.costs[key] = Number(paperNumber(trade.costs[key]).toFixed(8)); });
+}
+
+function paperLabBookEntryFill(trade, fillSize, bar) {
+  const feeRate = Math.max(0, paperNumber(trade.executionCostModel && trade.executionCostModel.makerFeeRate));
+  const feeUsd = Math.abs(paperNumber(fillSize)) * feeRate;
+  const cost = {liquidity: 'MAKER', notionalUsd: Number(paperNumber(fillSize).toFixed(8)), feeRate,
+    feeUsd: Number(feeUsd.toFixed(8)), spreadBps: 0, spreadUsd: 0, slippageBps: 0, slippageUsd: 0,
+    totalUsd: Number(feeUsd.toFixed(8))};
+  paperLabAccumulateCosts(trade, cost, 'ENTRY');
+  trade.realizedPnl = paperNumber(trade.realizedPnl) - feeUsd;
+  const fillAt = bar && Number(bar.ts) > 0 ? new Date(Number(bar.ts)).toISOString() : new Date().toISOString();
+  const fillAtMs = paperLabTimestampMs(fillAt);
+  const signalAtMs = paperLabTimestampMs(trade.signalCreatedAt || trade.createdAt);
+  const fillObservedAt = new Date().toISOString();
+  const fillObservedAtMs = paperLabTimestampMs(fillObservedAt);
+  if (trade.entryCandleDelayMs == null && fillAtMs > 0 && signalAtMs > 0 && fillAtMs >= signalAtMs) {
+    trade.entryCandleDelayMs = fillAtMs - signalAtMs;
+  }
+  if (!trade.firstFillObservedAt) trade.firstFillObservedAt = fillObservedAt;
+  if (trade.entryDelayMs == null && fillObservedAtMs > 0 && signalAtMs > 0 && fillObservedAtMs >= signalAtMs) {
+    trade.entryDelayMs = fillObservedAtMs - signalAtMs;
+  }
+  trade.filledAt = trade.filledAt || fillAt;
+  trade.openedAt = trade.openedAt || fillAt;
+  trade.fillCandleAt = fillAt;
+  trade.fillObservedAt = fillObservedAt;
+  trade.fillMethod = '1M_OHLCV_VOLUME_PARTICIPATION';
+  trade.fillEvents = Array.isArray(trade.fillEvents) ? trade.fillEvents : [];
+  trade.fillEvents.push({
+    at: fillAt, observedAt: trade.fillObservedAt, sizeUsd: Number(paperNumber(fillSize).toFixed(8)),
+    delaySinceSignalMs: fillAtMs > 0 && signalAtMs > 0 && fillAtMs >= signalAtMs ? fillAtMs - signalAtMs : null,
+    observedDelaySinceSignalMs: fillObservedAtMs > 0 && signalAtMs > 0 && fillObservedAtMs >= signalAtMs
+      ? fillObservedAtMs - signalAtMs : null,
+    price: trade.entryLimit, candleClose: paperNumber(bar && bar.close) || null,
+    candleQuoteVolume: paperNumber(bar && bar.quoteVolume), participationRate: paperNumber(trade.executionCostModel && trade.executionCostModel.fillParticipationRate),
+    feeUsd: cost.feeUsd, feeRate, method: trade.fillMethod,
+    priceDriftFromSignalPct: paperNumber(trade.priceAtSignal) > 0 && paperNumber(bar && bar.close) > 0
+      ? Number(((paperNumber(bar.close) / paperNumber(trade.priceAtSignal) - 1) * 100).toFixed(4)) : null
+  });
+  trade.fillStatus = paperNumber(trade.orderRemainingSize) > 1e-8 ? 'PARTIALLY_FILLED' : 'FILLED';
+  paperAddTradeEvent(trade, 'LIMIT_FILL', {price: trade.entryLimit, candleAt: fillAt,
+    reason: '1m OHLCV touch; volume-participation estimate', size: fillSize, costs: cost});
+}
+
+function paperLabFillCapacity(trade, quoteVolume) {
+  const remaining = Math.max(0, paperNumber(trade && trade.orderRemainingSize));
+  const volume = Math.max(0, paperNumber(quoteVolume));
+  const configuredRate = trade && trade.executionCostModel && trade.executionCostModel.fillParticipationRate;
+  const participationRate = configuredRate == null
+    ? PAPER_LAB_FILL_PARTICIPATION_RATE : Math.max(0, Math.min(0.1, paperNumber(configuredRate)));
+  return Math.min(remaining, volume * participationRate);
+}
+
+function paperLabTimestampMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (/^\d+$/.test(String(value || ''))) return Number(value);
+  return Date.parse(value || '') || 0;
+}
+
+function paperLabCloseTrade(account, trade, exitPrice, outcome, reason, bar) {
   const size = paperTradeRemainingSize(trade);
-  const pnlPart = paperTradePnl(trade, exitPrice, size);
-  const totalPnl = paperNumber(trade.realizedPnl) + pnlPart;
+  const grossPart = paperTradePnl(trade, exitPrice, size);
+  const costComplete = trade.costStatus === 'ESTIMATED_COMPLETE' && trade.costModelVersion;
+  const reasonText = String(reason || '').toLowerCase();
+  const liquidity = reasonText.includes('sl') ? 'TAKER' : 'MAKER';
+  const cost = costComplete ? paperLabExecutionCost(trade, exitPrice, size, liquidity) : null;
+  if (cost) paperLabAccumulateCosts(trade, cost, 'EXIT');
+  const priorGross = costComplete ? paperNumber(trade.realizedGrossPnl)
+    : paperNumber(trade.realizedGrossPnl != null ? trade.realizedGrossPnl : trade.realizedPnl);
+  const priorNet = costComplete ? paperNumber(trade.realizedPnl) : priorGross;
+  const totalGross = priorGross + grossPart;
+  const totalNet = priorNet + grossPart - (cost ? cost.totalUsd : 0);
   const initialRisk = paperTradeInitialRiskDollar(trade);
-  const r = initialRisk > 0 ? totalPnl / initialRisk : 0;
+  const grossR = initialRisk > 0 ? totalGross / initialRisk : 0;
+  const r = initialRisk > 0 ? totalNet / initialRisk : 0;
   trade.status = 'CLOSED'; trade.exitPrice = exitPrice; trade.closedAt = new Date().toISOString();
-  trade.realizedPnlFinal = Number(pnlPart.toFixed(2)); trade.realizedPnl = Number(totalPnl.toFixed(2));
-  paperSetRemainingSize(trade, 0); trade.unrealPnl = 0;
-  trade.outcome = outcome; trade.closeReason = reason; trade.r = Number(r.toFixed(2));
-  trade.pnl = Number(totalPnl.toFixed(2));
-  trade.closeStage = String(reason).toLowerCase().includes('tp2') ? 'CLOSED_TP2'
+  trade.exitCandleAt = bar && paperLabTimestampMs(bar.ts) > 0
+    ? new Date(paperLabTimestampMs(bar.ts)).toISOString() : null;
+  const openedAtMs = paperLabTimestampMs(trade.firstFillObservedAt || trade.filledAt || trade.openedAt);
+  const closedAtMs = paperLabTimestampMs(trade.closedAt);
+  trade.exitDelayMs = openedAtMs > 0 && closedAtMs >= openedAtMs ? closedAtMs - openedAtMs : null;
+  const openedCandleAtMs = paperLabTimestampMs(trade.filledAt || trade.openedAt);
+  const exitCandleAtMs = paperLabTimestampMs(trade.exitCandleAt);
+  trade.exitCandleDelayMs = openedCandleAtMs > 0 && exitCandleAtMs >= openedCandleAtMs
+    ? exitCandleAtMs - openedCandleAtMs : null;
+  trade.realizedPnlFinal = Number((grossPart - (cost ? cost.totalUsd : 0)).toFixed(8));
+  trade.realizedGrossPnl = Number(totalGross.toFixed(8));
+  trade.grossPnl = Number(totalGross.toFixed(8));
+  trade.realizedPnl = Number(totalNet.toFixed(8));
+  trade.netPnlAfterCosts = costComplete ? Number(totalNet.toFixed(8)) : null;
+  trade.rGross = Number(grossR.toFixed(4));
+  trade.rNetAfterCosts = costComplete ? Number(r.toFixed(4)) : null;
+  paperSetRemainingSize(trade, 0); trade.unrealPnl = 0; trade.orderRemainingSize = 0;
+  trade.outcome = costComplete ? (r > 0.05 ? 'WIN' : r < -0.05 ? 'LOSS' : 'BREAKEVEN') : outcome;
+  trade.closeReason = reason; trade.r = Number(r.toFixed(4));
+  trade.pnl = Number(totalNet.toFixed(8));
+  trade.effectiveExitPrice = costComplete && liquidity === 'TAKER'
+    ? Number((exitPrice * (trade.dir === 'LONG' ? 1 - (cost.spreadBps / 2 + cost.slippageBps) / 10000
+      : 1 + (cost.spreadBps / 2 + cost.slippageBps) / 10000)).toPrecision(12)) : exitPrice;
+  trade.exitLiquidity = costComplete ? liquidity : 'UNKNOWN_LEGACY';
+  trade.exitCostEstimate = cost;
+  trade.closeStage = reasonText.includes('tp2') ? 'CLOSED_TP2'
     : trade.tp1Hit ? 'CLOSED_AFTER_TP1' : 'CLOSED_DIRECT';
   trade.lastEvent = 'CLOSED';
-  paperAddTradeEvent(trade, 'CLOSED', {price: exitPrice, reason});
+  paperAddTradeEvent(trade, 'CLOSED', {price: exitPrice, candleAt: trade.exitCandleAt, reason, costs: cost});
   trade.analysisTags = trade.analysisTags || {exit: [], setup: [], market: []};
   trade.analysisTags.exit = [String(reason).toUpperCase().replace(/[^A-Z0-9]+/g, '_')];
   trade.analysisTags.setup = trade.analysisTags.setup || [];
@@ -3381,18 +3866,105 @@ function paperLabCloseTrade(account, trade, exitPrice, outcome, reason) {
   account.closedTrades = account.closedTrades.slice(0, PAPER_LAB_MAX_CLOSED_TRADES);
 }
 
-function paperLabPartialClose(account, trade, price) {
+function paperLabPartialClose(account, trade, price, bar) {
   const currentSize = paperTradeRemainingSize(trade);
   const closePct = Number(account.tp1ClosePct || PAPER_TP1_CLOSE_PCT);
   const closeSize = currentSize * closePct / 100;
-  const pnlPart = paperTradePnl(trade, price, closeSize);
-  trade.realizedPnlTp1 = paperNumber(trade.realizedPnlTp1) + pnlPart;
-  trade.realizedPnl = paperNumber(trade.realizedPnl) + pnlPart;
+  const grossPart = paperTradePnl(trade, price, closeSize);
+  const costComplete = trade.costStatus === 'ESTIMATED_COMPLETE' && trade.costModelVersion;
+  const cost = costComplete ? paperLabExecutionCost(trade, price, closeSize, 'MAKER') : null;
+  if (cost) paperLabAccumulateCosts(trade, cost, 'EXIT');
+  trade.realizedGrossPnl = paperNumber(trade.realizedGrossPnl != null
+    ? trade.realizedGrossPnl : trade.realizedPnl) + grossPart;
+  trade.realizedPnlTp1 = paperNumber(trade.realizedPnlTp1) + grossPart - (cost ? cost.totalUsd : 0);
+  trade.realizedPnl = paperNumber(trade.realizedPnl) + grossPart - (cost ? cost.totalUsd : 0);
+  trade.grossPnl = trade.realizedGrossPnl;
   trade.tp1Hit = true; trade.tp1HitAt = new Date().toISOString();
+  trade.tp1CandleAt = bar && paperLabTimestampMs(bar.ts) > 0
+    ? new Date(paperLabTimestampMs(bar.ts)).toISOString() : null;
+  const openedObservedAtMs = paperLabTimestampMs(trade.firstFillObservedAt || trade.filledAt || trade.openedAt);
+  const tp1ObservedAtMs = paperLabTimestampMs(trade.tp1HitAt);
+  trade.timeToTp1Ms = openedObservedAtMs > 0 && tp1ObservedAtMs >= openedObservedAtMs
+    ? tp1ObservedAtMs - openedObservedAtMs : null;
+  const openedCandleAtMs = paperLabTimestampMs(trade.filledAt || trade.openedAt);
+  const tp1CandleAtMs = paperLabTimestampMs(trade.tp1CandleAt);
+  trade.tp1CandleDelayMs = openedCandleAtMs > 0 && tp1CandleAtMs >= openedCandleAtMs
+    ? tp1CandleAtMs - openedCandleAtMs : null;
   trade.slAfterTp1 = trade.entryActual || trade.entryLimit;
+  // Once the position has reached TP1, cancel any unfilled remainder so it
+  // cannot refill after the trade has already started exiting.
+  if (paperNumber(trade.orderRemainingSize) > 0) {
+    trade.cancelledRemainderSize = paperNumber(trade.orderRemainingSize);
+    trade.orderRemainingSize = 0;
+    trade.fillStatus = 'PARTIAL_FILL_REMAINDER_CANCELLED_AT_TP1';
+  }
   paperSetRemainingSize(trade, currentSize - closeSize);
   trade.status = 'TP1_PARTIAL'; trade.lastEvent = 'TP1_PARTIAL';
-  paperAddTradeEvent(trade, 'TP1_PARTIAL', {price, reason: 'TP1 ' + closePct + '%'});
+  paperAddTradeEvent(trade, 'TP1_PARTIAL', {price, candleAt: trade.tp1CandleAt,
+    reason: 'TP1 ' + closePct + '%', size: closeSize, costs: cost});
+}
+
+function paperLabProcessExitBar(account, trade, bar, options) {
+  const entry = paperNumber(trade.entryActual || trade.entryLimit);
+  const size = paperTradeRemainingSize(trade);
+  if (!(entry > 0 && size > 0)) return 'NO_POSITION';
+  const close = paperNumber(bar.close);
+  const high = paperNumber(bar.high) || close;
+  const low = paperNumber(bar.low) || close;
+  const sameAsFillCandle = trade.fillCandleAt &&
+    paperLabTimestampMs(trade.fillCandleAt) === paperLabTimestampMs(bar.ts);
+  if (!sameAsFillCandle) {
+    const favorablePrice = trade.dir === 'LONG' ? high : low;
+    const adversePrice = trade.dir === 'LONG' ? low : high;
+    const priorRealized = paperNumber(trade.realizedPnl);
+    trade.mfePnl = Math.max(paperNumber(trade.mfePnl), priorRealized + paperTradePnl(trade, favorablePrice, size));
+    trade.maePnl = Math.min(paperNumber(trade.maePnl), priorRealized + paperTradePnl(trade, adversePrice, size));
+  }
+  const stop = trade.status === 'TP1_PARTIAL' ? paperNumber(trade.slAfterTp1 || trade.sl) : paperNumber(trade.sl);
+  const target = trade.status === 'TP1_PARTIAL' ? paperNumber(trade.tp2) : paperNumber(trade.tp1);
+  const stopHit = trade.dir === 'LONG' ? low <= stop : high >= stop;
+  const targetHit = trade.dir === 'LONG' ? high >= target : low <= target;
+  // OHLC cannot establish intrabar ordering. On a candle touching both levels,
+  // resolve the ambiguity against the strategy and assume the stop came first.
+  if (stopHit) {
+    trade.orderRemainingSize = 0;
+    if (paperNumber(trade.filledSize) < paperNumber(trade.orderRequestedSize)) {
+      trade.fillStatus = 'PARTIAL_FILL_REMAINDER_CANCELLED_ON_STOP';
+    }
+    const open = paperNumber(bar.open);
+    const stopFill = trade.dir === 'LONG' && open > 0 && open < stop ? open
+      : trade.dir === 'SHORT' && open > stop ? open : stop;
+    paperLabCloseTrade(account, trade, stopFill, null, trade.tp1Hit ? 'Hit SL after TP1' : 'Hit SL', bar);
+    return 'CLOSED';
+  }
+  const deferTarget = !!(options && options.entryCandle);
+  if (targetHit && trade.status === 'OPEN' && !deferTarget) {
+    paperLabPartialClose(account, trade, target, bar);
+    return 'TP1';
+  }
+  if (targetHit && trade.status === 'TP1_PARTIAL') {
+    trade.orderRemainingSize = 0;
+    paperLabCloseTrade(account, trade, target, null, 'Hit TP2', bar);
+    return 'CLOSED';
+  }
+  trade.currentPrice = close || trade.currentPrice;
+  const grossUnrealized = paperTradePnl(trade, close, size);
+  const liquidationCost = trade.costStatus === 'ESTIMATED_COMPLETE'
+    ? paperLabExecutionCost(trade, close, size, 'TAKER').totalUsd : 0;
+  trade.unrealPnl = grossUnrealized - liquidationCost;
+  const marked = paperNumber(trade.realizedPnl) + trade.unrealPnl;
+  trade.mfePnl = Math.max(paperNumber(trade.mfePnl), marked);
+  trade.maePnl = Math.min(paperNumber(trade.maePnl), marked);
+  // Update a trailing stop only after resolving this candle so it cannot use
+  // that candle's close to retroactively stop out inside the same candle.
+  if (trade.status === 'TP1_PARTIAL' && trade.trailing && trade.trailing.enabled) {
+    const atr = Math.max(paperNumber(trade.atr), entry * 0.0025);
+    const trail = trade.dir === 'LONG' ? close - atr * Number(trade.trailing.atrMult || 1)
+      : close + atr * Number(trade.trailing.atrMult || 1);
+    const currentStop = paperNumber(trade.slAfterTp1 || trade.sl);
+    trade.slAfterTp1 = trade.dir === 'LONG' ? Math.max(currentStop, trail) : Math.min(currentStop || trail, trail);
+  }
+  return 'KEEP';
 }
 
 function monitorStrategyLabTrades(prices, barsBySymbol) {
@@ -3409,65 +3981,94 @@ function monitorStrategyLabTrades(prices, barsBySymbol) {
       trade.currentPrice = price || (latest && latest.close) || trade.currentPrice;
       const unprocessed = bars.filter(bar => !trade.lastProcessedCandleAt ||
         new Date(bar.ts).toISOString() > trade.lastProcessedCandleAt);
-      if (trade.status === 'PENDING') {
-        if (now - trade.createdAt >= Number(trade.pendingTtlMs || account.pendingTtlMs)) {
-          trade.status = 'CANCELLED'; trade.closedAt = new Date().toISOString();
-          trade.closeReason = 'Pending expired after ' + Math.round(Number(trade.pendingTtlMs || account.pendingTtlMs) / 60000) + ' minutes';
-          trade.outcome = 'CANCELLED'; trade.pnl = 0; trade.r = 0;
-          trade.lastEvent = 'PENDING_EXPIRED'; paperAddTradeEvent(trade, 'PENDING_EXPIRED', {price: trade.currentPrice, reason: trade.closeReason});
-          account.closedTrades.unshift({...trade}); changed = true; return;
+      const hasUnfilledOrder = paperNumber(trade.orderRemainingSize) > 1e-8;
+      const pendingStatus = trade.status === 'PENDING' || trade.status === 'PARTIALLY_FILLED';
+      const createdAt = paperLabTimestampMs(trade.createdAt);
+      const expiryAt = createdAt > 0 ? createdAt + Number(trade.pendingTtlMs || account.pendingTtlMs) : Infinity;
+      if (pendingStatus && hasUnfilledOrder) {
+        if (!createdAt) {
+          trade.lastFillBlockReason = 'LEGACY_ORDER_TIMESTAMP_MISSING';
+          retained.push(trade);
+          return;
         }
         for (const bar of unprocessed) {
-          trade.lastProcessedCandleAt = new Date(bar.ts).toISOString();
-          const filled = trade.dir === 'LONG' ? bar.low <= trade.entryLimit : bar.high >= trade.entryLimit;
-          if (filled) {
-            trade.status = 'OPEN'; trade.entryActual = trade.entryLimit; trade.openedAt = new Date().toISOString();
-            trade.fillMethod = '1M_HIGH_LOW'; trade.fillCandleAt = trade.lastProcessedCandleAt;
-            trade.lastEvent = 'LIMIT_FILLED'; paperAddTradeEvent(trade, 'LIMIT_FILLED', {price: trade.entryActual, candleAt: trade.fillCandleAt});
-            changed = true; break;
+          const barAt = paperLabTimestampMs(bar.ts);
+          if (!barAt || barAt < createdAt || barAt > expiryAt) continue;
+          trade.lastProcessedCandleAt = new Date(barAt).toISOString();
+          let exitProcessed = false;
+          const touched = trade.dir === 'LONG' ? paperNumber(bar.low) <= trade.entryLimit
+            : paperNumber(bar.high) >= trade.entryLimit;
+          if (touched) {
+            const quoteVolume = Math.max(0, paperNumber(bar.quoteVolume));
+            const fillSize = paperLabFillCapacity(trade, quoteVolume);
+            if (fillSize > 1e-8) {
+              const previousPositionSize = paperTradeRemainingSize(trade);
+              trade.entryActual = trade.entryActual || trade.entryLimit;
+              trade.filledSize = paperNumber(trade.filledSize) + fillSize;
+              trade.orderRemainingSize = Math.max(0, paperNumber(trade.orderRemainingSize) - fillSize);
+              paperSetRemainingSize(trade, previousPositionSize + fillSize);
+              paperLabBookEntryFill(trade, fillSize, bar);
+              trade.status = trade.orderRemainingSize <= 1e-8 ? 'OPEN' : 'PARTIALLY_FILLED';
+              trade.lastEvent = trade.status === 'OPEN' ? 'LIMIT_FILLED' : 'LIMIT_PARTIALLY_FILLED';
+              changed = true;
+              const result = paperLabProcessExitBar(account, trade, bar, {entryCandle: true});
+              exitProcessed = true;
+              if (result === 'CLOSED') { changed = true; return; }
+              // Do not process a second exit event on the same OHLC candle
+              // after TP1; the next completed 1m candle decides the outcome.
+              if (result === 'TP1') { changed = true; break; }
+            } else {
+              trade.lastFillBlockReason = 'CANDLE_QUOTE_VOLUME_UNAVAILABLE_OR_ZERO';
+            }
+          }
+          if (!exitProcessed && paperTradeRemainingSize(trade) > 0) {
+            const result = paperLabProcessExitBar(account, trade, bar);
+            if (result === 'CLOSED') { changed = true; return; }
+            if (result === 'TP1') { changed = true; break; }
           }
         }
-        retained.push(trade); return;
+        if (paperLabIsActive(trade) && paperNumber(trade.orderRemainingSize) > 1e-8 && now >= expiryAt) {
+          const unfilled = paperNumber(trade.orderRemainingSize);
+          trade.orderRemainingSize = 0;
+          trade.cancelledRemainderSize = unfilled;
+          trade.pendingExpiredAt = new Date().toISOString();
+          if (paperTradeRemainingSize(trade) > 0) {
+            trade.status = 'OPEN'; trade.fillStatus = 'PARTIAL_FILL_EXPIRED';
+            trade.closeReason = 'Unfilled remainder expired after ' + Math.round(Number(trade.pendingTtlMs || account.pendingTtlMs) / 60000) + ' minutes';
+            paperAddTradeEvent(trade, 'PARTIAL_ORDER_EXPIRED', {price: trade.currentPrice, reason: trade.closeReason, size: unfilled});
+          } else {
+            trade.status = 'CANCELLED'; trade.closedAt = new Date().toISOString();
+            trade.closeReason = 'Pending expired after ' + Math.round(Number(trade.pendingTtlMs || account.pendingTtlMs) / 60000) + ' minutes';
+            trade.outcome = 'CANCELLED'; trade.pnl = 0; trade.r = 0; trade.fillStatus = 'EXPIRED_UNFILLED';
+            trade.lastEvent = 'PENDING_EXPIRED';
+            paperAddTradeEvent(trade, 'PENDING_EXPIRED', {price: trade.currentPrice, reason: trade.closeReason, size: unfilled});
+            account.closedTrades.unshift({...trade});
+            account.closedTrades = account.closedTrades.slice(0, PAPER_LAB_MAX_CLOSED_TRADES);
+            changed = true; return;
+          }
+          changed = true;
+        }
+        if (paperLabIsActive(trade)) retained.push(trade);
+        return;
       }
       if (!paperLabIsActive(trade)) { retained.push(trade); return; }
       const entry = paperNumber(trade.entryActual || trade.entryLimit);
       const size = paperTradeRemainingSize(trade);
       if (entry > 0 && trade.currentPrice > 0 && size > 0) {
-        trade.unrealPnl = paperTradePnl(trade, trade.currentPrice, size);
+        trade.unrealPnl = paperTradePnl(trade, trade.currentPrice, size) -
+          (trade.costStatus === 'ESTIMATED_COMPLETE'
+            ? paperLabExecutionCost(trade, trade.currentPrice, size, 'TAKER').totalUsd : 0);
         const mark = paperNumber(trade.realizedPnl) + trade.unrealPnl;
         trade.mfePnl = Math.max(paperNumber(trade.mfePnl), mark);
         trade.maePnl = Math.min(paperNumber(trade.maePnl), mark);
       }
       let keep = true;
       for (const bar of unprocessed) {
-        if (!paperLabIsActive(trade)) break;
+        if (!paperLabIsActive(trade) || trade.status === 'CANCELLED') break;
         trade.lastProcessedCandleAt = new Date(bar.ts).toISOString();
-        const signalAtr = Math.max(paperNumber(trade.atr), entry * 0.0025);
-        if (trade.status === 'TP1_PARTIAL' && trade.trailing && trade.trailing.enabled) {
-          const trail = trade.dir === 'LONG' ? bar.close - signalAtr * Number(trade.trailing.atrMult || 1)
-            : bar.close + signalAtr * Number(trade.trailing.atrMult || 1);
-          const currentStop = paperNumber(trade.slAfterTp1 || trade.sl);
-          trade.slAfterTp1 = trade.dir === 'LONG' ? Math.max(currentStop, trail) : Math.min(currentStop || trail, trail);
-        }
-        const stop = trade.status === 'TP1_PARTIAL' ? (trade.slAfterTp1 || trade.sl) : trade.sl;
-        const target = trade.status === 'TP1_PARTIAL' ? trade.tp2 : trade.tp1;
-        const sizeNow = paperTradeRemainingSize(trade);
-        const stopHit = trade.dir === 'LONG' ? bar.low <= stop : bar.high >= stop;
-        const targetHit = trade.dir === 'LONG' ? bar.high >= target : bar.low <= target;
-        if (stopHit) {
-          const stopPnl = paperTradePnl(trade, stop, sizeNow);
-          const projected = paperTradeInitialRiskDollar(trade) > 0
-            ? (paperNumber(trade.realizedPnl) + stopPnl) / paperTradeInitialRiskDollar(trade) : 0;
-          paperLabCloseTrade(account, trade, stop, projected > 0.05 ? 'WIN' : projected < -0.05 ? 'LOSS' : 'BREAKEVEN',
-            trade.tp1Hit ? 'Hit SL after TP1' : 'Hit SL');
-          changed = true; keep = false; break;
-        }
-        if (targetHit && trade.status === 'OPEN') {
-          paperLabPartialClose(account, trade, trade.tp1); changed = true; break;
-        }
-        if (targetHit && trade.status === 'TP1_PARTIAL') {
-          paperLabCloseTrade(account, trade, trade.tp2, 'WIN', 'Hit TP2'); changed = true; keep = false; break;
-        }
+        const result = paperLabProcessExitBar(account, trade, bar);
+        if (result === 'CLOSED') { changed = true; keep = false; break; }
+        if (result === 'TP1') { changed = true; break; }
       }
       if (keep) retained.push(trade);
     });
@@ -3477,61 +4078,274 @@ function monitorStrategyLabTrades(prices, barsBySymbol) {
   return changed;
 }
 
-function paperLabAccountSummary(account) {
-  const all = [...(account.closedTrades || [])];
-  const closed = all.filter(trade => trade.outcome !== 'CANCELLED');
-  const wins = closed.filter(trade => trade.outcome === 'WIN');
-  const losses = closed.filter(trade => trade.outcome === 'LOSS');
-  const pnl = all.reduce((sum, trade) => sum + paperNumber(trade.pnl), 0);
-  const netR = closed.reduce((sum, trade) => sum + paperNumber(trade.r), 0);
-  const grossProfit = wins.reduce((sum, trade) => sum + Math.max(0, paperNumber(trade.r)), 0);
-  const grossLoss = losses.reduce((sum, trade) => sum + Math.min(0, paperNumber(trade.r)), 0);
-  let cumulative = 0; let peak = 0; let maxDrawdownR = 0;
-  closed.slice().reverse().forEach(trade => {
-    cumulative += paperNumber(trade.r); peak = Math.max(peak, cumulative); maxDrawdownR = Math.max(maxDrawdownR, peak - cumulative);
+function paperLabNormaliseFilters(input) {
+  const raw = input && typeof input === 'object' ? input : {};
+  const dateValue = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? String(value) : '';
+  return {
+    strategyId: String(raw.strategyId || '').trim(),
+    symbol: String(raw.symbol || '').toUpperCase().replace(/USDT$/, '').replace(/[^A-Z0-9]/g, ''),
+    direction: ['LONG', 'SHORT'].includes(String(raw.direction || '').toUpperCase()) ? String(raw.direction).toUpperCase() : '',
+    timeframe: String(raw.timeframe || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+    regime: String(raw.regime || '').toUpperCase().replace(/[\s-]+/g, '_'),
+    from: dateValue(raw.from), to: dateValue(raw.to)
+  };
+}
+
+function paperLabTradeMatchesFilters(trade, filters) {
+  if (!trade) return false;
+  if (filters.strategyId && String(trade.strategyId || '') !== filters.strategyId) return false;
+  if (filters.symbol && String(trade.sym || '').toUpperCase() !== filters.symbol) return false;
+  if (filters.direction && String(trade.dir || '').toUpperCase() !== filters.direction) return false;
+  if (filters.timeframe && String(trade.timeframe || trade.tf || '').toUpperCase().replace(/[^A-Z0-9]/g, '') !== filters.timeframe) return false;
+  if (filters.regime && paperTradeRegimeTag(trade) !== filters.regime) return false;
+  const rawDate = trade.closedAt || trade.createdAt || trade.signalCreatedAt || '';
+  const date = typeof rawDate === 'number' || /^\d+$/.test(String(rawDate))
+    ? new Date(Number(rawDate)).toISOString().slice(0, 10) : String(rawDate).slice(0, 10);
+  if (filters.from && (!date || date < filters.from)) return false;
+  if (filters.to && (!date || date > filters.to)) return false;
+  return true;
+}
+
+function paperLabClosedAtMs(trade) {
+  const value = trade && (trade.closedAt || trade.openedAt || trade.createdAt || trade.signalCreatedAt);
+  if (typeof value === 'number' || /^\d+$/.test(String(value || ''))) return Number(value) || 0;
+  return Date.parse(value || '') || 0;
+}
+
+function paperLabSimpleNetMetrics(trades, startingEquity) {
+  const list = (Array.isArray(trades) ? trades : []).filter(trade => trade && trade.netPnlAfterCosts != null &&
+    trade.rNetAfterCosts != null && trade.costStatus === 'ESTIMATED_COMPLETE')
+    .slice().sort((a, b) => paperLabClosedAtMs(a) - paperLabClosedAtMs(b));
+  const wins = list.filter(trade => paperNumber(trade.netPnlAfterCosts) > 0);
+  const losses = list.filter(trade => paperNumber(trade.netPnlAfterCosts) < 0);
+  const netPnl = list.reduce((sum, trade) => sum + paperNumber(trade.netPnlAfterCosts), 0);
+  const netR = list.reduce((sum, trade) => sum + paperNumber(trade.rNetAfterCosts), 0);
+  const grossProfitAfterCosts = wins.reduce((sum, trade) => sum + paperNumber(trade.netPnlAfterCosts), 0);
+  const grossLossAfterCosts = losses.reduce((sum, trade) => sum + paperNumber(trade.netPnlAfterCosts), 0);
+  const initialEquity = Number.isFinite(Number(startingEquity)) ? Number(startingEquity) : PAPER_LAB_STARTING_EQUITY;
+  let equity = initialEquity;
+  let peak = equity; let peakAt = list.length ? paperLabClosedAtMs(list[0]) : 0;
+  let drawdownStartAt = null; let maxDrawdownUsd = 0; let maxDrawdownPct = 0; let maxDrawdownR = 0;
+  let cumulativeR = 0; let peakR = 0; let maxRecoveryMs = 0;
+  list.forEach(trade => {
+    const at = paperLabClosedAtMs(trade);
+    equity += paperNumber(trade.netPnlAfterCosts);
+    cumulativeR += paperNumber(trade.rNetAfterCosts);
+    peakR = Math.max(peakR, cumulativeR);
+    maxDrawdownR = Math.max(maxDrawdownR, peakR - cumulativeR);
+    if (equity > peak) {
+      if (drawdownStartAt != null && at >= drawdownStartAt) maxRecoveryMs = Math.max(maxRecoveryMs, at - drawdownStartAt);
+      peak = equity; peakAt = at; drawdownStartAt = null;
+    } else if (equity < peak) {
+      if (drawdownStartAt == null) drawdownStartAt = at || peakAt;
+      const ddUsd = peak - equity;
+      maxDrawdownUsd = Math.max(maxDrawdownUsd, ddUsd);
+      maxDrawdownPct = Math.max(maxDrawdownPct, peak > 0 ? ddUsd / peak * 100 : 0);
+    }
   });
+  const firstAt = list.length ? paperLabClosedAtMs(list[0]) : 0;
+  const lastAt = list.length ? paperLabClosedAtMs(list[list.length - 1]) : 0;
+  return {
+    closed: list.length, wins: wins.length, losses: losses.length,
+    winRate: list.length ? Number((wins.length / list.length * 100).toFixed(1)) : 0,
+    netPnl: Number(netPnl.toFixed(4)), netR: Number(netR.toFixed(4)),
+    expectancyPnl: list.length ? Number((netPnl / list.length).toFixed(4)) : 0,
+    expectancyR: list.length ? Number((netR / list.length).toFixed(4)) : 0,
+    profitFactorAfterCosts: grossLossAfterCosts < 0 ? Number((grossProfitAfterCosts / Math.abs(grossLossAfterCosts)).toFixed(4)) : null,
+    profitFactorInfinite: grossLossAfterCosts === 0 && grossProfitAfterCosts > 0,
+    grossProfitAfterCosts: Number(grossProfitAfterCosts.toFixed(4)),
+    grossLossAfterCosts: Number(grossLossAfterCosts.toFixed(4)),
+    averageWinR: wins.length ? Number((wins.reduce((sum, trade) => sum + paperNumber(trade.rNetAfterCosts), 0) / wins.length).toFixed(4)) : 0,
+    averageLossR: losses.length ? Number((losses.reduce((sum, trade) => sum + paperNumber(trade.rNetAfterCosts), 0) / losses.length).toFixed(4)) : 0,
+    maxDrawdownUsd: Number(maxDrawdownUsd.toFixed(4)), maxDrawdownPct: Number(maxDrawdownPct.toFixed(4)),
+    maxDrawdownR: Number(maxDrawdownR.toFixed(4)), maxRecoveryMs: maxRecoveryMs || null,
+    sampleAgeDays: firstAt && lastAt ? Number(((lastAt - firstAt) / 86400000).toFixed(2)) : 0
+  };
+}
+
+function paperLabConcentrationMetrics(trades) {
+  const bySymbol = {};
+  const list = Array.isArray(trades) ? trades : [];
+  let totalAbsolutePnl = 0;
+  list.forEach(trade => {
+    const symbol = String(trade && trade.sym || 'UNKNOWN');
+    const pnl = paperNumber(trade && trade.netPnlAfterCosts);
+    if (!bySymbol[symbol]) bySymbol[symbol] = {trades: 0, netPnl: 0, absolutePnl: 0};
+    bySymbol[symbol].trades += 1;
+    bySymbol[symbol].netPnl += pnl;
+    bySymbol[symbol].absolutePnl += Math.abs(pnl);
+    totalAbsolutePnl += Math.abs(pnl);
+  });
+  const top = Object.entries(bySymbol).sort((a, b) =>
+    b[1].absolutePnl - a[1].absolutePnl || b[1].trades - a[1].trades || a[0].localeCompare(b[0]))[0];
+  const topSymbol = top ? top[0] : null;
+  const topStats = top ? top[1] : {trades: 0, netPnl: 0, absolutePnl: 0};
+  return {
+    topSymbol,
+    topSymbolNetPnl: top ? Number(topStats.netPnl.toFixed(4)) : null,
+    topSymbolClosedTrades: topStats.trades,
+    topSymbolTradeSharePct: list.length ? Number((topStats.trades / list.length * 100).toFixed(1)) : 0,
+    topSymbolAbsPnlSharePct: totalAbsolutePnl > 0
+      ? Number((topStats.absolutePnl / totalAbsolutePnl * 100).toFixed(1)) : 0
+  };
+}
+
+function paperLabTimingStats(orders) {
+  const list = Array.isArray(orders) ? orders : [];
+  const average = (field, predicate) => {
+    const values = list.filter(trade => !predicate || predicate(trade))
+      .map(trade => trade[field]).filter(value => value != null && Number.isFinite(Number(value)) && Number(value) >= 0)
+      .map(Number);
+    return {samples: values.length,
+      averageMs: values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null};
+  };
+  return {
+    timeToFirstFill: average('entryDelayMs', trade => paperNumber(trade.filledSize) > 0 || !!trade.openedAt),
+    timeToTp1: average('timeToTp1Ms', trade => !!trade.tp1Hit),
+    timeToClose: average('exitDelayMs', trade => !!trade.closedAt || trade.status === 'CLOSED')
+  };
+}
+
+function paperLabAccountSummary(account, rawFilters) {
+  const filters = paperLabNormaliseFilters(rawFilters);
+  const definition = PAPER_LAB_STRATEGIES[account.strategyId] || {};
+  const storedOrders = [...(account.closedTrades || []), ...(account.activeTrades || [])]
+    .filter(trade => paperLabTradeMatchesFilters(trade, filters));
+  const closedAll = storedOrders.filter(trade => trade.outcome && trade.outcome !== 'CANCELLED');
+  const cancelled = storedOrders.filter(trade => trade.outcome === 'CANCELLED' || /EXPIRED/.test(String(trade.fillStatus || '')));
+  const costComplete = closedAll.filter(trade => trade.costStatus === 'ESTIMATED_COMPLETE' &&
+    trade.netPnlAfterCosts != null && trade.rNetAfterCosts != null);
+  const legacy = closedAll.filter(trade => !costComplete.includes(trade));
+  const metrics = paperLabSimpleNetMetrics(costComplete, account.startingEquity);
+  const sortedNet = costComplete.slice().sort((a, b) => paperLabClosedAtMs(a) - paperLabClosedAtMs(b));
+  const splitIndex = Math.floor(sortedNet.length * 0.7);
+  const trainingTrades = sortedNet.slice(0, splitIndex);
+  const holdoutTrades = sortedNet.slice(splitIndex);
+  const holdoutStartingEquity = paperNumber(account.startingEquity || PAPER_LAB_STARTING_EQUITY) +
+    trainingTrades.reduce((sum, trade) => sum + paperNumber(trade.netPnlAfterCosts), 0);
+  const rollingStartIndex = Math.max(0, sortedNet.length - 50);
+  const rollingStartingEquity = paperNumber(account.startingEquity || PAPER_LAB_STARTING_EQUITY) +
+    sortedNet.slice(0, rollingStartIndex).reduce((sum, trade) => sum + paperNumber(trade.netPnlAfterCosts), 0);
+  const holdout = paperLabSimpleNetMetrics(holdoutTrades, holdoutStartingEquity);
+  const rolling50 = paperLabSimpleNetMetrics(sortedNet.slice(-50), rollingStartingEquity);
+  let evaluationStatus = 'INSUFFICIENT_SAMPLE';
+  if (metrics.closed >= PAPER_LAB_MIN_EVALUATION_TRADES) {
+    if (holdout.closed < 20) evaluationStatus = 'HOLDOUT_INSUFFICIENT_SAMPLE';
+    else if (metrics.expectancyR <= 0 || !(metrics.profitFactorInfinite || metrics.profitFactorAfterCosts > 1)) evaluationStatus = 'UNDER_REVIEW';
+    else if (holdout.expectancyR <= 0 || !(holdout.profitFactorInfinite || holdout.profitFactorAfterCosts > 1)) evaluationStatus = 'HOLDOUT_FAILED';
+    else evaluationStatus = 'CANDIDATE';
+  }
+  const orders = storedOrders;
+  const filled = orders.filter(trade => paperNumber(trade.filledSize) > 0 || !!trade.openedAt).length;
+  const partialFills = orders.filter(trade => Number(trade.filledSize) > 0 &&
+    Number(trade.filledSize) + 1e-8 < Number(trade.orderRequestedSize || trade.originalSize || trade.size)).length;
+  const expired = orders.filter(trade => trade.outcome === 'CANCELLED' || /EXPIRED/.test(String(trade.fillStatus || '')) ||
+    /expired/i.test(String(trade.closeReason || ''))).length;
+  const timing = paperLabTimingStats(orders);
   const equity = paperLabAccountEquity(account);
   const starting = paperNumber(account.startingEquity || PAPER_LAB_STARTING_EQUITY);
+  const concentration = paperLabConcentrationMetrics(costComplete);
+  const drawdownPct = paperLabDrawdownPct(account);
   return {
     strategyId: account.strategyId, label: account.label, version: account.version, enabled: account.enabled,
+    challengerOf: definition.challengerOf || null, rules: definition.rules || {},
     mode: PAPER_LAB_MODE, startingEquity: Number(starting.toFixed(2)), equity: Number(equity.toFixed(2)),
-    pnl: Number(pnl.toFixed(2)), returnPct: Number(((equity - starting) / starting * 100).toFixed(2)),
-    equityPeak: Number(paperNumber(account.equityPeak).toFixed(2)), drawdownPct: Number(paperLabDrawdownPct(account).toFixed(2)),
-    active: paperLabAccountActive(account).length, pending: paperLabAccountActive(account).filter(t => t.status === 'PENDING').length,
-    open: paperLabAccountActive(account).filter(t => t.status === 'OPEN' || t.status === 'TP1_PARTIAL').length,
-    closed: closed.length, wins: wins.length, losses: losses.length,
-    winRate: closed.length ? Number((wins.length / closed.length * 100).toFixed(1)) : 0,
-    netR: Number(netR.toFixed(2)), expectancyR: closed.length ? Number((netR / closed.length).toFixed(3)) : 0,
-    profitFactor: grossLoss < 0 ? Number((grossProfit / Math.abs(grossLoss)).toFixed(2)) : null,
-    maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
-    execution: PAPER_LAB_STRATEGIES[account.strategyId].execution || 'PAPER_LIMIT',
+    pnl: Number((account.closedTrades || []).reduce((sum, trade) => sum + paperNumber(trade.pnl), 0).toFixed(2)),
+    returnPct: Number(((equity - starting) / starting * 100).toFixed(2)),
+    equityPeak: Number(paperNumber(account.equityPeak).toFixed(2)), drawdownPct: Number(drawdownPct.toFixed(2)),
+    active: paperLabAccountActive(account).length,
+    pending: paperLabAccountActive(account).filter(trade => trade.status === 'PENDING' || trade.status === 'PARTIALLY_FILLED').length,
+    open: paperLabAccountActive(account).filter(trade => trade.status === 'OPEN' || trade.status === 'PARTIALLY_FILLED' || trade.status === 'TP1_PARTIAL').length,
+    closed: closedAll.length, wins: closedAll.filter(trade => trade.outcome === 'WIN').length,
+    losses: closedAll.filter(trade => trade.outcome === 'LOSS').length,
+    grossBaseline: {
+      closed: closedAll.length,
+      costIncomplete: legacy.length,
+      grossPnl: Number(closedAll.reduce((sum, trade) => sum + paperNumber(trade.grossPnl != null ? trade.grossPnl : trade.pnl), 0).toFixed(4)),
+      netRUnavailableCount: legacy.length
+    },
+    performanceAfterCosts: metrics,
+    rolling50,
+    holdout: {...holdout, chronologicalSplit: 'first 70% train / last 30% holdout'},
+    evaluationStatus,
+    sampleQuality: costComplete.length >= PAPER_LAB_MIN_EVALUATION_TRADES
+      ? (holdout.closed >= 20 ? 'COSTED_SAMPLE_WITH_HOLDOUT' : 'COSTED_SAMPLE_HOLDOUT_SMALL')
+      : legacy.length ? 'LEGACY_DATA_INCOMPLETE' : 'INSUFFICIENT_COSTED_SAMPLE',
+    costCoverage: {costComplete: costComplete.length, legacyOrUnknown: legacy.length,
+      pct: closedAll.length ? Number((costComplete.length / closedAll.length * 100).toFixed(1)) : 0},
+    fillStats: {orders: orders.length, filled, partialFills, expired,
+      fillRatePct: orders.length ? Number((filled / orders.length * 100).toFixed(1)) : 0,
+      partialFillRatePct: filled ? Number((partialFills / filled * 100).toFixed(1)) : 0,
+      expiredRatePct: orders.length ? Number((expired / orders.length * 100).toFixed(1)) : 0,
+      timing},
+    concentration,
+    execution: definition.execution || 'PAPER_LIMIT',
     signalCount: Array.isArray(account.monitoringSignals) ? account.monitoringSignals.length : 0,
     lastSignalAt: account.monitoringSignals && account.monitoringSignals[0]
       ? account.monitoringSignals[0].recordedAt || account.monitoringSignals[0].signalAt : null,
-    status: paperLabDrawdownPct(account) >= account.emergencyDrawdownPct ? 'EMERGENCY_STOP'
-      : paperLabDrawdownPct(account) >= account.warningDrawdownPct ? 'RISK_WARNING' : 'ACTIVE',
+    status: drawdownPct >= account.emergencyDrawdownPct ? 'EMERGENCY_STOP'
+      : drawdownPct >= account.warningDrawdownPct ? 'RISK_WARNING' : 'ACTIVE',
     lastScanAt: account.lastScanAt, lastPlacedAt: account.lastPlacedAt, lastError: account.lastError
   };
 }
 
 function paperStrategyLabSummary(includeTrades, options) {
-  const includeHistory = !options || options.history !== false;
+  const opts = options && typeof options === 'object' ? options : {};
+  const includeHistory = opts.history !== false;
+  const compact = opts.compact === true;
+  const filters = paperLabNormaliseFilters(opts.filters || {});
   const lab = paperState.strategyLab || paperLabDefaultState();
-  const accounts = Object.values(lab.accounts || {}).map(paperLabAccountSummary);
+  const fullAccounts = Object.values(lab.accounts || {})
+    .filter(account => !filters.strategyId || account.strategyId === filters.strategyId)
+    .map(account => paperLabAccountSummary(account, filters));
+  const compactMetric = metric => {
+    const value = metric || {};
+    return ({
+      closed: value.closed, winRate: value.winRate, netPnl: value.netPnl, netR: value.netR,
+      expectancyPnl: value.expectancyPnl, expectancyR: value.expectancyR,
+      profitFactorAfterCosts: value.profitFactorAfterCosts, profitFactorInfinite: value.profitFactorInfinite,
+      maxDrawdownPct: value.maxDrawdownPct, maxDrawdownUsd: value.maxDrawdownUsd
+    });
+  };
+  const accounts = compact ? fullAccounts.map(account => ({
+    strategyId: account.strategyId, label: account.label, version: account.version, enabled: account.enabled,
+    challengerOf: account.challengerOf, startingEquity: account.startingEquity, equity: account.equity,
+    pnl: account.pnl, returnPct: account.returnPct, drawdownPct: account.drawdownPct,
+    active: account.active, pending: account.pending, open: account.open,
+    closed: account.closed, wins: account.wins, losses: account.losses,
+    performanceAfterCosts: compactMetric(account.performanceAfterCosts),
+    evaluationStatus: account.evaluationStatus, sampleQuality: account.sampleQuality,
+    costCoverage: account.costCoverage,
+    fillStats: {orders: account.fillStats.orders, fillRatePct: account.fillStats.fillRatePct,
+      expiredRatePct: account.fillStats.expiredRatePct, timing: account.fillStats.timing},
+    status: account.status
+  })) : fullAccounts;
   const activeTrades = Object.values(lab.accounts || {}).flatMap(account =>
-    (account.activeTrades || []).filter(paperLabIsActive).map(trade => includeTrades ? paperTradeView(trade) : {
-      id: trade.id, sym: trade.sym, dir: trade.dir, status: trade.status,
-      strategyId: trade.strategyId, entryLimit: trade.entryLimit, sl: trade.sl,
-      tp1: trade.tp1, tp2: trade.tp2, currentPrice: trade.currentPrice,
-      universeVersion: trade.universeVersion || 'LEGACY'
-    }));
+    (account.activeTrades || []).filter(trade => paperLabIsActive(trade) && paperLabTradeMatchesFilters(trade, filters))
+      .map(trade => includeTrades ? paperTradeView(trade) : {
+        id: trade.id, sym: trade.sym, dir: trade.dir, status: trade.status,
+        strategyId: trade.strategyId, entryLimit: trade.entryLimit, sl: trade.sl,
+        tp1: trade.tp1, tp2: trade.tp2, currentPrice: trade.currentPrice,
+        fillStatus: trade.fillStatus || null, costStatus: trade.costStatus || 'LEGACY_DATA_INCOMPLETE',
+        universeVersion: trade.universeVersion || 'LEGACY'
+      }));
   return {
     ok: true, mode: PAPER_LAB_MODE, enabled: lab.enabled !== false,
     asOf: new Date().toISOString(), startingEquity: PAPER_LAB_STARTING_EQUITY,
     strategyCount: accounts.length, totalEquity: Number(accounts.reduce((sum, item) => sum + item.equity, 0).toFixed(2)),
     totalPnl: Number(accounts.reduce((sum, item) => sum + item.pnl, 0).toFixed(2)),
-    totalOrders: accounts.reduce((sum, item) => sum + item.closed + item.active, 0),
+    totalOrders: accounts.reduce((sum, item) => sum + item.fillStats.orders, 0),
     totalClosed: accounts.reduce((sum, item) => sum + item.closed, 0),
+    filters,
+    costModel: {version: PAPER_LAB_COST_MODEL_VERSION, makerFeeRate: PAPER_LAB_MAKER_FEE_RATE,
+      takerFeeRate: PAPER_LAB_TAKER_FEE_RATE, takerSlippageBps: PAPER_LAB_TAKER_SLIPPAGE_BPS,
+      fallbackSpreadBps: PAPER_LAB_FALLBACK_SPREAD_BPS, fillParticipationRate: PAPER_LAB_FILL_PARTICIPATION_RATE,
+      sameCandleRule: 'STOP_FIRST_CONSERVATIVE', label: 'Estimated; Bitget standard futures fees; quote spread when available'},
+    evaluationGate: {minimumCostedClosedTrades: PAPER_LAB_MIN_EVALUATION_TRADES,
+      holdoutMinimumTrades: 20, holdoutSplit: 'chronological 70/30',
+      primaryMetric: 'net expectancy after costs',
+      riskReviewMetrics: ['maxDrawdownPct', 'topSymbolTradeSharePct', 'topSymbolAbsPnlSharePct'],
+      requiresManualReview: true, automaticPromotion: false, promotionChangesRisk: false},
     accounts, activeTrades,
     ...(includeHistory ? {
       recentScans: lab.recentScans.slice(0, 20),
@@ -3539,20 +4353,24 @@ function paperStrategyLabSummary(includeTrades, options) {
     } : {}),
     lastScanAt: lab.lastScanAt, lastCycleKey: lab.lastCycleKey,
     lastError: lab.lastError,
-    definition: {
-      data: 'live futures ticker + 1m/15m/30m/1h/4h candles',
-      execution: 'shadow paper limit; no live broker order',
+    definition: compact ? {
       perStrategyStartingEquity: PAPER_LAB_STARTING_EQUITY,
-      perScan: PAPER_LAB_PER_SCAN, minRR: 2,
       strategies: Object.fromEntries(Object.entries(PAPER_LAB_STRATEGIES).map(([id, definition]) => [id, {
-        label: definition.label, entry: id === 'MTF_ATR_V2' ? 'H4/H1/M30/M15 gate + EMA21/structure pullback'
-          : id === 'SR_REJECTION_V1' ? 'H1/H4 zone + 2 reactions + rejection candle'
-            : id === 'BREAKOUT_RETEST_V1' ? '20-candle close breakout + volume + retest'
-              : id === 'SMC_LIQUIDITY_V1' ? 'sweep + BOS + deterministic OB/FVG retest'
-                : id === 'RANGE_MEAN_REVERSION_V1' ? 'ADX<18 + Bollinger re-entry + RSI extreme'
-                  : 'WATCH/PRE_BREAKOUT → confirmed close + volume + retest',
-        exit: definition.trailing.enabled ? 'TP1 2R, TP2 3R, break-even + ATR trail' : 'native structure/band targets with TP1 50%'
+        label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null
       }]))
+    } : {
+      data: 'shared live Bitget Futures ticker + 1m/15m/30m/1h/4h candles; MTF/full freshness checked per rule',
+      execution: 'shadow paper limit; volume-participation partial-fill estimate; no live broker order',
+      perStrategyStartingEquity: PAPER_LAB_STARTING_EQUITY,
+      perScan: PAPER_LAB_PER_SCAN,
+      strategies: Object.fromEntries(Object.entries(PAPER_LAB_STRATEGIES).map(([id, definition]) => [id, compact
+        ? {label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null}
+        : {
+          label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null,
+          entry: definition.rules && definition.rules.entry || 'Rule not documented', rules: definition.rules || {},
+          exit: definition.trailing.enabled ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
+            : 'Native strategy targets with TP1 partial close'
+        }]))
     }
   };
 }
@@ -3693,8 +4511,9 @@ function paperTradeRiskDollar(trade) {
   const entry = paperNumber(trade.entryActual || trade.entryLimit);
   const stop = paperNumber(trade.status === 'TP1_PARTIAL'
     ? (trade.slAfterTp1 || trade.sl) : trade.sl);
-  const size = Math.abs(paperNumber(trade.remainingSize != null
-    ? trade.remainingSize : trade.size));
+  const positionSize = Math.abs(paperNumber(trade.remainingSize != null ? trade.remainingSize : trade.size));
+  const unfilledSize = Math.abs(paperNumber(trade.orderRemainingSize));
+  const size = trade.orderRemainingSize != null ? positionSize + unfilledSize : positionSize;
   if (!entry || !stop || !size) return 0;
   return Math.abs(entry - stop) / entry * size;
 }
@@ -3731,7 +4550,11 @@ function paperTradeRemainingContracts(trade) {
 
 function paperTradeInitialRiskDollar(trade) {
   const recorded = paperNumber(trade.riskDollarAtEntry || trade.riskDollar);
-  if (recorded > 0) return recorded;
+  if (recorded > 0) {
+    const requested = paperNumber(trade.orderRequestedSize);
+    const filled = paperNumber(trade.filledSize);
+    return requested > 0 && trade.filledSize != null ? recorded * Math.min(1, filled / requested) : recorded;
+  }
   const entry = paperNumber(trade.entryActual || trade.entryLimit);
   const stop = paperNumber(trade.sl);
   const size = paperTradeOriginalSize(trade);
@@ -3793,11 +4616,26 @@ function paperTradeView(trade) {
     score: trade.score, tier: trade.tier,
     chg: trade.chg == null ? null : trade.chg,
     fund: trade.fund, fundingAvailable: trade.fundingAvailable == null ? null : !!trade.fundingAvailable,
-    oi: trade.oi, oiAvailable: trade.oiAvailable == null ? null : !!trade.oiAvailable,
+    oi: trade.oi, oiUnits: trade.oiUnits == null ? null : trade.oiUnits,
+    oiUSD: trade.oiUSD == null ? null : trade.oiUSD,
+    oiAvailable: trade.oiAvailable == null ? null : !!trade.oiAvailable,
     volumeAvailable: trade.volumeAvailable == null ? null : !!trade.volumeAvailable,
     volume: trade.volume || 0,
     volumeRatio: trade.volumeRatio == null ? null : trade.volumeRatio, mtf: trade.mtf || null,
     createdAt: trade.createdAt,
+    signalCreatedAt: trade.signalCreatedAt || null,
+    signalSnapshotVersion: trade.signalSnapshotVersion || null,
+    priceAtSignal: trade.priceAtSignal == null ? null : trade.priceAtSignal,
+    orderCreatedAt: trade.orderCreatedAt || null,
+    filledAt: trade.filledAt || null,
+    fillObservedAt: trade.fillObservedAt || null,
+    firstFillObservedAt: trade.firstFillObservedAt || null,
+    entryDelayMs: trade.entryDelayMs == null ? null : trade.entryDelayMs,
+    entryCandleDelayMs: trade.entryCandleDelayMs == null ? null : trade.entryCandleDelayMs,
+    closedAt: trade.closedAt || null,
+    exitCandleAt: trade.exitCandleAt || null,
+    exitDelayMs: trade.exitDelayMs == null ? null : trade.exitDelayMs,
+    exitCandleDelayMs: trade.exitCandleDelayMs == null ? null : trade.exitCandleDelayMs,
     openedAt: trade.openedAt || null, cycleKey: trade.cycleKey,
     unrealPnl: Number((trade.unrealPnl || 0).toFixed(2)),
     mfePnl: Number((trade.mfePnl || 0).toFixed(2)),
@@ -3810,17 +4648,43 @@ function paperTradeView(trade) {
     tp1RemainingPct: trade.tp1Hit ? Number(Math.max(0, 100 - tp1ClosePct).toFixed(1)) : 100,
     tp1Hit: !!trade.tp1Hit,
     tp1HitAt: trade.tp1HitAt || null,
+    tp1CandleAt: trade.tp1CandleAt || null,
+    timeToTp1Ms: trade.timeToTp1Ms == null ? null : trade.timeToTp1Ms,
+    tp1CandleDelayMs: trade.tp1CandleDelayMs == null ? null : trade.tp1CandleDelayMs,
     slAfterTp1: trade.slAfterTp1 || null,
     realizedPnlTp1: Number((trade.realizedPnlTp1 || 0).toFixed(2)),
     realizedPnl: Number((trade.realizedPnl || 0).toFixed(2)),
     realizedPnlFinal: Number((trade.realizedPnlFinal || 0).toFixed(2)),
     expectedLossAtSl: Number((trade.expectedLossAtSl || paperTradeInitialRiskDollar(trade)).toFixed(2)),
     fillMethod: trade.fillMethod || null,
+    fillModel: trade.fillModel || null,
+    fillStatus: trade.fillStatus || null,
+    fillEvents: Array.isArray(trade.fillEvents) ? trade.fillEvents : [],
+    filledSize: Number(paperNumber(trade.filledSize).toFixed(8)),
+    orderRemainingSize: Number(paperNumber(trade.orderRemainingSize).toFixed(8)),
+    orderRequestedSize: Number(paperNumber(trade.orderRequestedSize).toFixed(8)),
+    fillReason: trade.fillReason || trade.lastFillBlockReason || null,
     closeStage: trade.closeStage || null,
     lastEvent: trade.lastEvent || null,
     lastProcessedCandleAt: trade.lastProcessedCandleAt || null,
     events: Array.isArray(trade.events) ? trade.events.slice(0, 50) : [],
     strategyVersion: trade.strategyVersion || paperTradeStrategyVersion(trade),
+    strategyId: trade.strategyId || null,
+    strategyConfigSnapshot: trade.strategyConfigSnapshot || null,
+    dataCompleteness: trade.dataCompleteness || 'LEGACY_DATA_INCOMPLETE',
+    legacyDataMissingFields: Array.isArray(trade.legacyDataMissingFields) ? trade.legacyDataMissingFields : [],
+    quoteSnapshotAtOrder: trade.quoteSnapshotAtOrder || null,
+    executionCostModel: trade.executionCostModel || null,
+    costModelVersion: trade.costModelVersion || null,
+    costStatus: trade.costStatus || 'LEGACY_DATA_INCOMPLETE',
+    costs: trade.costs || null,
+    grossPnl: trade.grossPnl == null ? null : Number(paperNumber(trade.grossPnl).toFixed(8)),
+    netPnlAfterCosts: trade.netPnlAfterCosts == null ? null : Number(paperNumber(trade.netPnlAfterCosts).toFixed(8)),
+    rGross: trade.rGross == null ? null : Number(paperNumber(trade.rGross).toFixed(4)),
+    rNetAfterCosts: trade.rNetAfterCosts == null ? null : Number(paperNumber(trade.rNetAfterCosts).toFixed(4)),
+    relativeStrength: trade.relativeStrength || null,
+    fundingPercentile: trade.fundingPercentile == null ? null : trade.fundingPercentile,
+    oiChange1hPct: trade.oiChange1hPct == null ? null : trade.oiChange1hPct,
     cohortId: trade.cohortId || null,
     universeVersion: trade.universeVersion || 'LEGACY',
     researchCollection: paperIsResearchTrade(trade),
@@ -3906,6 +4770,10 @@ function paperCandidateView(pair) {
   }
   return {
     sym: pair.sym, price: pair.price, chg: pair.chg, volume: pair.volume,
+    bidPrice: pair.bidPrice == null ? null : pair.bidPrice,
+    askPrice: pair.askPrice == null ? null : pair.askPrice,
+    spreadBps: pair.spreadBps == null ? null : pair.spreadBps,
+    quoteAt: pair.quoteAt || pair.dataAt || null,
     volumeRatio: pair.volumeRatio, oiReady: !!pair.oiReady,
     fundingAvailable: !!pair.fundingAvailable, oiAvailable: !!pair.oiAvailable,
     volumeAvailable: !!pair.volumeAvailable,
@@ -3999,7 +4867,7 @@ async function fetchPaperCandlesFromBitget(sym, granularity, requestedLimit) {
   const rows = payload.data.map(row => ({
     ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]),
     low: Number(row[3]), close: Number(row[4]),
-    volume: Number(row[6] || row[5] || 0)
+    volume: Number(row[5] || 0), quoteVolume: Number(row[6] || 0)
   })).filter(row => row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
     .sort((a, b) => a.ts - b.ts);
   const intervalMs = paperGranularityMs(granularity);
@@ -4029,7 +4897,7 @@ async function fetchPaperCandlesFromBinance(sym, granularity, requestedLimit) {
   if (!Array.isArray(payload)) throw new Error((payload && payload.msg) || 'Binance candles response invalid');
   return paperRowsWithMetadata(payload.map(row => ({
     ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
-    close: Number(row[4]), volume: Number(row[5] || 0)
+    close: Number(row[4]), volume: Number(row[5] || 0), quoteVolume: Number(row[7] || 0)
   })), new Date().toISOString(), paperGranularityMs(granularity), 'Binance Futures fallback');
 }
 
@@ -4057,7 +4925,7 @@ async function fetchPaperCandlesFromOkx(sym, granularity, requestedLimit) {
   }
   return paperRowsWithMetadata(payload.data.map(row => ({
     ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
-    close: Number(row[4]), volume: Number(row[7] || row[6] || row[5] || 0)
+    close: Number(row[4]), volume: Number(row[6] || row[5] || 0), quoteVolume: Number(row[7] || 0)
   })), new Date().toISOString(), paperGranularityMs(granularity), 'OKX Swap fallback');
 }
 
@@ -4118,7 +4986,8 @@ async function fetchPaperCandleHistoryFromBitget(sym, granularity, requestedLimi
     }
     const pageRows = payload.data.map(row => ({
       ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]),
-      low: Number(row[3]), close: Number(row[4]), volume: Number(row[6] || row[5] || 0)
+      low: Number(row[3]), close: Number(row[4]), volume: Number(row[5] || 0),
+      quoteVolume: Number(row[6] || 0)
     })).filter(row => row.ts > 0 && row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
       .sort((a, b) => a.ts - b.ts);
     if (!pageRows.length) break;
@@ -4171,7 +5040,7 @@ async function fetchPaperCandleHistoryFromBinance(sym, granularity, requestedLim
     if (!Array.isArray(payload)) throw new Error((payload && payload.msg) || 'Binance historical candles response invalid');
     const pageRows = payload.map(row => ({
       ts: paperTimestamp(row[0]), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
-      close: Number(row[4]), volume: Number(row[5] || 0)
+      close: Number(row[4]), volume: Number(row[5] || 0), quoteVolume: Number(row[7] || 0)
     })).filter(row => row.ts > 0 && row.open > 0 && row.high > 0 && row.low > 0 && row.close > 0)
       .sort((a, b) => a.ts - b.ts);
     if (!pageRows.length) break;
@@ -4948,7 +5817,12 @@ async function runPaperScan(reason, requestedCycleKey) {
     try {
       paperLabScan(ranked, cycleKey, reason || '15M close', {
         strategyIds: Object.keys(PAPER_LAB_STRATEGIES)
-          .filter(strategyId => strategyId !== 'PREBREAKOUT_RESEARCH_V1')
+          .filter(strategyId => strategyId !== 'PREBREAKOUT_RESEARCH_V1'),
+        analysisUniverse: mtfCandidates,
+        strategyUniverses: {
+          RELATIVE_STRENGTH_V1: mtfCandidates,
+          FUNDING_OI_DIVERGENCE_V1: mtfCandidates
+        }
       });
     } catch (labError) {
       paperState.strategyLab.lastError = labError.message;
@@ -5969,7 +6843,14 @@ function paperStatus(options) {
       stats: researchStats ? researchStats.metrics : null,
       statsSample: researchStats ? researchStats.sample : null
     },
-    strategyLab: paperStrategyLabSummary(includeDetails, {history: includeLabHistory}),
+    strategyLab: includeDetails ? paperStrategyLabSummary(true, {history: includeLabHistory}) : {
+      ok: true, mode: PAPER_LAB_MODE,
+      enabled: !paperState.strategyLab || paperState.strategyLab.enabled !== false,
+      strategyCount: Object.keys((paperState.strategyLab && paperState.strategyLab.accounts) || {}).length,
+      lastScanAt: paperState.strategyLab && paperState.strategyLab.lastScanAt || null,
+      lastCycleKey: paperState.strategyLab && paperState.strategyLab.lastCycleKey || null,
+      lastError: paperState.strategyLab && paperState.strategyLab.lastError || null
+    },
     monitoringSignalCount: Array.isArray(paperState.monitoringSignals) ? paperState.monitoringSignals.length : 0,
     lastScanSummary: lastScan ? {
       cycleKey: lastScan.cycleKey || null, at: lastScan.at || null,
@@ -7355,8 +8236,17 @@ const server = http.createServer(async (req, res) => {
     }
     const includeTrades = requestUrl.searchParams.get('details') !== 'false';
     const includeHistory = includeTrades || requestUrl.searchParams.get('history') === 'true';
+    const filters = {
+      strategyId: requestUrl.searchParams.get('strategyId') || '',
+      symbol: requestUrl.searchParams.get('symbol') || '',
+      direction: requestUrl.searchParams.get('direction') || '',
+      timeframe: requestUrl.searchParams.get('timeframe') || '',
+      regime: requestUrl.searchParams.get('regime') || '',
+      from: requestUrl.searchParams.get('from') || '',
+      to: requestUrl.searchParams.get('to') || ''
+    };
     try {
-      send(res, 200, JSON.stringify(paperStrategyLabSummary(includeTrades, {history: includeHistory})));
+      send(res, 200, JSON.stringify(paperStrategyLabSummary(includeTrades, {history: includeHistory, filters})));
     } catch (error) {
       send(res, 500, JSON.stringify({ok: false, error: error.message || 'Strategy Lab unavailable'}));
     }
