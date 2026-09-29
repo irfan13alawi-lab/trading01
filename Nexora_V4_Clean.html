@@ -739,7 +739,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="card-t"><i class="fa-solid fa-flask"></i> Strategy Lab — Shadow Paper <span class="muted" id="vps-lab-asof">Waiting...</span></div>
       <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh Lab</button>
     </div>
-    <div class="vps-lab-note" id="vps-lab-note">Strategy Lab paper-only memakai data Futures live; setiap strategi memiliki ledger $200 terpisah. Data historis yang belum memiliki biaya ditandai LEGACY_DATA_INCOMPLETE dan tidak dicampur ke metrik net.</div>
+    <div class="vps-lab-note" id="vps-lab-note">Strategy Lab paper-only memakai data Futures live; setiap strategi memiliki ledger $200 terpisah. Histori strategi lama tetap disimpan dan ditampilkan sebagai hasil tercatat; biaya historis yang tidak tersedia tidak direka dan tidak dicampur ke metrik net.</div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0;">
       <select id="vps-lab-filter-strategy" class="inp" style="max-width:220px;"><option value="">All strategies</option></select>
       <input id="vps-lab-filter-symbol" class="inp" placeholder="Symbol" style="max-width:110px;">
@@ -6487,7 +6487,7 @@ function renderStrategyLab(data) {
   }
   if(asOf) asOf.textContent='As of '+vpsFmtAt(data.asOf)+' · '+Number(data.strategyCount||accounts.length)+' strategies';
   var costs=data.costModel||{};
-  if(note) note.textContent='Mode '+String(data.mode||'SHADOW')+' · live futures ticker/candles shared · independent $'+Number(data.startingEquity||200).toFixed(2)+' ledgers · estimated fees maker '+(Number(costs.makerFeeRate||0)*100).toFixed(3)+'% / taker '+(Number(costs.takerFeeRate||0)*100).toFixed(3)+'% · taker slippage '+Number(costs.takerSlippageBps||0)+' bps · fills capped at '+(Number(costs.fillParticipationRate||0)*100).toFixed(1)+'% of 1m quote volume · same-candle stop-first · legacy cost-unknown trades excluded from net metrics · CANDIDATE means manual review only; no auto-promotion or risk change · no live broker order'+(data.lastError?' · error: '+data.lastError:'');
+  if(note) note.textContent='Mode '+String(data.mode||'SHADOW')+' · live futures ticker/candles shared · independent $'+Number(data.startingEquity||200).toFixed(2)+' ledgers · estimated fees maker '+(Number(costs.makerFeeRate||0)*100).toFixed(3)+'% / taker '+(Number(costs.takerFeeRate||0)*100).toFixed(3)+'% · taker slippage '+Number(costs.takerSlippageBps||0)+' bps · fills capped at '+(Number(costs.fillParticipationRate||0)*100).toFixed(1)+'% of 1m quote volume · same-candle stop-first · legacy history is preserved as-recorded; unknown historical costs are excluded from net metrics · CANDIDATE means manual review only; no auto-promotion or risk change · no live broker order'+(data.lastError?' · error: '+data.lastError:'');
   if(kpis) {
     var totalPnl=Number(data.totalPnl||0);
     kpis.innerHTML=[
@@ -6501,7 +6501,7 @@ function renderStrategyLab(data) {
   if(!table) return;
   if(!accounts.length) { table.innerHTML='<div class="muted" style="padding:8px;">Belum ada akun Strategy Lab.</div>'; return; }
   function fmtPf(m){return m&&m.profitFactorInfinite?'∞':m&&m.profitFactorAfterCosts!=null?Number(m.profitFactorAfterCosts).toFixed(2):'--';}
-  function fmtR(value){var n=Number(value||0);return (n>=0?'+':'')+n.toFixed(3)+'R';}
+  function fmtR(value,samples){if(Number(samples||0)<=0||value==null||!Number.isFinite(Number(value)))return '--';var n=Number(value);return (n>=0?'+':'')+n.toFixed(3)+'R';}
   function fmtDuration(ms){if(ms==null)return '--';var hours=Math.round(Number(ms)/3600000);return hours<48?hours+'h':(hours/24).toFixed(1)+'d';}
   function fmtElapsed(ms){if(ms==null)return '--';var n=Math.max(0,Number(ms));if(n<60000)return Math.round(n/1000)+'s';if(n<3600000)return Math.round(n/60000)+'m';return fmtDuration(n);}
   table.innerHTML='<div style="overflow:auto;"><table><thead><tr><th>Strategy / version</th><th>Evaluation / risk</th><th>Costed / closed</th><th>Net PnL</th><th>Expectancy</th><th>PF net</th><th>Holdout</th><th>Max DD / recovery</th><th>Symbol concentration</th><th>Rolling last 50</th><th>Fill / expired</th><th>Equity / ledger PnL</th><th>Active / signals</th></tr></thead><tbody>'+accounts.map(function(a){
@@ -6509,17 +6509,33 @@ function renderStrategyLab(data) {
     var pnl=Number(m.netPnl||0), status=String(a.evaluationStatus||'INSUFFICIENT_SAMPLE');
     var color=pnl<0?'#f85149':'#3fb950';
     var filterHint=sourceEsc(JSON.stringify(a.rules||{}));
+    var legacy=a.legacyHistory||{}, legacyCount=Number(legacy.closed||0), legacyPnl=Number(legacy.recordedPnl||0);
+    var legacyText=legacyCount
+      ?legacyCount+' legacy/incomplete · '+Number(legacy.wins||0)+'W / '+Number(legacy.losses||0)+'L / '+Number(legacy.breakeven||0)+'BE · recorded '+(legacyPnl>=0?'+':'')+'$'+legacyPnl.toFixed(2)+' · fees unknown'
+      :'no legacy/incomplete closes';
+    var strategyDef=strategyDefs[a.strategyId]||{}, ruleSet=a.rules||strategyDef.rules||{};
+    var entryRule=strategyDef.entry||ruleSet.entry||'Rule not documented';
+    var exitRule=strategyDef.exit||'Native strategy targets; see parameters';
+    var trail=strategyDef.trailing||{};
+    var riskText=strategyDef.riskPct==null?'--':Number(strategyDef.riskPct).toFixed(2)+'%';
+    var rrText=strategyDef.minRR==null?'--':Number(strategyDef.minRR).toFixed(2)+'R';
+    var rulesText='<details><summary>Entry / exit &amp; version rules</summary><div class="muted" style="white-space:normal;max-width:340px;margin-top:4px;">Definition: registered '+sourceEsc(a.version||strategyDef.version||'')+' version; old per-trade snapshots are not reconstructed.<br><b>Entry:</b> '+sourceEsc(entryRule)+'<br><b>Exit:</b> '+sourceEsc(exitRule)+'<br><b>Risk / min RR:</b> '+sourceEsc(riskText)+' / '+sourceEsc(rrText)+'<br><b>Trailing:</b> '+(trail.enabled?'after TP1 · '+Number(trail.atrMult||0)+' ATR':'off')+'<br><b>Parameters:</b> '+sourceEsc(JSON.stringify(ruleSet))+'</div></details>';
     var challenger=a.challengerOf?'<br><span class="muted">challenger of '+sourceEsc(a.challengerOf)+'</span>':'';
     var sampleQuality=String(a.sampleQuality||'INSUFFICIENT_COSTED_SAMPLE');
-    var holdoutText=Number(h.closed||0)+' trades · '+fmtR(h.expectancyR)+' · PF '+fmtPf(h);
-    var rollingText=Number(r.closed||0)+' trades · '+fmtR(r.expectancyR)+' · '+(Number(r.netPnl||0)>=0?'+':'')+'$'+Number(r.netPnl||0).toFixed(2);
+    var holdoutText=Number(h.closed||0)+' trades · '+fmtR(h.expectancyR,h.closed)+' · PF '+fmtPf(h);
+    var rollingText=Number(r.closed||0)>0?Number(r.closed||0)+' trades · '+fmtR(r.expectancyR,r.closed)+' · '+(Number(r.netPnl||0)>=0?'+':'')+'$'+Number(r.netPnl||0).toFixed(2):'-- no costed closes';
     var concentration=a.concentration||{};
     var concentrationText=concentration.topSymbol
       ?sourceEsc(concentration.topSymbol)+' · '+Number(concentration.topSymbolClosedTrades||0)+' trades ('+Number(concentration.topSymbolTradeSharePct||0).toFixed(1)+'%)<br><span class="muted">'+Number(concentration.topSymbolAbsPnlSharePct||0).toFixed(1)+'% abs PnL · net '+(Number(concentration.topSymbolNetPnl||0)>=0?'+':'')+'$'+Number(concentration.topSymbolNetPnl||0).toFixed(2)+'</span>'
       :'-- <span class="muted">no costed closes</span>';
     var timing=fs.timing||{}, fillTime=timing.timeToFirstFill||{}, tp1Time=timing.timeToTp1||{}, closeTime=timing.timeToClose||{};
     var fillText=Number(fs.fillRatePct||0).toFixed(1)+'% filled · '+Number(fs.partialFillRatePct||0).toFixed(1)+'% partial<br><span class="muted">'+Number(fs.expiredRatePct||0).toFixed(1)+'% expired</span><br><span class="muted">avg fill '+fmtElapsed(fillTime.averageMs)+' · TP1 '+fmtElapsed(tp1Time.averageMs)+' · close '+fmtElapsed(closeTime.averageMs)+'</span>';
-    return '<tr><td title="'+filterHint+'"><b>'+sourceEsc(a.label||a.strategyId)+'</b><br><span class="muted">'+sourceEsc(a.strategyId||'--')+' · '+sourceEsc(a.version||'')+'</span>'+challenger+'</td><td><span class="vps-lab-status '+sourceEsc(status)+'">'+sourceEsc(status)+'</span><br><span class="muted">'+sourceEsc(a.status||'ACTIVE')+' · '+sourceEsc(sampleQuality)+'</span></td><td>'+Number(m.closed||0)+' / '+Number(a.closed||0)+'<br><span class="muted">'+Number(a.costCoverage&&a.costCoverage.pct||0).toFixed(1)+'% cost coverage · '+Number(m.sampleAgeDays||0).toFixed(1)+'d</span></td><td style="color:'+color+';">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+'<br><span class="muted">'+fmtR(m.netR)+'</span></td><td>'+fmtR(m.expectancyR)+'<br><span class="muted">$'+Number(m.expectancyPnl||0).toFixed(3)+'/trade</span></td><td>'+fmtPf(m)+'</td><td>'+holdoutText+'<br><span class="muted">'+sourceEsc(h.chronologicalSplit||'')+'</span></td><td>'+Number(m.maxDrawdownPct||0).toFixed(2)+'% · $'+Number(m.maxDrawdownUsd||0).toFixed(2)+'<br><span class="muted">recovery '+fmtDuration(m.maxRecoveryMs)+' · '+Number(m.maxDrawdownR||0).toFixed(2)+'R</span></td><td>'+concentrationText+'</td><td>'+rollingText+'</td><td>'+fillText+'</td><td>$'+Number(a.equity||0).toFixed(2)+'<br><span class="muted">ledger '+(Number(a.pnl||0)>=0?'+':'')+'$'+Number(a.pnl||0).toFixed(2)+'</span></td><td>'+Number(a.active||0)+' active ('+Number(a.pending||0)+' pending)<br><span class="muted">'+Number(a.signalCount||0)+' signals · scan '+sourceEsc(vpsFmtAt(a.lastScanAt))+'</span></td></tr>';
+    var hasNetSample=Number(m.closed||0)>0;
+    var netPnlText=hasNetSample?(pnl>=0?'+':'')+'$'+pnl.toFixed(2):'-- no cost-complete sample';
+    var netRText=hasNetSample?fmtR(m.netR,m.closed):'legacy '+legacyText;
+    var expectancyText=hasNetSample?fmtR(m.expectancyR,m.closed)+'<br><span class="muted">$'+Number(m.expectancyPnl||0).toFixed(3)+'/trade</span>':'--';
+    var drawdownText=hasNetSample?Number(m.maxDrawdownPct||0).toFixed(2)+'% · $'+Number(m.maxDrawdownUsd||0).toFixed(2)+'<br><span class="muted">recovery '+fmtDuration(m.maxRecoveryMs)+' · '+Number(m.maxDrawdownR||0).toFixed(2)+'R</span>':'-- costed sample pending';
+    return '<tr><td title="'+filterHint+'"><b>'+sourceEsc(a.label||a.strategyId)+'</b><br><span class="muted">'+sourceEsc(a.strategyId||'--')+' · '+sourceEsc(a.version||'')+'</span>'+challenger+'<br>'+rulesText+'</td><td><span class="vps-lab-status '+sourceEsc(status)+'">'+sourceEsc(status)+'</span><br><span class="muted">'+sourceEsc(a.status||'ACTIVE')+' · '+sourceEsc(sampleQuality)+'</span></td><td>'+Number(m.closed||0)+' / '+Number(a.closed||0)+'<br><span class="muted">'+Number(a.costCoverage&&a.costCoverage.pct||0).toFixed(1)+'% cost coverage · '+Number(m.sampleAgeDays||0).toFixed(1)+'d</span><br><span class="muted">'+legacyCount+' legacy/incomplete retained</span></td><td style="color:'+(hasNetSample?color:'#8b949e')+';">'+sourceEsc(netPnlText)+'<br><span class="muted">'+sourceEsc(netRText)+'</span>'+(hasNetSample&&legacyCount?'<br><span class="muted">Legacy: '+sourceEsc(legacyText)+'</span>':'')+'</td><td>'+expectancyText+'</td><td>'+(hasNetSample?fmtPf(m):'--')+'</td><td>'+holdoutText+'<br><span class="muted">'+sourceEsc(h.chronologicalSplit||'')+'</span></td><td>'+drawdownText+'</td><td>'+concentrationText+'</td><td>'+rollingText+'</td><td>'+fillText+'</td><td>$'+Number(a.equity||0).toFixed(2)+'<br><span class="muted">ledger '+(Number(a.pnl||0)>=0?'+':'')+'$'+Number(a.pnl||0).toFixed(2)+'</span></td><td>'+Number(a.active||0)+' active ('+Number(a.pending||0)+' pending)<br><span class="muted">'+Number(a.signalCount||0)+' signals · scan '+sourceEsc(vpsFmtAt(a.lastScanAt))+'</span></td></tr>';
   }).join('')+'</tbody></table></div>';
 }
 

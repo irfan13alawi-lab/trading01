@@ -4206,6 +4206,21 @@ function paperLabTimingStats(orders) {
   };
 }
 
+function paperLabLegacyHistory(trades) {
+  const list = Array.isArray(trades) ? trades : [];
+  const wins = list.filter(trade => String(trade && trade.outcome || '').toUpperCase() === 'WIN').length;
+  const losses = list.filter(trade => String(trade && trade.outcome || '').toUpperCase() === 'LOSS').length;
+  const breakeven = list.filter(trade => String(trade && trade.outcome || '').toUpperCase() === 'BREAKEVEN').length;
+  const classified = wins + losses + breakeven;
+  return {
+    closed: list.length, wins, losses, breakeven,
+    unclassified: Math.max(0, list.length - classified),
+    winRatePct: classified ? Number((wins / classified * 100).toFixed(1)) : null,
+    recordedPnl: Number(list.reduce((sum, trade) => sum + paperNumber(trade && trade.pnl), 0).toFixed(4)),
+    pnlBasis: 'AS_RECORDED_COSTS_UNKNOWN'
+  };
+}
+
 function paperLabAccountSummary(account, rawFilters) {
   const filters = paperLabNormaliseFilters(rawFilters);
   const definition = PAPER_LAB_STRATEGIES[account.strategyId] || {};
@@ -4264,6 +4279,7 @@ function paperLabAccountSummary(account, rawFilters) {
       grossPnl: Number(closedAll.reduce((sum, trade) => sum + paperNumber(trade.grossPnl != null ? trade.grossPnl : trade.pnl), 0).toFixed(4)),
       netRUnavailableCount: legacy.length
     },
+    legacyHistory: paperLabLegacyHistory(legacy),
     performanceAfterCosts: metrics,
     rolling50,
     holdout: {...holdout, chronologicalSplit: 'first 70% train / last 30% holdout'},
@@ -4313,6 +4329,7 @@ function paperStrategyLabSummary(includeTrades, options) {
     pnl: account.pnl, returnPct: account.returnPct, drawdownPct: account.drawdownPct,
     active: account.active, pending: account.pending, open: account.open,
     closed: account.closed, wins: account.wins, losses: account.losses,
+    rules: account.rules, execution: account.execution, legacyHistory: account.legacyHistory,
     performanceAfterCosts: compactMetric(account.performanceAfterCosts),
     evaluationStatus: account.evaluationStatus, sampleQuality: account.sampleQuality,
     costCoverage: account.costCoverage,
@@ -4356,7 +4373,15 @@ function paperStrategyLabSummary(includeTrades, options) {
     definition: compact ? {
       perStrategyStartingEquity: PAPER_LAB_STARTING_EQUITY,
       strategies: Object.fromEntries(Object.entries(PAPER_LAB_STRATEGIES).map(([id, definition]) => [id, {
-        label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null
+        label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null,
+        entry: definition.rules && definition.rules.entry || 'Rule not documented',
+        rules: definition.rules || {},
+        exit: definition.trailing && definition.trailing.enabled ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
+          : 'Native strategy targets with TP1 partial close',
+        riskPct: definition.riskPct, minRR: definition.minRR,
+        pendingTtlMs: definition.pendingTtlMs,
+        trailing: definition.trailing || {enabled: false, afterTp1: false, atrMult: 0},
+        execution: definition.execution || 'PAPER_LIMIT'
       }]))
     } : {
       data: 'shared live Bitget Futures ticker + 1m/15m/30m/1h/4h candles; MTF/full freshness checked per rule',
@@ -4369,7 +4394,10 @@ function paperStrategyLabSummary(includeTrades, options) {
           label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null,
           entry: definition.rules && definition.rules.entry || 'Rule not documented', rules: definition.rules || {},
           exit: definition.trailing.enabled ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
-            : 'Native strategy targets with TP1 partial close'
+            : 'Native strategy targets with TP1 partial close',
+          riskPct: definition.riskPct, minRR: definition.minRR,
+          pendingTtlMs: definition.pendingTtlMs, trailing: definition.trailing,
+          execution: definition.execution || 'PAPER_LIMIT'
         }]))
     }
   };

@@ -188,7 +188,7 @@ test('Strategy Lab applies the same strategy, date, symbol, direction, timeframe
 });
 
 test('timing statistics use observed fill/TP1/close latency and ignore missing legacy timestamps', () => {
-  const timingStats = loadFunction('paperLabTimingStats', 'paperLabAccountSummary', {paperNumber});
+  const timingStats = loadFunction('paperLabTimingStats', 'paperLabLegacyHistory', {paperNumber});
   const result = timingStats([
     {filledSize: 1, entryDelayMs: 120000, timeToTp1Ms: 600000, exitDelayMs: 1800000, tp1Hit: true, status: 'CLOSED', closedAt: '2026-09-29T12:30:00Z'},
     {openedAt: '2026-09-29T12:00:00Z', entryDelayMs: 240000, timeToTp1Ms: null, exitDelayMs: 3600000, tp1Hit: false, status: 'CLOSED', closedAt: '2026-09-29T13:00:00Z'},
@@ -198,6 +198,20 @@ test('timing statistics use observed fill/TP1/close latency and ignore missing l
     timeToFirstFill: {samples: 2, averageMs: 180000},
     timeToTp1: {samples: 1, averageMs: 600000},
     timeToClose: {samples: 2, averageMs: 2700000}
+  });
+});
+
+test('legacy Strategy Lab history keeps recorded outcomes and PnL without claiming costs', () => {
+  const legacyHistory = loadFunction('paperLabLegacyHistory', 'paperLabAccountSummary', {paperNumber});
+  const result = legacyHistory([
+    {outcome: 'WIN', pnl: 2.5},
+    {outcome: 'LOSS', pnl: -1.25},
+    {outcome: 'BREAKEVEN', pnl: 0},
+    {outcome: 'CLOSED', pnl: 0.75}
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    closed: 4, wins: 1, losses: 1, breakeven: 1, unclassified: 1,
+    winRatePct: 33.3, recordedPnl: 2, pnlBasis: 'AS_RECORDED_COSTS_UNKNOWN'
   });
 });
 
@@ -395,6 +409,9 @@ test('untouched Strategy Lab limit is cancelled after its configured 120-minute 
 
 test('dashboard inline JavaScript parses after Strategy Lab UI changes', () => {
   const html = fs.readFileSync(path.join(__dirname, 'Nexora_V4_Clean.html'), 'utf8');
+  assert.match(html, /legacy history is preserved as-recorded/);
+  assert.match(html, /Entry \/ exit &amp; version rules/);
+  assert.match(html, /no cost-complete sample/);
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
     .filter(match => !/\bsrc\s*=|\btype\s*=\s*["']application\/json/i.test(match[1]) && match[2].trim());
   assert.ok(scripts.length > 0, 'dashboard should include inline scripts');

@@ -29,7 +29,10 @@ test('compact paper summary omits Strategy Lab scan history while detailed view 
     paperState: {strategyLab: lab},
     paperLabDefaultState: () => lab,
     paperLabAccountSummary: account => ({strategyId: 'MTF_ATR_V2', equity: 200, pnl: 0,
-      closed: 0, active: 1, fillStats: {orders: 1}}),
+      closed: 1, active: 1, rules: {entry: 'legacy entry'}, execution: 'PAPER_LIMIT',
+      legacyHistory: {closed: 1, wins: 1, losses: 0, breakeven: 0, recordedPnl: 2.5,
+        pnlBasis: 'AS_RECORDED_COSTS_UNKNOWN'},
+      fillStats: {orders: 1}}),
     paperLabIsActive: trade => trade.status === 'OPEN',
     paperLabNormaliseFilters: () => ({strategyId: '', symbol: '', direction: '', timeframe: '', regime: '', from: '', to: ''}),
     paperLabTradeMatchesFilters: () => true,
@@ -37,8 +40,8 @@ test('compact paper summary omits Strategy Lab scan history while detailed view 
     PAPER_LAB_MODE: 'SHADOW',
     PAPER_LAB_STARTING_EQUITY: 200,
     PAPER_LAB_PER_SCAN: 3,
-    PAPER_LAB_STRATEGIES: {MTF_ATR_V2: {label: 'MTF + ATR', version: 'MTF_ATR_V2',
-      rules: {entry: 'Rule ' + 'x'.repeat(250)}, trailing: {enabled: true}}},
+    PAPER_LAB_STRATEGIES: {MTF_ATR_V2: {label: 'MTF + ATR', version: 'MTF_ATR_V2', riskPct: 0.5,
+      minRR: 2, pendingTtlMs: 7200000, rules: {entry: 'Rule ' + 'x'.repeat(250)}, trailing: {enabled: true, atrMult: 1.5}}},
     PAPER_LAB_COST_MODEL_VERSION: 'TEST_COST_MODEL',
     PAPER_LAB_MAKER_FEE_RATE: 0.0002,
     PAPER_LAB_TAKER_FEE_RATE: 0.0006,
@@ -56,9 +59,14 @@ test('compact paper summary omits Strategy Lab scan history while detailed view 
   assert.equal(detailed.recentScans.length, 20);
   assert.equal(detailed.overlapEvents.length, 10);
   assert.equal(compact.activeTrades[0].universeVersion, 'LIQUID_TOP60_V1');
+  assert.equal(compact.accounts[0].legacyHistory.pnlBasis, 'AS_RECORDED_COSTS_UNKNOWN');
+  assert.equal(compact.definition.strategies.MTF_ATR_V2.minRR, 2);
+  assert.equal(compact.definition.strategies.MTF_ATR_V2.riskPct, 0.5);
   assert.ok(JSON.stringify(compact).length < JSON.stringify(detailed).length / 5);
-  assert.equal(Object.hasOwn(compactProjection.accounts[0], 'rules'), false);
-  assert.equal(Object.hasOwn(compactProjection.definition.strategies.MTF_ATR_V2, 'rules'), false);
+  assert.equal(compactProjection.accounts[0].legacyHistory.recordedPnl, 2.5);
+  assert.equal(compactProjection.accounts[0].rules.entry, 'legacy entry');
+  assert.equal(compactProjection.definition.strategies.MTF_ATR_V2.rules.entry, 'Rule ' + 'x'.repeat(250));
+  assert.equal(compactProjection.definition.strategies.MTF_ATR_V2.minRR, 2);
   assert.match(source, /paperStatus\(\{details: false, stats: false, labHistory: false\}\)/);
 });
 
