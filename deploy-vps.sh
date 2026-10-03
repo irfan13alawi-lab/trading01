@@ -72,11 +72,25 @@ sudo systemctl enable nexora-proxy nexora-watchdog
 sudo systemctl restart nexora-proxy
 sudo systemctl restart nexora-watchdog
 
-sleep 5
+READY=0
+for attempt in $(seq 1 45); do
+  if curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/healthz" >"$TMP_DIR/health.json" 2>/dev/null && \
+     curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/paper/summary" >"$TMP_DIR/summary.json" 2>/dev/null && \
+     grep -Fq '"ok":true' "$TMP_DIR/health.json" && \
+     grep -Fq '"ok":true' "$TMP_DIR/summary.json"; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+if [ "$READY" -ne 1 ]; then
+  printf 'Nexora proxy did not pass health checks within 90 seconds; previous state backup is preserved.\n' >&2
+  exit 1
+fi
 printf '%s\n' '--- HEALTH ---'
 curl -fsS "http://127.0.0.1:$API_PORT/healthz"
-printf '\n%s\n' '--- PAPER STATUS ---'
-curl -fsS "http://127.0.0.1:$API_PORT/paper/status"
+printf '\n%s\n' '--- PAPER SUMMARY ---'
+curl -fsS "http://127.0.0.1:$API_PORT/paper/summary"
 printf '\n%s\n' '--- SERVICES ---'
 systemctl is-active nexora-proxy
 systemctl is-active nexora-watchdog

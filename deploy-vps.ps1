@@ -86,13 +86,23 @@ mv -f "$tmpdir/prebreakout-scanner.cjs.ready" "$PROXY_DIR/prebreakout-scanner.cj
 sudo install -m 0644 "$tmpdir/index.html" "$WEB_ROOT/.nexora-index-$stamp"
 sudo mv -f "$WEB_ROOT/.nexora-index-$stamp" "$WEB_ROOT/index.html"
 sudo systemctl restart nexora-proxy
-sleep 3
-curl -fsS --max-time 15 "http://127.0.0.1:$API_PORT/healthz" >"$tmpdir/health.json"
-curl -fsS --max-time 15 "http://127.0.0.1:$API_PORT/paper/summary" >"$tmpdir/summary.json"
-grep -Fq '"ok":true' "$tmpdir/health.json"
-grep -Fq '"ok":true' "$tmpdir/summary.json"
-grep -Fq '"buildId":"v5.5.1-fibonacci-shadow-secure-2026-10-03"' "$tmpdir/summary.json"
-grep -Fq '"strategyId":"FIB_SWING_PULLBACK_V1"' "$tmpdir/summary.json"
+ready=0
+for attempt in $(seq 1 45); do
+  if curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/healthz" >"$tmpdir/health.json" 2>/dev/null &&
+     curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/paper/summary" >"$tmpdir/summary.json" 2>/dev/null &&
+     grep -Fq '"ok":true' "$tmpdir/health.json" &&
+     grep -Fq '"ok":true' "$tmpdir/summary.json" &&
+     grep -Fq '"buildId":"v5.5.1-fibonacci-shadow-secure-2026-10-03"' "$tmpdir/summary.json" &&
+     grep -Fq '"strategyId":"FIB_SWING_PULLBACK_V1"' "$tmpdir/summary.json"; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  printf 'VPS service did not pass health and Strategy Lab checks within 90 seconds. Existing state backup was preserved.\n' >&2
+  exit 1
+fi
 printf 'DEPLOY_OK\n'
 '@
 

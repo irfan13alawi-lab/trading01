@@ -260,6 +260,11 @@ const PAPER_TIMEFRAME_MAX_AGE_MS = {
 };
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '').trim();
+function safeTelegramError(error) {
+  let message = error && error.message ? String(error.message) : String(error || 'unknown error');
+  if (TELEGRAM_BOT_TOKEN) message = message.split(TELEGRAM_BOT_TOKEN).join('[REDACTED]');
+  return message.replace(/(https?:\/\/api\.telegram\.org\/bot)[^/\s?]+/gi, '$1[REDACTED]');
+}
 const TELEGRAM_ALERTS_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 const TELEGRAM_SCAN_SUMMARY = String(process.env.TELEGRAM_SCAN_SUMMARY || '').toLowerCase() === 'true';
 const TELEGRAM_COMMANDS_ENABLED = TELEGRAM_ALERTS_ENABLED &&
@@ -920,8 +925,8 @@ async function sendTelegramMessage(text) {
     return true;
   } catch (error) {
     telegramState.lastErrorAt = new Date().toISOString();
-    telegramState.lastError = error.message;
-    console.error('[paper] Telegram alert failed:', error.message);
+    telegramState.lastError = safeTelegramError(error);
+    console.error('[paper] Telegram alert failed:', telegramState.lastError);
     return false;
   } finally {
     clearTimeout(timer);
@@ -1247,8 +1252,8 @@ async function pollTelegramCommands() {
     if (changed) savePaperState();
   } catch (error) {
     telegramState.lastPollErrorAt = new Date().toISOString();
-    telegramState.lastPollError = error.message;
-    console.error('[telegram] command polling failed:', error.message);
+    telegramState.lastPollError = safeTelegramError(error);
+    console.error('[telegram] command polling failed:', telegramState.lastPollError);
   } finally {
     telegramPollBusy = false;
   }
