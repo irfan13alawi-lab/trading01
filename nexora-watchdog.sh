@@ -1,12 +1,13 @@
 #!/bin/sh
 set -u
 
-HEALTH_URL="${NEXORA_HEALTH_URL:-http://127.0.0.1:18085/healthz}"
-STATUS_URL="${NEXORA_STATUS_URL:-http://127.0.0.1:18085/paper/status}"
-STATE_FILE="${NEXORA_WATCHDOG_STATE:-/home/ubuntu/nexora-proxy/.nexora-watchdog-state}"
+API_BASE="${NEXORA_API_BASE:-http://127.0.0.1:${NEXORA_API_PORT:-18085}}"
+HEALTH_URL="${NEXORA_HEALTH_URL:-$API_BASE/healthz}"
+STATUS_URL="${NEXORA_STATUS_URL:-$API_BASE/paper/status}"
+STATE_FILE="${NEXORA_WATCHDOG_STATE:-$HOME/nexora-proxy/.nexora-watchdog-state}"
 INTERVAL="${NEXORA_WATCHDOG_INTERVAL:-60}"
 MAX_SCAN_AGE_SEC="${NEXORA_MAX_SCAN_AGE_SEC:-1800}"
-NODE_BIN="${NEXORA_NODE_BIN:-/home/ubuntu/.local/bin/node}"
+NODE_BIN="${NEXORA_NODE_BIN:-$HOME/.local/bin/node}"
 TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_TOKEN:-}}"
 
 send_alert() {

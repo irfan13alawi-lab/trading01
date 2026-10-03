@@ -6,10 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/nexora-proxy
+WorkingDirectory=%h/nexora-proxy
 Environment=PAPER_BOT_ENABLED=true
 EnvironmentFile=-/etc/nexora/nexora.env
-ExecStart=/home/ubuntu/.local/bin/node /home/ubuntu/nexora-proxy/server.js
+ExecStart=%h/.local/bin/node %h/nexora-proxy/server.js
 Restart=always
 RestartSec=5
 StandardOutput=journal

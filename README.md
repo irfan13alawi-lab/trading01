@@ -15,6 +15,7 @@ Dashboard trading crypto berbasis HTML — paper trading otomatis, analisis Phas
 - **Persistence** — state Paper Bot tersimpan atomik di VPS dengan backup `.bak`; jurnal browser punya export JSON/CSV
 - **Health & evidence** — status sumber `LIVE`/`DELAYED`/`ERROR`, timestamp, alasan sinyal, volume ratio, dan MTF
 - **Paper analytics** — profit factor, expectancy, drawdown, fill rate, pending expired, waktu fill, MFE/MAE, TP1/TP2, stop loss, cohort, strategy version, candle pattern, serta breakdown symbol/arah/timeframe/score
+- **Strategy Lab** — 11 independent shadow-paper ledgers, termasuk `FIB_SWING_PULLBACK_V1`; sizing risiko per strategi memakai persentase equity ledger masing-masing (compounding terpisah), tanpa auto-promotion atau order broker live
 
 ## Data Sources
 
@@ -38,28 +39,32 @@ open Nexora_V4_Clean.html
 
 ## Deploy ke VPS lewat VS Code Remote-SSH
 
-1. Buka folder remote `/var/www/html/nexora` melalui Remote-SSH.
-2. Dari terminal terintegrasi VS Code, unduh `server.js` dan `Nexora_V4_Clean.html` dari branch `main`.
-3. Pasang frontend ke `/var/www/html/nexora/index.html` dan restart `nexora-proxy`.
-4. Pastikan dashboard dibuka melalui `http://43.156.52.203:18084/`, lalu tekan `Ctrl+Shift+R`.
+Konfigurasi host, user, SSH key, folder proxy, document root, dan Node.js disimpan
+di environment lokal/private; jangan masukkan nilainya ke repository publik.
+Jalankan `deploy-vps.ps1` setelah variabel `NEXORA_VPS_HOST`, `NEXORA_VPS_USER`,
+`NEXORA_SSH_KEY_PATH`, `NEXORA_VPS_PROXY_DIR`, `NEXORA_VPS_WEB_ROOT`, dan
+`NEXORA_VPS_NODE_BIN` diisi. Skrip membuat backup file dan state paper,
+memvalidasi JavaScript, me-restart service, lalu smoke-test API. Jika state memakai
+lokasi kustom, isi juga `NEXORA_VPS_STATE_FILE`.
 
 Atau jalankan `deploy-vps.sh` dari terminal Ubuntu Remote-SSH untuk mengunduh,
-memasang, me-restart, dan memverifikasi seluruh komponen sekaligus.
+memasang, me-restart, dan memverifikasi komponen sekaligus. Isi `NEXORA_WEB_ROOT`
+dan, bila diperlukan, `NEXORA_NODE_BIN` dari konfigurasi privat VPS terlebih dahulu.
 
 File utama frontend hanya satu: `Nexora_V4_Clean.html`.
 
 ## Proxy API VPS
 
-`server.js` adalah proxy HTTP untuk port `18085`. Salin file tersebut ke folder
-proxy di VPS (contoh `/home/ubuntu/nexora-proxy/server.js`), lalu restart proses
-Node yang menjalankannya. Endpoint `/healthz` harus menampilkan `ok: true`.
+`server.js` adalah proxy HTTP. Salin file tersebut ke working directory service
+proxy pada VPS, lalu restart proses Node yang menjalankannya. Endpoint health
+harus menampilkan `ok: true`.
 Proxy mencakup Bitget, BingX, Gate.io, Alternative.me, CoinGecko, dan CoinPaprika.
 Proxy memakai modul bawaan Node.js dengan `node-fetch` sebagai fallback TLS.
 Jalankan `npm install` satu kali di folder proxy, lalu gunakan `node server.js`
 atau `npm start`.
 
-Saat dashboard dibuka dari port `18084`, seluruh market/API yang dipakai dashboard
-melewati proxy VPS agar browser tidak terkena CORS. CoinGecko ditampilkan sebagai
+Saat dashboard dibuka dari web server yang dikonfigurasi, seluruh market/API yang
+dipakai dashboard melewati proxy VPS agar browser tidak terkena CORS. CoinGecko ditampilkan sebagai
 market Spot yang eksplisit; dashboard tidak menyamarkannya sebagai Futures.
 Feed News tersedia melalui `/cryptocompare/news/v1/article/list` dan menggunakan
 CryptoCompare jika tersedia, lalu fallback ke RSS publik CoinDesk. Analisis dampak
@@ -148,6 +153,23 @@ filter `strategyVersion` dan `cohortId` tersedia untuk analisis bersih. Endpoint
 rejection terstruktur, dan kesehatan semua sumber. Endpoint-endpoint ini tidak
 mengubah state dan aman dipakai dashboard untuk monitoring.
 
+Strategy Lab memiliki ledger virtual `$200` terpisah per strategi. Risiko per
+trade dihitung ulang dari equity ledger itu (default `0.5%`), sehingga sizing
+menyusut setelah rugi dan bertambah setelah profit; ini compounding paper yang
+terisolasi, bukan penambahan dana nyata. Penambahan strategi dilakukan secara
+aditif: normalisasi state mempertahankan equity, posisi aktif, dan trade lama,
+serta hanya membuat ledger `$200` kosong untuk ID strategi yang benar-benar baru.
+
+`FIB_SWING_PULLBACK_V1` adalah challenger paper terpisah. Ia hanya memakai
+swing H1 yang sudah terkonfirmasi oleh dua candle tertutup di sisi kanan, dengan
+impuls minimal `2 ATR`; bias H4/H1 harus searah dan candle M15 harus mereclaim
+zona retracement `0.50–0.618`. Entry berupa limit di `0.618`, SL di luar `0.786`
+ditambah buffer `0.1 H1 ATR`, TP1 di swing asal, dan TP2 di extension `1.272`.
+RR minimum tetap `2`, pending kedaluwarsa setelah 60 menit, dan hasil tetap
+paper-only. Snapshot menyimpan swing anchor, timestamp konfirmasi, rasio Fib,
+trigger M15, serta versi aturan. Strategi ini tidak mengubah atau me-reset
+ledger strategi lama.
+
 Konfigurasi alert dilakukan hanya pada service VPS, bukan di browser:
 
 ```bash
@@ -160,9 +182,9 @@ Status server dapat dicek melalui `/paper/status` dan `/paper/alerts/status`.
 
 Untuk menerima peringatan ketika proses, scan, atau sumber data VPS Paper Bot
 bermasalah, pasang juga `nexora-watchdog.service`. Buat
-`/etc/nexora/nexora.env` di VPS dengan permission `640` dan isi
+file environment privat yang dirujuk oleh service VPS dengan permission `640` dan isi
 `TELEGRAM_BOT_TOKEN=...` serta `TELEGRAM_CHAT_ID=...`, lalu salin
-kedua file service/script ke `/etc/systemd/system` dan aktifkan watchdog. Dashboard
+kedua file service/script ke direktori unit systemd yang digunakan host dan aktifkan watchdog. Dashboard
 tidak lagi menghidupkan bot browser sebagai fallback ketika proxy VPS mati, supaya
 riwayat paper trading tetap satu sumber.
 Jika ingin ringkasan Telegram untuk setiap scan 15 menit, tambahkan
@@ -171,15 +193,14 @@ History dan statistik mendukung filter `symbol`, `timeframe`, `outcome`,
 `strategyVersion`, `cohortId`, `from`, dan `to`. Untuk evaluasi strategi, tunggu
 minimal 50–100 trade cohort baru yang konsisten sebelum mengubah parameter lagi.
 
-Untuk rotasi journal, pasang `nexora-journald.conf` ke
-`/etc/systemd/journald.conf.d/nexora.conf`, reload `systemd-journald`, lalu jalankan
-`journalctl --vacuum-size=300M` satu kali.
+Konfigurasi rotasi journal tersedia di `nexora-journald.conf`; pasang hanya jika
+ingin mengubah kebijakan retensi log host.
 
 ## Struktur File
 
 ```
 Nexora_V4_Clean.html    # Dashboard utama (single file, semua built-in)
-server.js               # Proxy API HTTP untuk VPS port 18085
+server.js               # Proxy API HTTP untuk backend VPS
 nexora-watchdog.sh      # Watchdog status VPS/Telegram
 nexora-watchdog.service
 nexora-journald.conf    # Batas journal dan retention

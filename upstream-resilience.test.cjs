@@ -20,6 +20,19 @@ function reservePort() {
   });
 }
 
+test('public deployment sources do not hardcode machine-specific VPS addresses or home/web roots', () => {
+  const files = ['README.md', 'deploy-vps.ps1', 'deploy-vps.sh', 'nexora-proxy.service',
+    'nexora-watchdog.service', 'nexora-watchdog.sh'];
+  for (const file of files) {
+    const content = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    const ipv4Literals = content.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+    assert.ok(ipv4Literals.every(address => address.startsWith('127.')),
+      file + ' contains a non-loopback IPv4 literal');
+    assert.doesNotMatch(content, /\/home\/[a-z][a-z0-9_-]*|\/var\/www\/html/i,
+      file + ' contains a user-specific home or web-root path');
+  }
+});
+
 async function waitForHealth(port, child, timeoutMs) {
   const expiresAt = Date.now() + timeoutMs;
   let lastError;
@@ -155,13 +168,14 @@ test('upstream 429, 5xx, abort timeout and Retry-After stay bounded without taki
       assert.equal(compactLabResponse.status, 200);
       const compactLab = await compactLabResponse.json();
       assert.equal(Object.hasOwn(compactLab, 'recentScans'), false);
-      assert.equal(compactLab.strategyCount, 10);
-      assert.equal(compactLab.accounts.length, 10);
+      assert.equal(compactLab.strategyCount, 11);
+      assert.equal(compactLab.accounts.length, 11);
       assert.ok(compactLab.accounts.every(account => account.startingEquity === 200));
       const expectedStrategies = [
         'MTF_ATR_V2', 'SR_REJECTION_V1', 'BREAKOUT_RETEST_V1', 'SMC_LIQUIDITY_V1',
         'RANGE_MEAN_REVERSION_V1', 'PREBREAKOUT_RESEARCH_V1', 'SR_REJECTION_V1.1',
-        'BREAKOUT_RETEST_V1.1', 'RELATIVE_STRENGTH_V1', 'FUNDING_OI_DIVERGENCE_V1'
+        'BREAKOUT_RETEST_V1.1', 'RELATIVE_STRENGTH_V1', 'FUNDING_OI_DIVERGENCE_V1',
+        'FIB_SWING_PULLBACK_V1'
       ];
       assert.deepEqual(compactLab.accounts.map(account => account.strategyId).sort(), expectedStrategies.slice().sort());
       assert.equal(compactLab.definition.strategies['SR_REJECTION_V1.1'].challengerOf, 'SR_REJECTION_V1');
@@ -172,6 +186,7 @@ test('upstream 429, 5xx, abort timeout and Retry-After stay bounded without taki
       assert.equal(compactLab.evaluationGate.requiresManualReview, true);
       assert.ok(compactLab.definition.strategies.RELATIVE_STRENGTH_V1);
       assert.ok(compactLab.definition.strategies.FUNDING_OI_DIVERGENCE_V1);
+      assert.ok(compactLab.definition.strategies.FIB_SWING_PULLBACK_V1);
 
       const historyResponse = await request('http://127.0.0.1:' + port + '/paper/history?limit=1&offset=0');
       assert.equal(historyResponse.status, 200);

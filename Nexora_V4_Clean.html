@@ -739,7 +739,7 @@ label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:
       <div class="card-t"><i class="fa-solid fa-flask"></i> Strategy Lab — Shadow Paper <span class="muted" id="vps-lab-asof">Waiting...</span></div>
       <button class="btn btn-sm btn-blue" onclick="pollPaperStats()"><i class="fa-solid fa-rotate"></i> Refresh Lab</button>
     </div>
-    <div class="vps-lab-note" id="vps-lab-note">Strategy Lab paper-only memakai data Futures live; setiap strategi memiliki ledger $200 terpisah. Histori strategi lama tetap disimpan dan ditampilkan sebagai hasil tercatat; biaya historis yang tidak tersedia tidak direka dan tidak dicampur ke metrik net.</div>
+    <div class="vps-lab-note" id="vps-lab-note">Strategy Lab paper-only memakai data Futures live; setiap strategi memiliki ledger $200 terpisah dan sizing risiko mengikuti equity ledger masing-masing. Strategi lama dan histori trade-nya tetap dipertahankan.</div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0;">
       <select id="vps-lab-filter-strategy" class="inp" style="max-width:220px;"><option value="">All strategies</option></select>
       <input id="vps-lab-filter-symbol" class="inp" placeholder="Symbol" style="max-width:110px;">
@@ -6487,7 +6487,7 @@ function renderStrategyLab(data) {
   }
   if(asOf) asOf.textContent='As of '+vpsFmtAt(data.asOf)+' · '+Number(data.strategyCount||accounts.length)+' strategies';
   var costs=data.costModel||{};
-  if(note) note.textContent='Mode '+String(data.mode||'SHADOW')+' · live futures ticker/candles shared · independent $'+Number(data.startingEquity||200).toFixed(2)+' ledgers · estimated fees maker '+(Number(costs.makerFeeRate||0)*100).toFixed(3)+'% / taker '+(Number(costs.takerFeeRate||0)*100).toFixed(3)+'% · taker slippage '+Number(costs.takerSlippageBps||0)+' bps · fills capped at '+(Number(costs.fillParticipationRate||0)*100).toFixed(1)+'% of 1m quote volume · same-candle stop-first · legacy history is preserved as-recorded; unknown historical costs are excluded from net metrics · CANDIDATE means manual review only; no auto-promotion or risk change · no live broker order'+(data.lastError?' · error: '+data.lastError:'');
+  if(note) note.textContent='Mode '+String(data.mode||'SHADOW')+' · live futures ticker/candles shared · independent $'+Number(data.startingEquity||200).toFixed(2)+' ledgers · risk size uses each ledger current equity (independent compounding) · estimated fees maker '+(Number(costs.makerFeeRate||0)*100).toFixed(3)+'% / taker '+(Number(costs.takerFeeRate||0)*100).toFixed(3)+'% · taker slippage '+Number(costs.takerSlippageBps||0)+' bps · fills capped at '+(Number(costs.fillParticipationRate||0)*100).toFixed(1)+'% of 1m quote volume · same-candle stop-first · legacy history is preserved as-recorded; unknown historical costs are excluded from net metrics · CANDIDATE means manual review only; no auto-promotion or risk change · no live broker order'+(data.lastError?' · error: '+data.lastError:'');
   if(kpis) {
     var totalPnl=Number(data.totalPnl||0);
     kpis.innerHTML=[
@@ -6517,9 +6517,9 @@ function renderStrategyLab(data) {
     var entryRule=strategyDef.entry||ruleSet.entry||'Rule not documented';
     var exitRule=strategyDef.exit||'Native strategy targets; see parameters';
     var trail=strategyDef.trailing||{};
-    var riskText=strategyDef.riskPct==null?'--':Number(strategyDef.riskPct).toFixed(2)+'%';
+    var riskText=strategyDef.riskPct==null?'--':Number(strategyDef.riskPct).toFixed(2)+'% of current ledger equity';
     var rrText=strategyDef.minRR==null?'--':Number(strategyDef.minRR).toFixed(2)+'R';
-    var rulesText='<details><summary>Entry / exit &amp; version rules</summary><div class="muted" style="white-space:normal;max-width:340px;margin-top:4px;">Definition: registered '+sourceEsc(a.version||strategyDef.version||'')+' version; old per-trade snapshots are not reconstructed.<br><b>Entry:</b> '+sourceEsc(entryRule)+'<br><b>Exit:</b> '+sourceEsc(exitRule)+'<br><b>Risk / min RR:</b> '+sourceEsc(riskText)+' / '+sourceEsc(rrText)+'<br><b>Trailing:</b> '+(trail.enabled?'after TP1 · '+Number(trail.atrMult||0)+' ATR':'off')+'<br><b>Parameters:</b> '+sourceEsc(JSON.stringify(ruleSet))+'</div></details>';
+    var rulesText='<details><summary>Entry / exit &amp; version rules</summary><div class="muted" style="white-space:normal;max-width:340px;margin-top:4px;">Definition: registered '+sourceEsc(a.version||strategyDef.version||'')+' version; old per-trade snapshots are not reconstructed.<br><b>Entry:</b> '+sourceEsc(entryRule)+'<br><b>Exit:</b> '+sourceEsc(exitRule)+'<br><b>Risk / min RR:</b> '+sourceEsc(riskText)+' / '+sourceEsc(rrText)+'<br><b>Sizing:</b> compounds independently per ledger; losses shrink and gains grow dollar risk.<br><b>Trailing:</b> '+(trail.enabled?'after TP1 · '+Number(trail.atrMult||0)+' ATR':'off')+'<br><b>Parameters:</b> '+sourceEsc(JSON.stringify(ruleSet))+'</div></details>';
     var challenger=a.challengerOf?'<br><span class="muted">challenger of '+sourceEsc(a.challengerOf)+'</span>':'';
     var sampleQuality=String(a.sampleQuality||'INSUFFICIENT_COSTED_SAMPLE');
     var holdoutText=Number(h.closed||0)+' trades · '+fmtR(h.expectancyR,h.closed)+' · PF '+fmtPf(h);
@@ -6767,7 +6767,7 @@ function checkAdminStatus() {
     if(status) {status.textContent = !configured ? 'Disabled on VPS — token belum diset' : unlocked ? 'Token supplied · controls ready' : 'Configured · masukkan token'; status.style.color=!configured?'#e3b341':unlocked?'#3fb950':'#e3b341';}
     if(controls) controls.style.display=unlocked?'block':'none';
     if(settings && settings.settings) fillAdminSettings(settings.settings);
-    if(!configured) adminLog('Set PAPER_ADMIN_TOKEN di /etc/nexora/nexora.env lalu restart service.', '#e3b341');
+    if(!configured) adminLog('Set PAPER_ADMIN_TOKEN di environment service privat lalu restart service.', '#e3b341');
     else if(unlocked) adminLog('Token hanya aktif di memori tab ini. Belum ada perubahan yang dikirim.', '#3fb950');
   }).catch(function(error){if(status){status.textContent='Status unavailable';status.style.color='#f85149';} adminLog(error.message || error, '#f85149');});
 }

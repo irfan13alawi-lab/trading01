@@ -78,7 +78,7 @@ const PAPER_MIN_RR = Math.max(1.5, Math.min(5,
     ? Number(process.env.PAPER_MIN_RR) : 2));
 // Expose a verifiable build marker in health/status responses so the browser
 // cannot be mistaken for an older cached HTML or VPS process.
-const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.4.0-strategy-lab-10-ledgers-2026-09-29');
+const PAPER_BUILD_ID = String(process.env.PAPER_BUILD_ID || 'v5.5.1-fibonacci-shadow-secure-2026-10-03');
 // Schema 13 adds costed, versioned Strategy Lab ledgers and execution events.
 // Existing trades remain readable and are explicitly tagged when their original
 // signal/config/cost snapshots were never recorded; no historical values are fabricated.
@@ -226,6 +226,19 @@ const PAPER_LAB_STRATEGIES = {
     rules: {entry: 'Fresh extreme funding + rising 1h OI + price/MTF reversal trigger',
       fundingAbsMin: 0.0002, fundingPercentile: 80, oiChange1hPct: 1, triggerChangePct: 0.2,
       stopAtr: 1.5, tp1R: 2, tp2R: 3}
+  },
+  FIB_SWING_PULLBACK_V1: {
+    label: 'Fibonacci Swing Pullback', version: 'FIB_SWING_PULLBACK_V1', enabled: true, riskPct: 0.5,
+    minRR: 2, maxActive: PAPER_LAB_MAX_ACTIVE, pendingTtlMs: 60 * 60 * 1000,
+    trailing: {enabled: false, afterTp1: false, atrMult: 0},
+    rules: {
+      entry: 'H4/H1 searah + confirmed H1 impulse (2-bar pivot) + retrace 0.50–0.618 + M15 reclaim trigger; limit di 0.618',
+      exit: 'SL di luar 0.786 + 0.1 H1 ATR; TP1 di swing asal; TP2 di extension 1.272; 50% TP1 lalu SL breakeven',
+      swingTimeframe: 'H1', pivotLeftBars: 2, pivotRightBars: 2, maxLookbackBars: 80,
+      impulseMinAtr: 2, entryRetracement: 0.618, triggerRetracement: 0.5,
+      invalidationRetracement: 0.786, stopAtrBuffer: 0.1, targetExtension: 1.272,
+      triggerTimeframe: 'M15', pendingExpiryMinutes: 60
+    }
   }
 };
 const PAPER_DEFAULT_STRATEGY_SETTINGS = {
@@ -3501,6 +3514,93 @@ function paperLabEvaluateFundingOi(pair, account) {
     : paperLabReject(account.strategyId, pair, setupResult.validation.reasonCodes, setupResult.validation.reasons);
 }
 
+function paperLabEvaluateFibonacci(pair, account) {
+  const base = paperLabRequireMtf(pair);
+  if (base) return {...base, strategyId: account.strategyId};
+  const h4 = paperLabTimeframe(pair, 'H4');
+  const h1 = paperLabTimeframe(pair, 'H1');
+  const m30 = paperLabTimeframe(pair, 'M30');
+  const m15 = paperLabTimeframe(pair, 'M15');
+  const rules = PAPER_LAB_STRATEGIES[account.strategyId].rules;
+  const direction = h4.direction === h1.direction && ['LONG', 'SHORT'].includes(h4.direction)
+    ? h4.direction : null;
+  if (!direction) return paperLabReject(account.strategyId, pair, ['FIB_HIGHER_TF_NOT_ALIGNED'],
+    ['H4 dan H1 harus memiliki bias arah yang sama']);
+  if (m30.direction === (direction === 'LONG' ? 'SHORT' : 'LONG')) {
+    return paperLabReject(account.strategyId, pair, ['FIB_M30_OPPOSED'],
+      ['M30 berlawanan dengan bias H4/H1']);
+  }
+
+  const impulse = h1.fibImpulse;
+  if (!impulse || !impulse.ok) return paperLabReject(account.strategyId, pair,
+    [impulse && impulse.reason || 'FIB_SWING_NOT_CONFIRMED'],
+    ['Swing H1 belum terkonfirmasi atau impulsnya belum memenuhi minimum ' + rules.impulseMinAtr + ' ATR']);
+  if (impulse.direction !== direction) return paperLabReject(account.strategyId, pair, ['FIB_IMPULSE_OPPOSED'],
+    ['Impuls H1 terakhir tidak searah dengan bias H4/H1']);
+
+  const start = paperNumber(impulse.start && impulse.start.price);
+  const end = paperNumber(impulse.end && impulse.end.price);
+  const range = Math.abs(end - start);
+  const atr = paperNumber(impulse.atr);
+  if (!(start > 0) || !(end > 0) || !(range > 0) || !(atr > 0)) {
+    return paperLabReject(account.strategyId, pair, ['FIB_SWING_LEVELS_INVALID'], ['Anchor swing atau ATR H1 tidak valid']);
+  }
+  const entryRatio = Number(rules.entryRetracement || 0.618);
+  const triggerRatio = Number(rules.triggerRetracement || 0.5);
+  const invalidationRatio = Number(rules.invalidationRetracement || 0.786);
+  const extension = Number(rules.targetExtension || 1.272);
+  const entry = direction === 'LONG' ? end - range * entryRatio : end + range * entryRatio;
+  const triggerLevel = direction === 'LONG' ? end - range * triggerRatio : end + range * triggerRatio;
+  const invalidation = direction === 'LONG' ? end - range * invalidationRatio : end + range * invalidationRatio;
+  const stopBuffer = atr * Number(rules.stopAtrBuffer || 0.1);
+  const sl = direction === 'LONG' ? invalidation - stopBuffer : invalidation + stopBuffer;
+  const tp1 = end;
+  const tp2 = direction === 'LONG' ? start + range * extension : start - range * extension;
+  const price = paperNumber(pair.price);
+  const indicators = m15.indicators || {};
+  const candleOpen = paperNumber(indicators.open);
+  const candleHigh = paperNumber(indicators.high);
+  const candleLow = paperNumber(indicators.low);
+  const candleClose = paperNumber(indicators.close);
+  const longTrigger = direction === 'LONG' && indicators.candleDirection === 'LONG' &&
+    candleLow <= triggerLevel && candleHigh >= entry && candleLow > invalidation && candleClose > triggerLevel;
+  const shortTrigger = direction === 'SHORT' && indicators.candleDirection === 'SHORT' &&
+    candleHigh >= triggerLevel && candleLow <= entry && candleHigh < invalidation && candleClose < triggerLevel;
+  const priceStillValid = direction === 'LONG'
+    ? price > entry && price < end && price > invalidation
+    : price < entry && price > end && price < invalidation;
+  if (!(longTrigger || shortTrigger) || !priceStillValid) {
+    return paperLabReject(account.strategyId, pair, ['FIB_RETRACE_TRIGGER_NOT_CONFIRMED'], [
+      'Tunggu candle M15 rejection dari zona 0.50–0.618; harga harus tetap di antara entry 0.618 dan swing target, tanpa wick menembus level invalidasi 0.786'
+    ]);
+  }
+  if (!(candleOpen > 0) || !(candleClose > 0)) {
+    return paperLabReject(account.strategyId, pair, ['FIB_M15_CANDLE_INVALID'], ['OHLC candle M15 tidak lengkap']);
+  }
+
+  const setupResult = paperLabCreateSetup(pair, account, direction, {
+    entry, sl, tp1, tp2, atr: paperNumber(m15.atr) || atr,
+    structureSupport: direction === 'LONG' ? start : end,
+    structureResistance: direction === 'LONG' ? end : start
+  }, {
+    exitModel: 'FIB_0786_STOP_SWING_TP_EXTENSION_1272',
+    entryModel: 'H1_FIB_0618_LIMIT_AFTER_M15_RECLAIM',
+    signalState: 'FIB_RETRACE_RECLAIMED',
+    signalReason: 'H4/H1 ' + direction + ' · H1 impulse ' + impulse.impulseAtr + ' ATR · M15 reclaimed Fib ' + triggerRatio,
+    strategyEvidence: [
+      'H1 confirmed ' + impulse.start.type + ' ' + start + ' at ' + impulse.start.candleAt +
+        ' → ' + impulse.end.type + ' ' + end + ' at ' + impulse.end.candleAt,
+      'H1 impulse ' + impulse.impulseAtr + ' ATR; pivots confirmed with 2 right-hand closed candles',
+      'Fib zone 0.50–0.618; limit ' + entryRatio + ' at ' + paperNumber(entry).toPrecision(8),
+      'M15 ' + (m15.lastClosedCandleAt || 'closed candle') + ' rejected zone in ' + direction + ' direction',
+      'SL beyond ' + invalidationRatio + ' plus ' + rules.stopAtrBuffer + ' H1 ATR; TP1 swing, TP2 ' + extension + ' extension'
+    ]
+  });
+  return setupResult.validation.ok
+    ? {ok: true, setup: setupResult.setup, validation: setupResult.validation, reason: 'Fibonacci swing pullback ' + direction}
+    : paperLabReject(account.strategyId, pair, setupResult.validation.reasonCodes, setupResult.validation.reasons);
+}
+
 function paperLabEvaluateCandidate(pair, strategyId, account) {
   if (!pair || !account || !account.enabled) {
     return paperLabReject(strategyId, pair, ['STRATEGY_DISABLED'], ['Strategi disabled']);
@@ -3514,6 +3614,7 @@ function paperLabEvaluateCandidate(pair, strategyId, account) {
     case 'PREBREAKOUT_RESEARCH_V1': return paperLabEvaluatePrebreakout(pair, account);
     case 'RELATIVE_STRENGTH_V1': return paperLabEvaluateRelativeStrength(pair, account);
     case 'FUNDING_OI_DIVERGENCE_V1': return paperLabEvaluateFundingOi(pair, account);
+    case 'FIB_SWING_PULLBACK_V1': return paperLabEvaluateFibonacci(pair, account);
     default: return paperLabReject(strategyId, pair, ['STRATEGY_UNKNOWN'], ['Strategi tidak dikenal']);
   }
 }
@@ -4376,8 +4477,9 @@ function paperStrategyLabSummary(includeTrades, options) {
         label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null,
         entry: definition.rules && definition.rules.entry || 'Rule not documented',
         rules: definition.rules || {},
-        exit: definition.trailing && definition.trailing.enabled ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
-          : 'Native strategy targets with TP1 partial close',
+        exit: definition.rules && definition.rules.exit || (definition.trailing && definition.trailing.enabled
+          ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
+          : 'Native strategy targets with TP1 partial close'),
         riskPct: definition.riskPct, minRR: definition.minRR,
         pendingTtlMs: definition.pendingTtlMs,
         trailing: definition.trailing || {enabled: false, afterTp1: false, atrMult: 0},
@@ -4393,8 +4495,9 @@ function paperStrategyLabSummary(includeTrades, options) {
         : {
           label: definition.label, version: definition.version, challengerOf: definition.challengerOf || null,
           entry: definition.rules && definition.rules.entry || 'Rule not documented', rules: definition.rules || {},
-          exit: definition.trailing.enabled ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
-            : 'Native strategy targets with TP1 partial close',
+          exit: definition.rules && definition.rules.exit || (definition.trailing.enabled
+            ? 'Native ATR/structure; TP1 partial, break-even + trailing as configured'
+            : 'Native strategy targets with TP1 partial close'),
           riskPct: definition.riskPct, minRR: definition.minRR,
           pendingTtlMs: definition.pendingTtlMs, trailing: definition.trailing,
           execution: definition.execution || 'PAPER_LIMIT'
@@ -5135,6 +5238,67 @@ async function fetchPaperMonitorBars(symbols) {
   return bars;
 }
 
+function paperFibonacciImpulse(rows, referenceNow, intervalMs, currentAtr, minImpulseAtr, maxLookbackBars) {
+  const now = Number.isFinite(Number(referenceNow)) ? Number(referenceNow) : Date.now();
+  const interval = Math.max(1, Number(intervalMs) || 60 * 60 * 1000);
+  const lookback = Math.max(10, Math.min(250, Math.floor(Number(maxLookbackBars) || 80)));
+  const candles = (Array.isArray(rows) ? rows : []).filter(row => row &&
+    Number.isFinite(Number(row.ts)) && Number(row.ts) + interval <= now &&
+    Number.isFinite(Number(row.high)) && Number.isFinite(Number(row.low)) &&
+    Number(row.high) >= Number(row.low)).slice(-lookback);
+  if (candles.length < 5) return {ok: false, reason: 'FIB_H1_CANDLES_INCOMPLETE'};
+
+  const pivots = [];
+  for (let index = 2; index < candles.length - 2; index++) {
+    const row = candles[index];
+    const neighbors = candles.slice(index - 2, index + 3).filter((_, offset) => offset !== 2);
+    const isHigh = neighbors.every(item => Number(row.high) >= Number(item.high)) &&
+      neighbors.some(item => Number(row.high) > Number(item.high));
+    const isLow = neighbors.every(item => Number(row.low) <= Number(item.low)) &&
+      neighbors.some(item => Number(row.low) < Number(item.low));
+    if (isHigh === isLow) continue;
+    const pivot = {
+      type: isHigh ? 'HIGH' : 'LOW',
+      price: Number(isHigh ? row.high : row.low),
+      candleAt: Number(row.ts) + interval,
+      confirmedAt: Number(candles[index + 2].ts) + interval
+    };
+    const previous = pivots[pivots.length - 1];
+    if (previous && previous.type === pivot.type) {
+      const moreExtreme = pivot.type === 'HIGH' ? pivot.price > previous.price : pivot.price < previous.price;
+      if (moreExtreme) pivots[pivots.length - 1] = pivot;
+    } else {
+      pivots.push(pivot);
+    }
+  }
+  if (pivots.length < 2) return {ok: false, reason: 'FIB_SWING_NOT_CONFIRMED'};
+
+  const start = pivots[pivots.length - 2];
+  const end = pivots[pivots.length - 1];
+  if (start.type === end.type || start.confirmedAt > now || end.confirmedAt > now) {
+    return {ok: false, reason: 'FIB_SWING_NOT_CONFIRMED'};
+  }
+  const range = Math.abs(end.price - start.price);
+  const atr = Number(currentAtr);
+  if (!(range > 0) || !(atr > 0) || !Number.isFinite(atr)) {
+    return {ok: false, reason: 'FIB_ATR_UNAVAILABLE'};
+  }
+  const impulseAtr = range / atr;
+  const minimum = Math.max(0, Number(minImpulseAtr) || 2);
+  if (impulseAtr < minimum) {
+    return {ok: false, reason: 'FIB_IMPULSE_TOO_SMALL', impulseAtr: Number(impulseAtr.toFixed(3)), minimumImpulseAtr: minimum};
+  }
+  return {
+    ok: true,
+    direction: start.type === 'LOW' && end.type === 'HIGH' ? 'LONG' : 'SHORT',
+    start: {...start, candleAt: new Date(start.candleAt).toISOString(), confirmedAt: new Date(start.confirmedAt).toISOString()},
+    end: {...end, candleAt: new Date(end.candleAt).toISOString(), confirmedAt: new Date(end.confirmedAt).toISOString()},
+    range: Number(range.toFixed(12)), atr: Number(atr.toFixed(12)),
+    impulseAtr: Number(impulseAtr.toFixed(3)), pivotLeftBars: 2, pivotRightBars: 2,
+    lookbackBars: candles.length
+  };
+}
+
 function paperTimeframeEvidence(rows, timeframe, referenceNow) {
   const observedAt = Number.isFinite(Number(referenceNow)) ? Number(referenceNow) : Date.now();
   const indicators = paperIndicatorSnapshot(rows);
@@ -5143,6 +5307,7 @@ function paperTimeframeEvidence(rows, timeframe, referenceNow) {
       timeframe, direction: 'NEUTRAL', verdict: 'NO_DATA',
       status: Array.isArray(rows) && rows.length ? 'PARTIAL' : 'UNAVAILABLE',
       sampleSize: Array.isArray(rows) ? rows.length : 0, indicators: null,
+      fibImpulse: null,
       lastClosedCandleAt: rows && rows._nexoraLatestClosedTs
         ? new Date(rows._nexoraLatestClosedTs).toISOString() : null,
       isClosed: false,
@@ -5156,6 +5321,8 @@ function paperTimeframeEvidence(rows, timeframe, referenceNow) {
   const maxAgeMs = PAPER_TIMEFRAME_MAX_AGE_MS[timeframe] || 60 * 60 * 1000;
   const stale = ageMs != null && ageMs > maxAgeMs;
   const complete = indicators.sampleSize >= PAPER_MIN_CANDLES && isClosed;
+  const fibImpulse = timeframe === 'H1'
+    ? paperFibonacciImpulse(rows, observedAt, intervalMs, indicators.atr, 2, 80) : null;
   return {
     timeframe, direction: indicators.direction,
     verdict: stale ? 'STALE' : !complete ? 'PARTIAL'
@@ -5165,6 +5332,7 @@ function paperTimeframeEvidence(rows, timeframe, referenceNow) {
     candleAt: indicators.candleAt, support: indicators.support,
     resistance: indicators.resistance, atr: indicators.atr, atrPct: indicators.atrPct,
     volumeRatio: indicators.volumeRatio, indicators: indicators.indicators,
+    fibImpulse,
     lastClosedCandleAt: last && last.ts ? new Date(last.ts).toISOString() : null,
     isClosed,
     fetchedAt: rows._nexoraFetchedAt || null,
@@ -7120,7 +7288,7 @@ function paperAdminAuthorized(req, requestUrl) {
 
 function requirePaperAdmin(req, requestUrl, res) {
   if (!PAPER_ADMIN_TOKEN) {
-    paperControlError(res, 503, 'Admin controls disabled: set PAPER_ADMIN_TOKEN in /etc/nexora/nexora.env');
+    paperControlError(res, 503, 'Admin controls disabled: set PAPER_ADMIN_TOKEN in the protected service environment');
     return false;
   }
   if (!paperAdminAuthorized(req, requestUrl)) {

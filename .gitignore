@@ -18,6 +18,7 @@ paper-bot-state.json*
 
 # Backup files
 *.bak
+*.pre-*
 *_backup.*
 
 # Old versions (keep only latest)
@@ -31,3 +32,5 @@ npm-debug.log
 __pycache__/
 *.pyc
 .env
+*.local.ps1
+deploy.local.*

@@ -138,6 +138,82 @@ test('funding/OI one-hour price trigger uses one completed H1 candle, not three-
   assert.equal(closedBarChange({indicators: {open: 0, close: 99.7}}), null);
 });
 
+test('Fibonacci swing uses confirmed closed H1 pivots and ignores an unclosed future-looking candle', () => {
+  const impulse = loadFunction('paperFibonacciImpulse', 'paperTimeframeEvidence', {paperNumber});
+  const interval = 60 * 60 * 1000;
+  const start = Date.parse('2026-10-01T00:00:00.000Z');
+  const prices = [100, 101, 99, 95, 100, 102, 104, 106, 108, 110, 108, 107, 106, 105, 104];
+  const rows = prices.map((price, index) => ({ts: start + index * interval,
+    open: price, close: price, high: price + 1, low: price - 1}));
+  rows[3].low = 90;
+  rows[9].high = 112;
+  const asOf = start + rows.length * interval;
+  const confirmed = impulse(rows, asOf, interval, 3, 2, 80);
+  assert.equal(confirmed.ok, true);
+  assert.equal(confirmed.direction, 'LONG');
+  assert.equal(confirmed.start.price, 90);
+  assert.equal(confirmed.end.price, 112);
+  assert.ok(Date.parse(confirmed.end.confirmedAt) <= asOf);
+  const unclosed = rows.concat([{ts: asOf, open: 200, close: 200, high: 1000, low: 199}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(impulse(unclosed, asOf, interval, 3, 2, 80))),
+    JSON.parse(JSON.stringify(confirmed)));
+});
+
+test('Fibonacci paper strategy requires aligned higher timeframes and a confirmed M15 reclaim', () => {
+  let captured = null;
+  const evaluate = loadFunction('paperLabEvaluateFibonacci', 'paperLabEvaluateCandidate', {
+    paperLabRequireMtf: () => null,
+    paperLabTimeframe: (pair, timeframe) => pair.mtf[timeframe],
+    PAPER_LAB_STRATEGIES: {FIB_SWING_PULLBACK_V1: {rules: {
+      impulseMinAtr: 2, entryRetracement: 0.618, triggerRetracement: 0.5,
+      invalidationRetracement: 0.786, stopAtrBuffer: 0.1, targetExtension: 1.272
+    }}},
+    paperLabCreateSetup: (pair, account, direction, levels, metadata) => {
+      captured = {direction, levels, metadata};
+      return {setup: {...levels, dir: direction, ...metadata}, validation: {ok: true, rr: 2.8}};
+    },
+    paperLabReject: (strategyId, pair, codes, reasons) => ({ok: false, strategyId, codes, reasons}),
+    paperNumber
+  });
+  const account = {strategyId: 'FIB_SWING_PULLBACK_V1'};
+  const pair = {sym: 'BTC', price: 109.5, mtfStatus: 'FULL', dataQuality: 'FULL', mtf: {
+    H4: {status: 'FULL', direction: 'LONG'}, H1: {status: 'FULL', direction: 'LONG', atr: 5,
+      fibImpulse: {ok: true, direction: 'LONG', start: {type: 'LOW', price: 100, candleAt: 'a'},
+        end: {type: 'HIGH', price: 120, candleAt: 'b'}, range: 20, atr: 5, impulseAtr: 4}},
+    M30: {status: 'FULL', direction: 'LONG'},
+    M15: {status: 'FULL', direction: 'LONG', atr: 1.2, lastClosedCandleAt: '2026-10-03T06:15:00.000Z',
+      indicators: {open: 109.7, high: 111, low: 109, close: 110.5, candleDirection: 'LONG'}}
+  }};
+  const accepted = evaluate(pair, account);
+  assert.equal(accepted.ok, true);
+  assert.equal(captured.direction, 'LONG');
+  assert.ok(Math.abs(captured.levels.entry - 107.64) < 1e-9);
+  assert.equal(captured.levels.tp1, 120);
+  assert.ok(captured.levels.tp2 > 120);
+  assert.match(captured.metadata.entryModel, /FIB_0618/);
+  assert.ok(captured.metadata.strategyEvidence.some(item => item.includes('0.50–0.618')));
+
+  const rejected = evaluate({...pair, mtf: {...pair.mtf, M15: {...pair.mtf.M15,
+    indicators: {...pair.mtf.M15.indicators, close: 109.8, candleDirection: 'SHORT'}}}}, account);
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.codes.includes('FIB_RETRACE_TRIGGER_NOT_CONFIRMED'));
+
+  const shortPair = {...pair, price: 108, mtf: {
+    H4: {status: 'FULL', direction: 'SHORT'}, H1: {status: 'FULL', direction: 'SHORT', atr: 5,
+      fibImpulse: {ok: true, direction: 'SHORT', start: {type: 'HIGH', price: 120, candleAt: 'a'},
+        end: {type: 'LOW', price: 100, candleAt: 'b'}, range: 20, atr: 5, impulseAtr: 4}},
+    M30: {status: 'FULL', direction: 'SHORT'},
+    M15: {status: 'FULL', direction: 'SHORT', lastClosedCandleAt: '2026-10-03T06:15:00.000Z',
+      indicators: {open: 110.3, high: 113, low: 108, close: 109.5, candleDirection: 'SHORT'}}
+  }};
+  const shortAccepted = evaluate(shortPair, account);
+  assert.equal(shortAccepted.ok, true);
+  assert.equal(captured.direction, 'SHORT');
+  assert.ok(Math.abs(captured.levels.entry - 112.36) < 1e-9);
+  assert.ok(captured.levels.sl > 115.72);
+  assert.ok(captured.levels.tp2 < 100);
+});
+
 test('net performance uses only cost-complete records and reports post-cost risk metrics', () => {
   const metrics = loadFunction('paperLabSimpleNetMetrics', 'paperLabConcentrationMetrics', {
     paperNumber, PAPER_LAB_STARTING_EQUITY: 200,
@@ -237,7 +313,8 @@ test('legacy trade migration preserves recorded result and does not invent execu
 test('Strategy Lab migration preserves the existing ledger and seeds only newly added strategies at $200', () => {
   const strategies = {
     MTF_ATR_V2: {label: 'MTF baseline', version: 'MTF_ATR_V2', enabled: true},
-    RELATIVE_STRENGTH_V1: {label: 'Relative Strength', version: 'RELATIVE_STRENGTH_V1', enabled: true}
+    RELATIVE_STRENGTH_V1: {label: 'Relative Strength', version: 'RELATIVE_STRENGTH_V1', enabled: true},
+    FIB_SWING_PULLBACK_V1: {label: 'Fibonacci Swing Pullback', version: 'FIB_SWING_PULLBACK_V1', enabled: true}
   };
   const defaultAccount = strategyId => ({strategyId, label: strategies[strategyId].label,
     version: strategies[strategyId].version, enabled: true, startingEquity: 200, equityPeak: 200,
@@ -262,8 +339,13 @@ test('Strategy Lab migration preserves the existing ledger and seeds only newly 
   assert.equal(migrated.accounts.MTF_ATR_V2.closedTrades[0].outcome, 'WIN');
   assert.equal(migrated.accounts.MTF_ATR_V2.closedTrades[0].dataCompleteness, 'LEGACY_DATA_INCOMPLETE');
   assert.equal(migrated.accounts.MTF_ATR_V2.activeTrades[0].id, 'open-old');
+  assert.equal(migrated.accounts.MTF_ATR_V2.enabled, true);
   assert.equal(migrated.accounts.RELATIVE_STRENGTH_V1.startingEquity, 200);
   assert.equal(migrated.accounts.RELATIVE_STRENGTH_V1.closedTrades.length, 0);
+  assert.equal(migrated.accounts.FIB_SWING_PULLBACK_V1.enabled, true);
+  assert.equal(migrated.accounts.FIB_SWING_PULLBACK_V1.startingEquity, 200);
+  assert.equal(migrated.accounts.FIB_SWING_PULLBACK_V1.closedTrades.length, 0);
+  assert.equal(migrated.accounts.FIB_SWING_PULLBACK_V1.activeTrades.length, 0);
 });
 
 test('new signal analysis snapshot freezes strategy rules, quote and multi-timeframe indicators', () => {

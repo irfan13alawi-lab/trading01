@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/nexora-proxy
+WorkingDirectory=%h/nexora-proxy
 EnvironmentFile=-/etc/nexora/nexora.env
-ExecStart=/bin/sh /home/ubuntu/nexora-proxy/nexora-watchdog.sh
+ExecStart=/bin/sh %h/nexora-proxy/nexora-watchdog.sh
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
