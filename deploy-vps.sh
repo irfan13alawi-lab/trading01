@@ -76,8 +76,12 @@ READY=0
 for attempt in $(seq 1 45); do
   if curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/healthz" >"$TMP_DIR/health.json" 2>/dev/null && \
      curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:$API_PORT/paper/summary" >"$TMP_DIR/summary.json" 2>/dev/null && \
+     curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:$API_PORT/paper/strategy-lab?details=false&history=false" >"$TMP_DIR/lab.json" 2>/dev/null && \
      grep -Fq '"ok":true' "$TMP_DIR/health.json" && \
-     grep -Fq '"ok":true' "$TMP_DIR/summary.json"; then
+     grep -Fq '"ok":true' "$TMP_DIR/summary.json" && \
+     grep -Fq '"buildId":"v5.5.1-fibonacci-shadow-secure-2026-10-03"' "$TMP_DIR/health.json" && \
+     grep -Fq '"ok":true' "$TMP_DIR/lab.json" && \
+     grep -Fq '"strategyId":"FIB_SWING_PULLBACK_V1"' "$TMP_DIR/lab.json"; then
     READY=1
     break
   fi
